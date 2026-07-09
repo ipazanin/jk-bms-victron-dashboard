@@ -1,0 +1,152 @@
+/*
+ * Dark is the primary, selected experience — a night-watch plane, not an inverted light
+ * theme. Light mode is stepped separately against its own surface.
+ *
+ * Three entity hues carry identity: solar, pack, house. Each is also given a glyph, so
+ * colour is never the only channel. Status colours mean state and are never a data series.
+ */
+
+:root {
+  --plane: #0d0d0d;
+  --surface: #1a1a19;
+  --raised: #232322;
+
+  --ink: #ffffff;
+  --ink-secondary: #c3c2b7;
+  --ink-muted: #898781;
+
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+
+  --solar: #eda100;
+  --pack: #3f93e8;
+  --house: #d55181;
+
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+
+  --focus: #5bc8ff;
+
+  --font-label: 'Saira Semi Condensed', 'Roboto Condensed', system-ui, sans-serif;
+  --font-body: 'IBM Plex Sans', -apple-system, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+
+  --pad: 1.375rem;
+  --radius: 3px;
+
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --plane: #f9f9f7;
+  --surface: #fcfcfb;
+  --raised: #ffffff;
+
+  --ink: #0b0b0b;
+  --ink-secondary: #52514e;
+  --ink-muted: #898781;
+
+  --gridline: #e1e0d9;
+  --baseline: #c3c2b7;
+
+  --solar: #b5760a;
+  --pack: #2a78d6;
+  --house: #c23a6e;
+
+  --status-good: #0a8f0a;
+  --status-warning: #d9990f;
+  --status-serious: #d9663f;
+  --status-critical: #c22f2f;
+
+  --focus: #0a6fb5;
+
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--plane);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+.plate {
+  font-family: var(--font-label);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-secondary);
+}
+
+.readout {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  font-size: 0.9375rem;
+}
+
+.hero-figure {
+  font-family: var(--font-body);
+  font-variant-numeric: proportional-nums;
+  font-weight: 600;
+  font-size: 3.5rem;
+  line-height: 1;
+  letter-spacing: -0.01em;
+}
+
+.secondary-figure {
+  font-family: var(--font-body);
+  font-variant-numeric: proportional-nums;
+  font-weight: 600;
+  font-size: 2rem;
+  line-height: 1.05;
+}
+
+.muted {
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+:where(button, input, a, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+@media (max-width: 720px) {
+  .hero-figure {
+    font-size: 2.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
