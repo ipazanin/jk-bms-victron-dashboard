@@ -64,6 +64,7 @@ export class DemoSource {
 
   /** `withSolar: false` replays the battery alone, to exercise the degraded page. */
   async start(withSolar = true): Promise<void> {
+    this.stop() // idempotent: a second start must not orphan the first interval
     this.withSolar = withSolar
     if (!this.timeline) {
       const response = await fetch(`${import.meta.env.BASE_URL}demo-timeline.json`)

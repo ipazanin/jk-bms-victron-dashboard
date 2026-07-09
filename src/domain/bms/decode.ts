@@ -8,8 +8,14 @@
  *
  * The BMS also reports its own delta / highest-cell / lowest-cell, but those fields lag
  * the voltage block by at least one sample, so they are recomputed here instead.
+ *
+ * Pack power at 154 is an UNSIGNED MAGNITUDE, unlike the signed current beside it at 158.
+ * A discharge frame read from the hardware carries current bytes `0e e2 ff ff` (−7.666 A)
+ * next to power bytes `41 98 01 00` (104.513 W = |V × I|). Reading it signed would be
+ * wrong; the sign lives on the current, and only there.
  */
 
+import { MAX_CELLS } from './protocol'
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from './types'
 
 const MILLI = 0.001
@@ -57,7 +63,8 @@ function popCount(value: number): number {
 
 export function decodeCellInfo(frame: Uint8Array): BatterySnapshot {
   const data = view(frame)
-  const cellCount = popCount(data.getUint32(ENABLED_CELL_MASK, true))
+  // A corrupt mask must not make us read past the 32-cell block.
+  const cellCount = Math.min(MAX_CELLS, popCount(data.getUint32(ENABLED_CELL_MASK, true)))
 
   const cellVoltages: number[] = []
   const cellResistances: number[] = []
@@ -66,6 +73,7 @@ export function decodeCellInfo(frame: Uint8Array): BatterySnapshot {
     cellResistances.push(data.getUint16(CELL_RESISTANCE_BASE + index * 2, true) * MILLI)
   }
 
+  const populated = cellVoltages.length > 0
   const highest = cellVoltages.reduce((best, value, index) => (value > cellVoltages[best] ? index : best), 0)
   const lowest = cellVoltages.reduce((best, value, index) => (value < cellVoltages[best] ? index : best), 0)
 
@@ -73,9 +81,9 @@ export function decodeCellInfo(frame: Uint8Array): BatterySnapshot {
     cellVoltages,
     cellResistances,
     averageCellVoltage: data.getUint16(AVERAGE_CELL_VOLTAGE, true) * MILLI,
-    cellDelta: cellVoltages[highest] - cellVoltages[lowest],
-    highestCell: highest + 1,
-    lowestCell: lowest + 1,
+    cellDelta: populated ? cellVoltages[highest] - cellVoltages[lowest] : 0,
+    highestCell: populated ? highest + 1 : 0,
+    lowestCell: populated ? lowest + 1 : 0,
     packVoltage: data.getUint32(PACK_VOLTAGE, true) * MILLI,
     power: data.getUint32(PACK_POWER, true) * MILLI,
     current: data.getInt32(PACK_CURRENT, true) * MILLI,

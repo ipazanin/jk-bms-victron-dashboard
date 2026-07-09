@@ -104,6 +104,10 @@ Protocol offsets are easy to get subtly wrong, so none of them are taken on trus
 - **Current sign** was settled empirically against the BMS's own coulomb counter: over 114 s the
   remaining capacity fell at an implied −8.49 A while the decoder read a mean of −8.24 A. Positive is
   charging.
+- **Pack power is an unsigned magnitude**, even though the current beside it is signed. A captured
+  discharge frame carries current bytes `0e e2 ff ff` (−7.666 A) next to power bytes `41 98 01 00`
+  (104.513 W = |V × I|). Reading power as `int32` "for consistency" is a plausible-sounding change
+  that this frame refutes; it is committed as a regression fixture.
 - **The Victron record** is checked against a synthetic AES-CTR test vector encrypted under a
   throwaway key, so the fixture is self-contained and leaks nothing.
 

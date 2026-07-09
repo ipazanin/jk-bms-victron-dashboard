@@ -66,18 +66,25 @@ export class JkBmsClient {
     this.device = device
     device.addEventListener('gattserverdisconnected', this.handleDisconnect)
 
-    const server = await device.gatt!.connect()
-    const service = await server.getPrimaryService(JK_SERVICE)
-    const characteristic = await service.getCharacteristic(JK_CHARACTERISTIC)
-    this.characteristic = characteristic
+    try {
+      const server = await device.gatt!.connect()
+      const service = await server.getPrimaryService(JK_SERVICE)
+      const characteristic = await service.getCharacteristic(JK_CHARACTERISTIC)
+      this.characteristic = characteristic
 
-    // Attach the listener and subscribe before commanding, or the first response frame
-    // arrives with no notification context and Chrome silently drops it.
-    characteristic.addEventListener('characteristicvaluechanged', this.handleValue)
-    await characteristic.startNotifications()
+      // Attach the listener and subscribe before commanding, or the first response frame
+      // arrives with no notification context and Chrome silently drops it.
+      characteristic.addEventListener('characteristicvaluechanged', this.handleValue)
+      await characteristic.startNotifications()
 
-    await this.request(CMD_DEVICE_INFO)
-    await this.request(CMD_CELL_INFO)
+      await this.request(CMD_DEVICE_INFO)
+      await this.request(CMD_CELL_INFO)
+    } catch (error) {
+      // A failure part-way through leaves listeners bound and the link open while the app
+      // believes it is idle. Unwind before surfacing.
+      await this.disconnect()
+      throw error
+    }
 
     this.lastFrameAt = Date.now()
     this.stallTimer = setInterval(this.checkStall, STALL_CHECK_MS)
@@ -151,6 +158,10 @@ export class JkBmsClient {
     this.stopStallTimer()
     this.characteristic = null
     this.assembler.reset()
+    if (this.device) {
+      this.device.removeEventListener('gattserverdisconnected', this.handleDisconnect)
+      this.device = null
+    }
     this.handlers.onDisconnect?.()
   }
 

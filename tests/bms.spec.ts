@@ -21,6 +21,7 @@ function bytes(hex: string): Uint8Array {
 }
 
 const cellInfo = bytes(fixtures.bmsCellInfoHex)
+const cellInfoDischarge = bytes(fixtures.bmsCellInfoDischargeHex)
 const deviceInfo = bytes(fixtures.bmsDeviceInfoHex)
 const settings = bytes(fixtures.bmsSettingsHex)
 
@@ -99,6 +100,68 @@ describe('FrameAssembler', () => {
     stream.set([1, 2, 3, 4, 5, 6, 7], 0)
     stream.set(cellInfo, 7)
     expect(assembler.feed(stream)).toHaveLength(1)
+  })
+
+  it('recovers the next frame after a TRUNCATED one, not just a corrupted full one', () => {
+    // A dropped notification leaves half a frame in the stream. Skipping a whole frame
+    // length past the bad header would swallow the good frame that follows it.
+    const assembler = new FrameAssembler()
+    const truncated = cellInfo.subarray(0, 150)
+    const stream = new Uint8Array(truncated.length + deviceInfo.length)
+    stream.set(truncated, 0)
+    stream.set(deviceInfo, truncated.length)
+
+    const emitted = assembler.feed(stream)
+    expect(emitted).toHaveLength(1)
+    expect(frameType(emitted[0])).toBe(FRAME_DEVICE_INFO)
+  })
+
+  it('does not grow without bound when a header is never completed', () => {
+    const assembler = new FrameAssembler()
+    for (let round = 0; round < 50; round += 1) {
+      expect(assembler.feed(cellInfo.subarray(0, 100))).toHaveLength(0)
+    }
+    // A valid frame still parses afterwards, so the buffer was trimmed rather than wedged.
+    const recovered = assembler.feed(cellInfo)
+    expect(recovered.length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('decodeCellInfo on a real DISCHARGE frame', () => {
+  const snapshot = decodeCellInfo(cellInfoDischarge)
+
+  it('reads a negative current', () => {
+    expect(snapshot.current).toBeLessThan(0)
+    expect(snapshot.current).toBeCloseTo(-7.666, 3)
+  })
+
+  it('reports power as an unsigned magnitude, not a signed mirror of current', () => {
+    // The firmware writes |V x I| here; reading it signed would be a no-op on charge and
+    // still correct on discharge only by accident. Byte 157 is zero on a discharge frame.
+    expect(cellInfoDischarge[157]).toBe(0x00)
+    expect(snapshot.power).toBeGreaterThan(0)
+    expect(snapshot.power).toBeCloseTo(Math.abs(snapshot.packVoltage * snapshot.current), 1)
+  })
+
+  it('still satisfies the sum-of-cells invariant while discharging', () => {
+    const sum = snapshot.cellVoltages.reduce((total, volts) => total + volts, 0)
+    expect(Math.abs(sum - snapshot.packVoltage)).toBeLessThan(0.05)
+  })
+})
+
+describe('decodeCellInfo with a zero enabled-cell mask', () => {
+  it('returns empty cells rather than NaN', () => {
+    const frame = cellInfo.slice()
+    frame[70] = 0
+    frame[71] = 0
+    frame[72] = 0
+    frame[73] = 0
+    const snapshot = decodeCellInfo(frame)
+    expect(snapshot.cellVoltages).toHaveLength(0)
+    expect(snapshot.cellDelta).toBe(0)
+    expect(Number.isNaN(snapshot.cellDelta)).toBe(false)
+    expect(snapshot.highestCell).toBe(0)
+    expect(snapshot.lowestCell).toBe(0)
   })
 })
 

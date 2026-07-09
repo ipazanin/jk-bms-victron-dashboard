@@ -9,7 +9,7 @@ import { DemoSource } from '../infrastructure/demo/DemoSource'
 import { detectCapabilities } from '../infrastructure/ble/capabilities'
 import { saveAdvertisementKey } from './storage'
 
-export type LinkState = 'idle' | 'connecting' | 'live' | 'error'
+export type LinkState = 'idle' | 'connecting' | 'listening' | 'live' | 'error'
 export type Source = 'none' | 'live' | 'demo'
 export type FaultLevel = 'good' | 'warning' | 'serious' | 'critical'
 
@@ -162,7 +162,7 @@ const bmsClient = new JkBmsClient({
   onDisconnect: () => {
     bmsState.value = 'idle'
     bmsError.value = 'Lost the BMS. Move closer to the boat’s panel and reconnect.'
-    if (solarState.value !== 'live') source.value = 'none'
+    if (solarState.value === 'idle') source.value = 'none'
   },
   onError: (error) => (bmsError.value = error.message),
 })
@@ -192,10 +192,21 @@ function resetReadings(): void {
   lastSampleAt = 0
 }
 
+/**
+ * Synchronous demo teardown. Awaiting anything before requestDevice would spend the
+ * click's transient activation and the chooser would be refused, so the demo must be
+ * dismantled without yielding to the microtask queue.
+ */
+function teardownDemo(): void {
+  demoSource.stop()
+  resetReadings()
+  source.value = 'none'
+}
+
 export function useTelemetry() {
   async function connectBms(showAllDevices = false): Promise<void> {
     bmsError.value = null
-    if (source.value === 'demo') await stopDemo()
+    if (source.value === 'demo') teardownDemo()
     bmsState.value = 'connecting'
     try {
       await bmsClient.connect(showAllDevices)
@@ -211,15 +222,20 @@ export function useTelemetry() {
   async function disconnectBms(): Promise<void> {
     await bmsClient.disconnect()
     bmsState.value = 'idle'
-    if (solarState.value !== 'live') source.value = 'none'
+    if (solarState.value === 'idle') source.value = 'none'
   }
 
   async function startSolar(key: string): Promise<void> {
     solarError.value = null
+    foreignDeviceSeen.value = false
     solarState.value = 'connecting'
     try {
       await victronScanner.start(key)
       saveAdvertisementKey(key)
+      // The scan is running, but no advertisement has arrived yet. It only becomes 'live'
+      // once a packet decodes under this key — which may never happen if the controller is
+      // out of range or the key is wrong, so the user keeps a way to stop it.
+      solarState.value = 'listening'
       source.value = source.value === 'demo' ? 'demo' : 'live'
     } catch (error) {
       solarState.value = 'idle'
@@ -231,6 +247,7 @@ export function useTelemetry() {
     victronScanner.stop()
     solarState.value = 'idle'
     solar.value = null
+    foreignDeviceSeen.value = false
   }
 
   async function startDemo(withSolar = true): Promise<void> {
@@ -241,9 +258,7 @@ export function useTelemetry() {
   }
 
   async function stopDemo(): Promise<void> {
-    demoSource.stop()
-    resetReadings()
-    source.value = 'none'
+    teardownDemo()
   }
 
   return {

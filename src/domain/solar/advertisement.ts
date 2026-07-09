@@ -24,7 +24,9 @@ import type { AdvertisementHeader, SolarReading } from './types'
 const ADVERTISEMENT_PREFIX = 0x10
 const MIN_HEADER_LENGTH = 8
 const KEY_LENGTH = 16
-const MIN_PLAINTEXT_LENGTH = 11
+/** Everything up to PV power occupies ten bytes; load current needs two more. */
+const MIN_PLAINTEXT_LENGTH = 10
+const LOAD_CURRENT_LENGTH = 12
 
 export function parseAdvertisementKey(hex: string): Uint8Array {
   const cleaned = hex.trim().toLowerCase().replace(/\s+/g, '')
@@ -85,7 +87,11 @@ export function parseSolarRecord(plaintext: Uint8Array): SolarReading {
   const current = data.getInt16(4, true)
   const yieldToday = data.getUint16(6, true)
   const pvPower = data.getUint16(8, true)
-  const loadCurrent = plaintext[10] | ((plaintext[11] ?? 0xff) & 0x01) << 8
+
+  // Load current is nine bits straddling bytes 10 and 11. Without byte 11 the ninth bit is
+  // unknown, and defaulting it either way would fabricate a reading — so report nothing.
+  const loadCurrent =
+    plaintext.length >= LOAD_CURRENT_LENGTH ? plaintext[10] | ((plaintext[11] & 0x01) << 8) : NOT_AVAILABLE_U9
 
   return {
     chargeState: CHARGE_STATES[plaintext[0]] ?? 'unknown',

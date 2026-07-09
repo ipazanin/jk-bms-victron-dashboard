@@ -15,6 +15,7 @@
 import { computed, ref, watch } from 'vue'
 
 import { ampsAbsolute, watts } from '../application/format'
+import { useMediaQuery } from '../application/useMediaQuery'
 
 const props = defineProps<{
   packCurrent: number
@@ -25,17 +26,29 @@ const props = defineProps<{
   pvPower: number | null
 }>()
 
-const WIDTH = 1000
-const HEIGHT = 196
-const CENTER = WIDTH / 2
-// Wide enough that a tip label at full deflection still lands inside the viewBox — the
-// SVG clips its overflow, and letting text escape it made the whole page scroll sideways.
-const MARGIN = 128
-const AXIS_Y = 58
-const PACK_Y = 96
-const SOLAR_Y = 128
-const SPAN_Y = 170
-const BAR_HEIGHT = 13
+/*
+ * Font size inside an SVG is measured in viewBox units, so a fixed viewBox width means
+ * text shrinks with the viewport. Rather than inflate the font on small screens — which
+ * makes the tip labels collide — the whole coordinate system shrinks with it, keeping the
+ * ratio of text to axis roughly constant. MARGIN is sized so a label at full deflection
+ * still lands inside the box: the SVG clips its overflow, because letting text escape it
+ * made the entire page scroll sideways.
+ */
+const DESKTOP = { width: 1000, height: 196, margin: 128, axisY: 58, packY: 96, solarY: 128, spanY: 170, bar: 13 }
+const PHONE = { width: 420, height: 208, margin: 92, axisY: 54, packY: 100, solarY: 138, spanY: 184, bar: 12 }
+
+const compact = useMediaQuery('(max-width: 720px)')
+const box = computed(() => (compact.value ? PHONE : DESKTOP))
+
+const WIDTH = computed(() => box.value.width)
+const HEIGHT = computed(() => box.value.height)
+const CENTER = computed(() => box.value.width / 2)
+const MARGIN = computed(() => box.value.margin)
+const AXIS_Y = computed(() => box.value.axisY)
+const PACK_Y = computed(() => box.value.packY)
+const SOLAR_Y = computed(() => box.value.solarY)
+const SPAN_Y = computed(() => box.value.spanY)
+const BAR_HEIGHT = computed(() => box.value.bar)
 
 const DOMAIN_LADDER = [5, 10, 20, 40, 80, 160, 320]
 
@@ -56,10 +69,14 @@ watch(
   { immediate: true },
 )
 
-const pixelsPerAmp = computed(() => (CENTER - MARGIN) / domain.value)
+const unitsPerAmp = computed(() => (CENTER.value - box.value.margin) / domain.value)
 
 function x(current: number): number {
-  return CENTER + current * pixelsPerAmp.value
+  // Clamp so a reading beyond the ladder's top step is pinned at the axis end rather than
+  // drawn outside the viewBox, where it would be silently clipped.
+  const limit = domain.value
+  const bounded = Math.max(-limit, Math.min(limit, current))
+  return CENTER.value + bounded * unitsPerAmp.value
 }
 
 const solarPresent = computed(() => props.solarCurrent !== null)
@@ -68,12 +85,12 @@ const packTip = computed(() => x(props.packCurrent))
 const solarTip = computed(() => x(props.solarCurrent ?? 0))
 
 const packBar = computed(() => ({
-  x: Math.min(CENTER, packTip.value),
-  width: Math.abs(packTip.value - CENTER),
+  x: Math.min(CENTER.value, packTip.value),
+  width: Math.abs(packTip.value - CENTER.value),
 }))
 const solarBar = computed(() => ({
-  x: Math.min(CENTER, solarTip.value),
-  width: Math.abs(solarTip.value - CENTER),
+  x: Math.min(CENTER.value, solarTip.value),
+  width: Math.abs(solarTip.value - CENTER.value),
 }))
 const spanBar = computed(() => ({
   x: Math.min(packTip.value, solarTip.value),
@@ -92,8 +109,15 @@ const ticks = computed(() => {
 /** Keeps a tip label inside the viewBox when the bar reaches full deflection. */
 function labelX(tip: number, toTheRight: boolean): number {
   const offset = toTheRight ? 12 : -12
-  return Math.min(WIDTH - 8, Math.max(8, tip + offset))
+  return Math.min(WIDTH.value - 6, Math.max(6, tip + offset))
 }
+
+/** Centres the span label over the bracket without letting it slide off either edge. */
+const spanLabelX = computed(() => {
+  const gutter = compact.value ? 62 : 110
+  const centre = spanBar.value.x + spanBar.value.width / 2
+  return Math.min(WIDTH.value - gutter, Math.max(gutter, centre))
+})
 
 const flow = computed(() => {
   if (props.packCurrent > 0.05) return 'charging'
@@ -101,13 +125,27 @@ const flow = computed(() => {
   return 'at rest'
 })
 
-const summary = computed(() =>
-  solarPresent.value && props.houseCurrent !== null
-    ? `Solar delivers ${ampsAbsolute(props.solarCurrent!)}, the pack is ${flow.value} at ` +
+const solarHint = computed(() =>
+  compact.value ? 'Connect the Victron' : 'Connect the Victron to see house load',
+)
+
+const summary = computed(() => {
+  const pack = `The pack is ${flow.value} at ${ampsAbsolute(props.packCurrent)}.`
+
+  if (solarPresent.value && props.houseCurrent !== null) {
+    return (
+      `Solar delivers ${ampsAbsolute(props.solarCurrent!)}, the pack is ${flow.value} at ` +
       `${ampsAbsolute(props.packCurrent)}, so the house is drawing ${ampsAbsolute(props.houseCurrent)}, ` +
       `about ${watts(props.housePower ?? 0)}.`
-    : `The pack is ${flow.value} at ${ampsAbsolute(props.packCurrent)}. Connect the solar controller to see house load.`,
-)
+    )
+  }
+  // Solar can be connected yet still not yield a house load, when the controller reports no
+  // current or voltage. Telling the user to connect it would then be wrong.
+  if (solarPresent.value) {
+    return `${pack} Solar delivers ${ampsAbsolute(props.solarCurrent!)}. House load is unavailable.`
+  }
+  return `${pack} Connect the solar controller to see house load.`
+})
 </script>
 
 <template>
@@ -166,7 +204,7 @@ const summary = computed(() =>
       <template v-else>
         <line :x1="CENTER - 6" :y1="SOLAR_Y" :x2="CENTER + 6" :y2="SOLAR_Y" class="ghost" />
         <text :x="8" :y="SOLAR_Y + 5" class="row-label ghost-ink">SOLAR</text>
-        <text :x="CENTER + 20" :y="SOLAR_Y + 5" class="ghost-ink hint">Connect the Victron to see house load</text>
+        <text :x="CENTER + 20" :y="SOLAR_Y + 5" class="ghost-ink hint">{{ solarHint }}</text>
       </template>
 
       <g v-if="solarPresent && houseCurrent !== null" class="span">
@@ -180,12 +218,7 @@ const summary = computed(() =>
           class="cap"
         />
         <line :x1="spanBar.x" :y1="SPAN_Y" :x2="spanBar.x + spanBar.width" :y2="SPAN_Y" class="rule" />
-        <text
-          :x="Math.min(WIDTH - 90, Math.max(150, spanBar.x + spanBar.width / 2))"
-          :y="SPAN_Y - 14"
-          text-anchor="middle"
-          class="value house-ink"
-        >
+        <text :x="spanLabelX" :y="SPAN_Y - 14" text-anchor="middle" class="value house-ink">
           {{ ampsAbsolute(houseCurrent) }} · {{ watts(housePower ?? 0) }}
         </text>
       </g>
@@ -341,25 +374,21 @@ const summary = computed(() =>
   color: var(--ink-muted);
 }
 
-/*
- * Inside the SVG, font-size is in viewBox units. On a phone the 1000-unit box paints at
- * roughly 390 CSS px, so 15 units would render near 6 px. These sizes hold the rendered
- * text at a legible height once the viewBox is scaled down.
- */
+/* The phone viewBox is 420 units wide and paints near 1:1, so these are close to CSS px. */
 @media (max-width: 720px) {
   .value {
-    font-size: 32px;
+    font-size: 16px;
   }
   .tick-label,
   .pole,
   .row-label {
-    font-size: 27px;
+    font-size: 13px;
   }
   .hint {
-    font-size: 26px;
+    font-size: 13px;
   }
   .legend {
-    gap: 0.5rem 1rem;
+    gap: 0.4rem 1rem;
     font-size: 0.75rem;
   }
 }

@@ -21,6 +21,7 @@ const {
   solarState,
   bmsError,
   solarError,
+  foreignDeviceSeen,
   solarRssi,
   device,
   settings,
@@ -126,6 +127,7 @@ onMounted(() => {
         :solar-state="solarState"
         :bms-error="bmsError"
         :solar-error="solarError"
+        :foreign-device-seen="foreignDeviceSeen"
         :initial-key="initialKey"
         @connect-bms="telemetry.connectBms"
         @disconnect-bms="telemetry.disconnectBms"

@@ -38,11 +38,14 @@ function buildPath(pick: (point: TrendPoint) => number | null, centreZero: boole
   if (values.length < 2) return ''
 
   const maxAbs = Math.max(1, ...values.map(Math.abs))
-  const top = centreZero ? maxAbs : Math.max(1, ...values)
-  const bottom = centreZero ? -maxAbs : 0
+  // House power goes negative whenever another source (an alternator) charges the bank
+  // harder than the panels. Pinning the floor at zero would draw that trace off the strip,
+  // so the band always includes zero and stretches to whatever the data actually reaches.
+  const top = centreZero ? maxAbs : Math.max(1, ...values, 0)
+  const bottom = centreZero ? -maxAbs : Math.min(0, ...values)
+  const span = top - bottom || 1
 
-  const scale = (value: number): number =>
-    STRIP_HEIGHT - ((value - bottom) / (top - bottom)) * STRIP_HEIGHT
+  const scale = (value: number): number => STRIP_HEIGHT - ((value - bottom) / span) * STRIP_HEIGHT
 
   let path = ''
   let started = false
@@ -58,11 +61,22 @@ function buildPath(pick: (point: TrendPoint) => number | null, centreZero: boole
   return path
 }
 
+/** Where zero sits inside a strip, given the band that strip actually spans. */
+function zeroY(pick: (point: TrendPoint) => number | null): number {
+  const values = props.history.map(pick).filter((value): value is number => value !== null)
+  if (!values.length) return STRIP_HEIGHT
+  const top = Math.max(1, ...values, 0)
+  const bottom = Math.min(0, ...values)
+  return STRIP_HEIGHT - ((0 - bottom) / (top - bottom || 1)) * STRIP_HEIGHT
+}
+
 const packPath = computed(() => buildPath((point) => point.packCurrent, true))
 const pvPath = computed(() => buildPath((point) => point.pvPower, false))
 const housePath = computed(() => buildPath((point) => point.housePower, false))
 
 const packZeroY = computed(() => STRIP_HEIGHT / 2)
+const pvZeroY = computed(() => zeroY((point) => point.pvPower))
+const houseZeroY = computed(() => zeroY((point) => point.housePower))
 
 const latest = computed(() => props.history[props.history.length - 1] ?? null)
 const tableRows = computed(() => props.history.slice(-40).reverse())
@@ -93,7 +107,7 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
       <div v-if="hasSolar" class="strip">
         <span class="key"><i class="swatch solar" />PV W</span>
         <svg :viewBox="`0 0 ${WIDTH} ${STRIP_HEIGHT}`" preserveAspectRatio="none" role="img" aria-label="Solar input power trend">
-          <line x1="0" :y1="STRIP_HEIGHT" :x2="WIDTH" :y2="STRIP_HEIGHT" class="zero" />
+          <line x1="0" :y1="pvZeroY" :x2="WIDTH" :y2="pvZeroY" class="zero" />
           <path :d="pvPath" class="trace solar" />
         </svg>
         <span class="now readout">{{ latest?.pvPower !== null && latest ? watts(latest.pvPower!) : '—' }}</span>
@@ -102,7 +116,7 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
       <div v-if="hasHouse" class="strip">
         <span class="key"><i class="swatch house" />House W</span>
         <svg :viewBox="`0 0 ${WIDTH} ${STRIP_HEIGHT}`" preserveAspectRatio="none" role="img" aria-label="House load trend">
-          <line x1="0" :y1="STRIP_HEIGHT" :x2="WIDTH" :y2="STRIP_HEIGHT" class="zero" />
+          <line x1="0" :y1="houseZeroY" :x2="WIDTH" :y2="houseZeroY" class="zero" />
           <path :d="housePath" class="trace house" />
         </svg>
         <span class="now readout">{{ latest?.housePower !== null && latest ? watts(latest.housePower!) : '—' }}</span>

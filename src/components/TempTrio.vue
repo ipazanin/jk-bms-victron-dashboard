@@ -11,6 +11,9 @@ const props = defineProps<{ battery: BatterySnapshot }>()
 const AXIS_MIN = 0
 const AXIS_MAX = 90
 
+/** A gauge past a threshold must say so in more than colour. */
+const GLYPHS: Record<FaultLevel, string> = { good: '', warning: '!', serious: '▲', critical: '✕' }
+
 function level(value: number, warn: number, serious: number, critical: number): FaultLevel {
   if (value >= critical) return 'critical'
   if (value >= serious) return 'serious'
@@ -44,7 +47,11 @@ const hottest = computed(() => gauges.value.reduce((worst, gauge) => (gauge.valu
         <span class="track">
           <span class="fill" :class="gauge.level" :style="{ width: `${fraction(gauge.value) * 100}%` }" />
         </span>
-        <span class="value readout">{{ celsius(gauge.value) }}</span>
+        <span class="value readout" :class="gauge.level">
+          <span v-if="gauge.level !== 'good'" class="glyph" aria-hidden="true">{{ GLYPHS[gauge.level] }}</span>
+          <span class="sr-only" v-if="gauge.level !== 'good'">{{ gauge.level }}: </span>
+          {{ celsius(gauge.value) }}
+        </span>
       </li>
     </ul>
     <p class="muted">scale 0–90 °C</p>
@@ -115,6 +122,30 @@ h2 {
 
 .value {
   text-align: right;
+  white-space: nowrap;
+}
+
+.value.warning {
+  color: var(--status-warning);
+}
+.value.serious {
+  color: var(--status-serious);
+}
+.value.critical {
+  color: var(--status-critical);
+}
+
+.glyph {
+  font-weight: 700;
+  margin-right: 0.15rem;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
   white-space: nowrap;
 }
 

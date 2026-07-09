@@ -26,6 +26,9 @@ export const FRAME_SETTINGS = 0x01
 export const FRAME_CELL_INFO = 0x02
 export const FRAME_DEVICE_INFO = 0x03
 
+/** The cell-voltage and cell-resistance blocks each hold 32 slots, populated or not. */
+export const MAX_CELLS = 32
+
 export function buildCommand(command: number): Uint8Array {
   if (!READ_COMMANDS.has(command)) {
     throw new Error(`refusing to build non-read command 0x${command.toString(16)}`)
@@ -62,10 +65,17 @@ function indexOfHeader(buffer: Uint8Array, from: number): number {
   return -1
 }
 
+/** Bounds the buffer if a header arrives that is never followed by a complete frame. */
+const MAX_BUFFER = FRAME_LENGTH * 4
+
 /**
  * Reassembles 300-byte frames from arbitrary notification chunks, discarding any frame
- * whose trailing checksum does not verify. Resynchronises on the next header if a
- * notification is dropped mid-frame.
+ * whose trailing checksum does not verify.
+ *
+ * A dropped notification leaves a truncated frame in the stream. Skipping a whole
+ * FRAME_LENGTH past a bad checksum would then consume the *next*, valid frame along with
+ * the wreckage, so on a checksum failure the scan resumes one byte after the bad header
+ * and hunts for the next one.
  */
 export class FrameAssembler {
   private buffer = new Uint8Array(0)
@@ -77,20 +87,30 @@ export class FrameAssembler {
     this.buffer = merged
 
     const frames: Uint8Array[] = []
+    let searchFrom = 0
+
     for (;;) {
-      const start = indexOfHeader(this.buffer, 0)
+      const start = indexOfHeader(this.buffer, searchFrom)
       if (start === -1) {
+        // No header anywhere ahead; keep only what could be a header split across chunks.
         const keep = Math.max(0, this.buffer.length - (RESPONSE_HEADER.length - 1))
         this.buffer = this.buffer.slice(keep)
         return frames
       }
       if (this.buffer.length - start < FRAME_LENGTH) {
         this.buffer = this.buffer.slice(start)
+        if (this.buffer.length > MAX_BUFFER) this.buffer = this.buffer.slice(-MAX_BUFFER)
         return frames
       }
+
       const frame = this.buffer.slice(start, start + FRAME_LENGTH)
-      this.buffer = this.buffer.slice(start + FRAME_LENGTH)
-      if (isChecksumValid(frame)) frames.push(frame)
+      if (isChecksumValid(frame)) {
+        frames.push(frame)
+        this.buffer = this.buffer.slice(start + FRAME_LENGTH)
+        searchFrom = 0
+      } else {
+        searchFrom = start + 1
+      }
     }
   }
 

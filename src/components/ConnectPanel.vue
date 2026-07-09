@@ -11,6 +11,7 @@ const props = defineProps<{
   solarState: LinkState
   bmsError: string | null
   solarError: string | null
+  foreignDeviceSeen: boolean
   initialKey: string
 }>()
 
@@ -97,15 +98,23 @@ const showAllDevices = ref(false)
 
         <div class="actions">
           <button
-            v-if="solarState !== 'live'"
+            v-if="solarState === 'idle' || solarState === 'connecting'"
             type="button"
             :disabled="advertisementKey.trim().length !== 32 || solarState === 'connecting'"
             @click="emit('startSolar', advertisementKey)"
           >
-            {{ solarState === 'connecting' ? 'Scanning…' : 'Connect solar' }}
+            {{ solarState === 'connecting' ? 'Starting…' : 'Connect solar' }}
           </button>
           <button v-else type="button" @click="emit('stopSolar')">Stop solar</button>
         </div>
+
+        <p v-if="solarState === 'listening' && !foreignDeviceSeen" class="hint">
+          Listening. Nothing has answered yet — the controller may be out of range.
+        </p>
+        <p v-if="solarState === 'listening' && foreignDeviceSeen" class="error">
+          Receiving Victron broadcasts, but none match this key. They belong to other
+          devices nearby. Check the key against VictronConnect.
+        </p>
       </template>
 
       <p v-if="solarError" class="error">{{ solarError }}</p>

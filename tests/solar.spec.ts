@@ -120,4 +120,16 @@ describe('parseSolarRecord sentinels', () => {
   it('throws on a truncated record rather than returning partial data', () => {
     expect(() => parseSolarRecord(new Uint8Array([0x05, 0x00, 0x41]))).toThrow(/too short/)
   })
+
+  it('reports no load current when the byte carrying its ninth bit is absent', () => {
+    // An 11-byte record holds the low byte but not bit 8. Guessing that bit either way
+    // fabricates a reading: 0x50 with the bit set is 33.6 A, with it clear 8.0 A.
+    const eleven = new Uint8Array([0x05, 0x00, 0x41, 0x05, 0x47, 0x00, 0x69, 0x00, 0x63, 0x00, 0x50])
+    expect(parseSolarRecord(eleven).loadCurrent).toBeNull()
+  })
+
+  it('reads a real load current when both bytes are present', () => {
+    const twelve = new Uint8Array([0x05, 0x00, 0x41, 0x05, 0x47, 0x00, 0x69, 0x00, 0x63, 0x00, 0x50, 0x00])
+    expect(parseSolarRecord(twelve).loadCurrent).toBeCloseTo(8.0, 3)
+  })
 })
