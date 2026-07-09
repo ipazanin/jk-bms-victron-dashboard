@@ -16,6 +16,7 @@ import { useTelemetry } from './application/telemetry'
 const telemetry = useTelemetry()
 const {
   capabilities,
+  adapterOn,
   source,
   bmsState,
   solarState,
@@ -122,6 +123,7 @@ onMounted(() => {
 
       <ConnectPanel
         :capabilities="capabilities"
+        :adapter-on="adapterOn"
         :source="source"
         :bms-state="bmsState"
         :solar-state="solarState"

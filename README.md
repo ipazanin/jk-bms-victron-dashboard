@@ -62,6 +62,16 @@ Web Bluetooth is a Chromium-only API. This is not something the page can work ar
 The page feature-detects all of this and degrades honestly. With no solar it is still a complete,
 correct battery instrument — it withholds the house-load span rather than faking it to zero.
 
+A **What this page needs** checklist under *Connect* shows the live state of every precondition —
+Web Bluetooth, HTTPS, whether the radio is actually switched on, advertisement scanning, Web Crypto —
+tagged by whether it gates the battery or only the solar half, with the remedy for each.
+
+## Before you connect
+
+**Close the JK app on your phone.** The BMS accepts one Bluetooth connection at a time; while the
+app holds it, nothing else can connect. This is the single most common failure, and the browser
+reports it as an unhelpful `NotFoundError` or `NetworkError` — the app translates both.
+
 ## The Victron encryption key
 
 The advertisement payload is encrypted. The key is **not** the Bluetooth PIN and is **not** printed

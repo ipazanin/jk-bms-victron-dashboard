@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 
+import RequirementsList from './RequirementsList.vue'
 import type { BleCapabilities } from '../infrastructure/ble/capabilities'
 import type { LinkState, Source } from '../application/telemetry'
 
 const props = defineProps<{
   capabilities: BleCapabilities
+  adapterOn: boolean | null
   source: Source
   bmsState: LinkState
   solarState: LinkState
@@ -33,12 +35,12 @@ const showAllDevices = ref(false)
   <section class="panel">
     <h2 class="plate">Connect</h2>
 
-    <p v-if="!capabilities.hasBluetooth" class="notice">
-      This browser can’t reach the battery over Bluetooth. Firefox and Safari don’t implement
-      Web Bluetooth at all. Use Chrome or Edge on desktop, Chrome on Android, or Bluefy on iOS —
-      or watch the demo below.
+    <RequirementsList :capabilities="capabilities" :adapter-on="adapterOn" />
+
+    <p class="notice">
+      <strong>Close the JK app on your phone first.</strong> The BMS accepts one Bluetooth
+      connection at a time, so while the app holds it, nothing else can connect.
     </p>
-    <p v-else-if="!capabilities.secureContext" class="notice">Open this page over HTTPS to use Bluetooth.</p>
 
     <div class="actions">
       <button
@@ -66,10 +68,9 @@ const showAllDevices = ref(false)
     <div class="solar">
       <h3 class="plate">Solar controller</h3>
 
-      <p v-if="!capabilities.canScan" class="notice">
-        Reading the Victron needs Bluetooth advertisement scanning, which Chrome keeps behind a
-        flag. Open <code>chrome://flags/#enable-experimental-web-platform-features</code>, turn it
-        on, and reload. It works on Chrome for Android and macOS only.
+      <p v-if="!capabilities.canScan || !capabilities.hasSubtleCrypto" class="notice">
+        The solar controller can’t be read in this browser. See <em>What this page needs</em>
+        above — the battery works regardless, it just can’t show house load.
       </p>
 
       <template v-else>
@@ -227,7 +228,12 @@ input[type='text'] {
   margin: 0.5rem 0;
   font-size: 0.875rem;
   color: var(--ink-secondary);
-  max-width: 56ch;
+  max-width: 62ch;
+}
+
+.notice strong {
+  color: var(--ink);
+  font-weight: 600;
 }
 
 .hint {

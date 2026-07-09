@@ -6,7 +6,8 @@ import type { SolarReading } from '../domain/solar/types'
 import { JkBmsClient } from '../infrastructure/ble/JkBmsClient'
 import { VictronScanner } from '../infrastructure/ble/VictronScanner'
 import { DemoSource } from '../infrastructure/demo/DemoSource'
-import { detectCapabilities } from '../infrastructure/ble/capabilities'
+import { adapterAvailable, detectCapabilities, watchAdapter } from '../infrastructure/ble/capabilities'
+import { describeConnectError, describeScanError } from './errors'
 import { saveAdvertisementKey } from './storage'
 
 export type LinkState = 'idle' | 'connecting' | 'listening' | 'live' | 'error'
@@ -39,6 +40,13 @@ const CELL_TEMPERATURE_WARNING = 45
 const LOW_STATE_OF_CHARGE = 20
 
 const capabilities = detectCapabilities()
+
+/** null until the browser answers, and again if it refuses to. */
+const adapterOn = ref<boolean | null>(null)
+if (capabilities.hasBluetooth) {
+  void adapterAvailable().then((value) => (adapterOn.value = value))
+  watchAdapter((value) => (adapterOn.value = value))
+}
 
 const source = ref<Source>('none')
 const bmsState = ref<LinkState>('idle')
@@ -214,8 +222,7 @@ export function useTelemetry() {
       source.value = 'live'
     } catch (error) {
       bmsState.value = 'idle'
-      const message = (error as Error).message
-      bmsError.value = /cancelled|User cancelled/i.test(message) ? null : message
+      bmsError.value = describeConnectError(error as Error)
     }
   }
 
@@ -239,7 +246,7 @@ export function useTelemetry() {
       source.value = source.value === 'demo' ? 'demo' : 'live'
     } catch (error) {
       solarState.value = 'idle'
-      solarError.value = (error as Error).message
+      solarError.value = describeScanError(error as Error)
     }
   }
 
@@ -263,6 +270,7 @@ export function useTelemetry() {
 
   return {
     capabilities,
+    adapterOn: readonly(adapterOn),
     source: readonly(source),
     bmsState: readonly(bmsState),
     solarState: readonly(solarState),

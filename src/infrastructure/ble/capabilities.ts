@@ -30,13 +30,26 @@ export function detectCapabilities(): BleCapabilities {
   }
 }
 
-export async function adapterAvailable(): Promise<boolean> {
+/** Whether a Bluetooth radio exists and is switched on. Null means the browser won't say. */
+export async function adapterAvailable(): Promise<boolean | null> {
   const bluetooth = navigator.bluetooth
   if (!bluetooth) return false
-  if (typeof bluetooth.getAvailability !== 'function') return true
+  if (typeof bluetooth.getAvailability !== 'function') return null
   try {
     return await bluetooth.getAvailability()
   } catch {
-    return false
+    return null
   }
+}
+
+/** Re-reads availability whenever the user toggles the radio. Returns an unsubscribe. */
+export function watchAdapter(onChange: (available: boolean | null) => void): () => void {
+  const bluetooth = navigator.bluetooth
+  if (!bluetooth || typeof bluetooth.addEventListener !== 'function') return () => undefined
+
+  const handler = (): void => {
+    void adapterAvailable().then(onChange)
+  }
+  bluetooth.addEventListener('availabilitychanged', handler)
+  return () => bluetooth.removeEventListener('availabilitychanged', handler)
 }
