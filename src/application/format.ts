@@ -55,3 +55,16 @@ export function clockTime(timestamp: number): string {
 export function chargeStateLabel(state: string): string {
   return state.charAt(0).toUpperCase() + state.slice(1)
 }
+
+/** Coarse, human age of a past moment: 'moments ago', 'N min ago', 'N h ago', 'yesterday', 'N days ago'. */
+export function relativeAge(fromMs: number, nowMs: number = Date.now()): string {
+  const seconds = Math.max(0, Math.floor((nowMs - fromMs) / 1000))
+  if (seconds < 60) return 'moments ago'
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} h ago`
+  const days = Math.floor(hours / 24)
+  if (days === 1) return 'yesterday'
+  return `${days} days ago`
+}

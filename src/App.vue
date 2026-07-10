@@ -5,6 +5,7 @@ import AnnunciatorStrip from './components/AnnunciatorStrip.vue'
 import BreakerPanel from './components/BreakerPanel.vue'
 import CellLadder from './components/CellLadder.vue'
 import ConnectPanel from './components/ConnectPanel.vue'
+import RememberedBanner from './components/RememberedBanner.vue'
 import ShuntAmmeter from './components/ShuntAmmeter.vue'
 import SocCluster from './components/SocCluster.vue'
 import SolarRow from './components/SolarRow.vue'
@@ -33,6 +34,8 @@ const {
   faults,
   worstFault,
   history,
+  rememberedAt,
+  rememberedStatus,
 } = telemetry
 
 const theme = ref<'dark' | 'light'>('dark')
@@ -54,6 +57,9 @@ onMounted(() => {
   // someone who has none of the hardware. It touches no Bluetooth API and needs no gesture.
   // ?demo=bms replays the battery alone, which is what most visitors will actually see.
   if (query.has('demo')) void telemetry.startDemo(query.get('demo') !== 'bms')
+  // No ?demo: restore the last live session from localStorage (pure, no gesture), so the
+  // instruments render on first paint instead of the empty landing page.
+  else telemetry.restoreRemembered()
 })
 </script>
 
@@ -71,7 +77,14 @@ onMounted(() => {
       </button>
     </header>
 
+    <RememberedBanner
+      v-if="source === 'remembered'"
+      :captured-at="rememberedAt"
+      :status="rememberedStatus"
+      @forget="telemetry.forgetRemembered"
+    />
     <AnnunciatorStrip
+      v-else
       :source="source"
       :bms-state="bmsState"
       :solar-state="solarState"
@@ -119,7 +132,7 @@ onMounted(() => {
         :can-scan="capabilities.canScan"
       />
 
-      <TrendStrips v-if="battery" :history="history" />
+      <TrendStrips v-if="battery && source !== 'remembered'" :history="history" />
 
       <ConnectPanel
         :capabilities="capabilities"
