@@ -6,10 +6,44 @@
  * Run against `npm run preview`:  node scripts/visual-check.mjs http://localhost:4173/jk-bms-victron-dashboard/
  */
 
+import { existsSync } from 'node:fs'
 import { launch } from 'puppeteer-core'
 
 const BASE = process.argv[2] ?? 'http://localhost:4173/jk-bms-victron-dashboard/'
-const CHROME = process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+
+// puppeteer-core ships no bundled Chromium, so the executable path must be explicit.
+// Well-known install locations per platform; the first that exists wins.
+const CHROME_CANDIDATES = {
+  darwin: [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  ],
+  linux: [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/microsoft-edge',
+  ],
+  win32: [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+  ],
+}
+
+function resolveChrome() {
+  if (process.env.CHROME_PATH) return process.env.CHROME_PATH
+  const found = (CHROME_CANDIDATES[process.platform] ?? []).find((path) => existsSync(path))
+  if (found) return found
+  console.error(
+    'Could not find Chrome. Set CHROME_PATH to your Chrome/Chromium/Edge executable and re-run.',
+  )
+  process.exit(1)
+}
+
+const CHROME = resolveChrome()
 
 const VIEWPORTS = [
   { name: 'phone', width: 390, height: 844 },
