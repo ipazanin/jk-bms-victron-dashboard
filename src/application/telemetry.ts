@@ -70,6 +70,8 @@ const solarRssi = ref(0)
 
 const history = reactive<TrendPoint[]>([])
 let lastSampleAt = 0
+/** The last withSolar the demo was armed with, so a cancelled reconnect can re-arm the same. */
+let lastDemoWithSolar = true
 
 /** Populated only in 'remembered' mode, from the persisted session. */
 const rememberedAt = ref<number | null>(null)
@@ -187,10 +189,12 @@ function persistRememberedNow(force = false): void {
 function recordSample(): void {
   const now = Date.now()
   if (now - lastSampleAt < SAMPLE_INTERVAL_MS) return
-  lastSampleAt = now
 
   const snapshot = battery.value
+  // A sample always pairs a pack current with the solar of that same instant, so it can only
+  // be taken when a battery snapshot exists. A solar-only tick claims no interval slot.
   if (!snapshot) return
+  lastSampleAt = now
 
   history.push({
     at: now,
@@ -229,6 +233,9 @@ const victronScanner = new VictronScanner({
     solar.value = reading
     solarRssi.value = rssi
     solarState.value = 'live'
+    // Sample here too: a run of solar advertisements between BMS frames must still feed the
+    // trend, and the SAMPLE_INTERVAL_MS gate keeps it to one point a second across both radios.
+    recordSample()
   },
   onForeignDevice: () => (foreignDeviceSeen.value = true),
   onStale: () => {
@@ -258,12 +265,26 @@ function resetReadings(): void {
 }
 
 /**
+ * Stops a running Victron scan and clears the solar view. Synchronous, so it is safe on the
+ * demo boundaries that must not yield before requestDevice.
+ */
+function stopSolarLink(): void {
+  victronScanner.stop()
+  solar.value = null
+  solarState.value = 'idle'
+  foreignDeviceSeen.value = false
+}
+
+/**
  * Synchronous demo teardown. Awaiting anything before requestDevice would spend the
  * click's transient activation and the chooser would be refused, so the demo must be
- * dismantled without yielding to the microtask queue.
+ * dismantled without yielding to the microtask queue. The demo boundaries own the solar
+ * link as fully as the BMS link: leaving the demo stops any scan so no live advertisement
+ * bleeds into an idle page or overwrites the recording.
  */
 function teardownDemo(): void {
   demoSource.stop()
+  stopSolarLink()
   resetReadings()
   source.value = 'none'
 }
@@ -339,6 +360,7 @@ if (typeof window !== 'undefined') {
 export function useTelemetry() {
   async function connectBms(showAllDevices = false): Promise<void> {
     bmsError.value = null
+    const cameFromDemo = source.value === 'demo'
     if (source.value === 'demo') teardownDemo()
     else if (source.value === 'remembered') leaveRemembered()
     bmsState.value = 'connecting'
@@ -348,10 +370,19 @@ export function useTelemetry() {
       source.value = 'live'
     } catch (error) {
       bmsState.value = 'idle'
-      bmsError.value = describeConnectError(error as Error)
-      // A cancelled or failed connect must not strand the user on the blank landing:
-      // restore the remembered view if nothing came live to replace it.
-      if (source.value === 'none' && !battery.value) restoreRemembered()
+      const message = describeConnectError(error as Error)
+      bmsError.value = message
+      if (message === null && cameFromDemo) {
+        // The user only dismissed the chooser after leaving a demo — put the recording they
+        // were watching back rather than stranding them on the blank landing. This re-arm
+        // wins over the remembered restore below; a genuine error keeps its message and falls
+        // through to that restore instead.
+        await startDemo(lastDemoWithSolar)
+      } else if (source.value === 'none' && !battery.value) {
+        // A cancelled or failed connect must not strand the user on the blank landing:
+        // restore the remembered view if nothing came live to replace it.
+        restoreRemembered()
+      }
     }
   }
 
@@ -383,15 +414,16 @@ export function useTelemetry() {
   }
 
   function stopSolar(): void {
-    victronScanner.stop()
-    solarState.value = 'idle'
-    solar.value = null
-    foreignDeviceSeen.value = false
+    stopSolarLink()
     settleAfterLive()
   }
 
   async function startDemo(withSolar = true): Promise<void> {
+    lastDemoWithSolar = withSolar
     if (bmsState.value === 'live') await disconnectBms()
+    // The demo owns the solar link too: a live scan must stop, or its advertisements would
+    // overwrite the recorded solar the demo is about to play.
+    stopSolarLink()
     // disconnectBms can settle into 'remembered'; clear it before the fetch below yields, or
     // the stale banner flashes over an empty grid. A brief landing flash is acceptable.
     if (source.value === 'remembered') leaveRemembered()
