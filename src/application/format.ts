@@ -2,8 +2,15 @@ export function volts(value: number, digits = 3): string {
   return `${value.toFixed(digits)} V`
 }
 
+/**
+ * Signed current, with the sign decided AFTER rounding to the displayed precision. A reading
+ * that rounds to zero carries no direction, so it is printed unsigned ('0.0 A') rather than as
+ * a meaningless '−0.0 A' — the same honesty CellLadder's signedMv applies to millivolts.
+ */
 export function amps(value: number, digits = 1): string {
-  return `${value >= 0 ? '+' : '−'}${Math.abs(value).toFixed(digits)} A`
+  const rounded = Number(value.toFixed(digits))
+  const sign = rounded > 0 ? '+' : rounded < 0 ? '−' : ''
+  return `${sign}${Math.abs(rounded).toFixed(digits)} A`
 }
 
 export function ampsAbsolute(value: number, digits = 1): string {

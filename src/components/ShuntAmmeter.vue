@@ -14,7 +14,7 @@
  */
 import { computed, ref, watch } from 'vue'
 
-import { ampsAbsolute, watts } from '../application/format'
+import { amps, ampsAbsolute, watts } from '../application/format'
 import { useMediaQuery } from '../application/useMediaQuery'
 
 const props = defineProps<{
@@ -206,7 +206,7 @@ const summary = computed(() => {
         :text-anchor="packCurrent < 0 ? 'end' : 'start'"
         class="value pack-ink"
       >
-        {{ packCurrent >= 0 ? '+' : '−' }}{{ Math.abs(packCurrent).toFixed(1) }} A
+        {{ amps(packCurrent) }}
       </text>
 
       <template v-if="solarPresent">

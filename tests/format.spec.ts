@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { relativeAge } from '../src/application/format'
+import { amps, relativeAge } from '../src/application/format'
 
 const SECOND = 1000
 const MINUTE = 60 * SECOND
@@ -11,6 +11,25 @@ function ago(ms: number): string {
   const now = 1_000_000_000_000
   return relativeAge(now - ms, now)
 }
+
+describe('amps', () => {
+  it('signs a genuine reading', () => {
+    expect(amps(5.9)).toBe('+5.9 A')
+    expect(amps(-10)).toBe('−10.0 A')
+  })
+
+  it('decides the sign after rounding, so a rounded-to-zero reading is unsigned', () => {
+    // A current that rounds to zero has no direction; it must never read '−0.0 A' or '+0.0 A'.
+    expect(amps(-0.04)).toBe('0.0 A')
+    expect(amps(0.04)).toBe('0.0 A')
+    expect(amps(0)).toBe('0.0 A')
+  })
+
+  it('keeps the sign once the magnitude rounds away from zero', () => {
+    expect(amps(-0.06)).toBe('−0.1 A')
+    expect(amps(0.06)).toBe('+0.1 A')
+  })
+})
 
 describe('relativeAge', () => {
   it('reads under a minute as moments ago', () => {

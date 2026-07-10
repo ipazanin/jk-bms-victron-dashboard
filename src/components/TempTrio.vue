@@ -32,13 +32,26 @@ function fraction(value: number): number {
 }
 
 const hottest = computed(() => gauges.value.reduce((worst, gauge) => (gauge.value > worst.value ? gauge : worst)))
+
+// The sensors have different thresholds (MOSFET 55/70/80, cells 45/55/65), so the hottest
+// reading is not always the highest-severity one — a 72 °C serious MOSFET must not mask a
+// 66 °C critical cell. The header badge carries the worst level across all three; the figure
+// beside it stays the hottest reading.
+const SEVERITY_ORDER: readonly FaultLevel[] = ['good', 'warning', 'serious', 'critical']
+
+const worstLevel = computed<FaultLevel>(() =>
+  gauges.value.reduce<FaultLevel>(
+    (worst, gauge) => (SEVERITY_ORDER.indexOf(gauge.level) > SEVERITY_ORDER.indexOf(worst) ? gauge.level : worst),
+    'good',
+  ),
+)
 </script>
 
 <template>
   <section class="panel">
     <header>
       <h2 class="plate">Temperatures</h2>
-      <StatusChip :level="hottest.level" :label="celsius(hottest.value, 0)" />
+      <StatusChip :level="worstLevel" :label="celsius(hottest.value, 0)" />
     </header>
 
     <ul class="gauges">
