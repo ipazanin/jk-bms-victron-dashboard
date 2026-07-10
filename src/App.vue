@@ -100,6 +100,7 @@ onMounted(() => {
         :solar-current="solar?.batteryCurrent ?? null"
         :house-current="bus?.houseCurrent ?? null"
         :house-power="bus?.housePower ?? null"
+        :house-load-plausible="bus?.houseLoadPlausible ?? null"
         :pv-power="solar?.pvPower ?? null"
       />
 

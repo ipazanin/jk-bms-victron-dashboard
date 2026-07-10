@@ -196,7 +196,9 @@ function recordSample(): void {
     at: now,
     packCurrent: snapshot.current,
     pvPower: solar.value?.pvPower ?? null,
-    housePower: bus.value?.housePower ?? null,
+    // A house load that another source has poisoned is recorded as a gap, not a fabricated
+    // trace, so TrendStrips shows the break rather than a line dipping below zero.
+    housePower: bus.value?.houseLoadPlausible ? bus.value.housePower : null,
   })
 
   const cutoff = now - HISTORY_SECONDS * 1000

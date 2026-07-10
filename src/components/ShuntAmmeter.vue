@@ -23,6 +23,7 @@ const props = defineProps<{
   solarCurrent: number | null
   houseCurrent: number | null
   housePower: number | null
+  houseLoadPlausible: boolean | null
   pvPower: number | null
 }>()
 
@@ -81,6 +82,19 @@ function x(current: number): number {
 
 const solarPresent = computed(() => props.solarCurrent !== null)
 
+/**
+ * House = solar − pack is a real load only while solar is the sole charger. When the pack
+ * takes more than the panels give, an unmeasured source (alternator, shore charger) is on the
+ * bus and the difference goes negative; reconcile flags that so we withhold the figure rather
+ * than paint a confident fiction.
+ */
+const houseKnown = computed(
+  () => solarPresent.value && props.houseCurrent !== null && props.houseLoadPlausible === true,
+)
+const houseCharged = computed(
+  () => solarPresent.value && props.houseCurrent !== null && props.houseLoadPlausible === false,
+)
+
 const packTip = computed(() => x(props.packCurrent))
 const solarTip = computed(() => x(props.solarCurrent ?? 0))
 
@@ -132,11 +146,19 @@ const solarHint = computed(() =>
 const summary = computed(() => {
   const pack = `The pack is ${flow.value} at ${ampsAbsolute(props.packCurrent)}.`
 
-  if (solarPresent.value && props.houseCurrent !== null) {
+  if (houseKnown.value) {
     return (
       `Solar delivers ${ampsAbsolute(props.solarCurrent!)}, the pack is ${flow.value} at ` +
-      `${ampsAbsolute(props.packCurrent)}, so the house is drawing ${ampsAbsolute(props.houseCurrent)}, ` +
+      `${ampsAbsolute(props.packCurrent)}, so the house is drawing ${ampsAbsolute(props.houseCurrent!)}, ` +
       `about ${watts(props.housePower ?? 0)}.`
+    )
+  }
+  // The pack is taking more than solar delivers, so another charger is on the bus and the
+  // difference is no longer a house load. Say so rather than print the negative as a draw.
+  if (houseCharged.value) {
+    return (
+      `Solar delivers ${ampsAbsolute(props.solarCurrent!)}, but the pack is ${flow.value} at ` +
+      `${ampsAbsolute(props.packCurrent)} — another source is charging, so house load is unavailable.`
     )
   }
   // Solar can be connected yet still not yield a house load, when the controller reports no
@@ -207,7 +229,7 @@ const summary = computed(() => {
         <text :x="CENTER + 20" :y="SOLAR_Y + 5" class="ghost-ink hint">{{ solarHint }}</text>
       </template>
 
-      <g v-if="solarPresent && houseCurrent !== null" class="span">
+      <g v-if="houseKnown" class="span">
         <text :x="8" :y="SPAN_Y + 5" class="row-label house-ink">HOUSE</text>
         <line :x1="spanBar.x" :y1="SPAN_Y - 7" :x2="spanBar.x" :y2="SPAN_Y + 7" class="cap" />
         <line
@@ -219,7 +241,13 @@ const summary = computed(() => {
         />
         <line :x1="spanBar.x" :y1="SPAN_Y" :x2="spanBar.x + spanBar.width" :y2="SPAN_Y" class="rule" />
         <text :x="spanLabelX" :y="SPAN_Y - 14" text-anchor="middle" class="value house-ink">
-          {{ ampsAbsolute(houseCurrent) }} · {{ watts(housePower ?? 0) }}
+          {{ ampsAbsolute(houseCurrent!) }} · {{ watts(housePower ?? 0) }}
+        </text>
+      </g>
+      <g v-else-if="houseCharged" class="span">
+        <text :x="8" :y="SPAN_Y + 5" class="row-label ghost-ink">HOUSE</text>
+        <text :x="CENTER + 20" :y="SPAN_Y + 5" class="ghost-ink hint">
+          another source charging — house load unavailable
         </text>
       </g>
     </svg>
@@ -227,7 +255,8 @@ const summary = computed(() => {
     <footer class="legend">
       <span class="key"><i class="swatch pack" />Pack {{ packVoltage.toFixed(3) }} V</span>
       <span v-if="pvPower !== null" class="key"><i class="swatch solar" />Solar {{ watts(pvPower) }} in</span>
-      <span v-if="housePower !== null" class="key"><i class="swatch house" />House {{ watts(housePower) }} out</span>
+      <span v-if="houseKnown" class="key"><i class="swatch house" />House {{ watts(housePower ?? 0) }} out</span>
+      <span v-else-if="houseCharged" class="key muted-key">House load unavailable — another source charging</span>
       <span v-else class="key muted-key">Solar not connected</span>
     </footer>
   </section>
