@@ -65,9 +65,6 @@ function indexOfHeader(buffer: Uint8Array, from: number): number {
   return -1
 }
 
-/** Bounds the buffer if a header arrives that is never followed by a complete frame. */
-const MAX_BUFFER = FRAME_LENGTH * 4
-
 /**
  * Reassembles 300-byte frames from arbitrary notification chunks, discarding any frame
  * whose trailing checksum does not verify.
@@ -98,8 +95,11 @@ export class FrameAssembler {
         return frames
       }
       if (this.buffer.length - start < FRAME_LENGTH) {
+        // A header with only a partial frame behind it: keep from the header onward and wait
+        // for the rest. This slice is what bounds the buffer — its length is always under one
+        // FRAME_LENGTH, so a header that is never completed, or an endless run of
+        // header-lookalikes, cannot accumulate across feeds.
         this.buffer = this.buffer.slice(start)
-        if (this.buffer.length > MAX_BUFFER) this.buffer = this.buffer.slice(-MAX_BUFFER)
         return frames
       }
 

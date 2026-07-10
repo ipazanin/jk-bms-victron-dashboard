@@ -18,9 +18,19 @@ import {
 import { VICTRON_COMPANY_ID } from '../../domain/solar/types'
 import type { SolarReading } from '../../domain/solar/types'
 
+const SOLAR_STALE_CHECK_MS = 3_000
+/**
+ * A Victron controller broadcasts roughly once a second while awake and in range. This much
+ * silence means it has gone to sleep (sunset) or drifted out of range, so the last reading
+ * is no longer current and must stop being presented as live. The scan keeps running — the
+ * controller may wake or come back — so this only demotes; it never stops listening.
+ */
+const SOLAR_STALE_TIMEOUT_MS = 15_000
+
 export interface VictronHandlers {
   onReading?: (reading: SolarReading, rssi: number) => void
   onForeignDevice?: () => void
+  onStale?: () => void
   onError?: (error: Error) => void
 }
 
@@ -28,6 +38,10 @@ export class VictronScanner {
   private scan: BluetoothLEScan | null = null
   private key: Uint8Array | null = null
   private cryptoKey: CryptoKey | null = null
+  private generation = 0
+  private lastReadingAt = 0
+  private staleNotified = false
+  private staleTimer: ReturnType<typeof setInterval> | null = null
   private readonly handlers: VictronHandlers
 
   constructor(handlers: VictronHandlers = {}) {
@@ -56,10 +70,18 @@ export class VictronScanner {
 
     this.key = key
     this.cryptoKey = await importAdvertisementKey(key)
+    this.generation += 1
+    this.lastReadingAt = Date.now()
+    this.staleNotified = false
     navigator.bluetooth.addEventListener('advertisementreceived', this.handleAdvertisement)
+    this.staleTimer = setInterval(this.checkStale, SOLAR_STALE_CHECK_MS)
   }
 
   stop(): void {
+    this.stopStaleTimer()
+    // Advance the generation so a decode already in flight is dropped when it resolves, and
+    // does not resurrect a stale 'live' reading after the user has stopped.
+    this.generation += 1
     navigator.bluetooth?.removeEventListener('advertisementreceived', this.handleAdvertisement)
     this.scan?.stop()
     this.scan = null
@@ -73,15 +95,37 @@ export class VictronScanner {
     if (!view || !this.key || !this.cryptoKey) return
 
     const payload = new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
+    const generation = this.generation
+    const rssi = advertisement.rssi ?? 0
 
     void decodeSolarAdvertisement(payload, this.key, this.cryptoKey)
       .then((reading) => {
+        // The decrypt is genuinely async. If stop() (or a fresh start) ran while it was in
+        // flight, this decode belongs to a scan that no longer exists — drop it rather than
+        // report a reading or a foreign device against the current session.
+        if (generation !== this.generation) return
         if (!reading) {
           this.handlers.onForeignDevice?.()
           return
         }
-        this.handlers.onReading?.(reading, advertisement.rssi ?? 0)
+        this.lastReadingAt = Date.now()
+        this.staleNotified = false
+        this.handlers.onReading?.(reading, rssi)
       })
       .catch((error: Error) => this.handlers.onError?.(error))
+  }
+
+  private readonly checkStale = (): void => {
+    if (!this.scanning || this.staleNotified) return
+    if (Date.now() - this.lastReadingAt < SOLAR_STALE_TIMEOUT_MS) return
+    this.staleNotified = true
+    this.handlers.onStale?.()
+  }
+
+  private stopStaleTimer(): void {
+    if (this.staleTimer !== null) {
+      clearInterval(this.staleTimer)
+      this.staleTimer = null
+    }
   }
 }

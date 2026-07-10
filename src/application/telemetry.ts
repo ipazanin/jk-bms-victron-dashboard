@@ -231,6 +231,14 @@ const victronScanner = new VictronScanner({
     solarState.value = 'live'
   },
   onForeignDevice: () => (foreignDeviceSeen.value = true),
+  onStale: () => {
+    // Advertisements have stopped: the controller slept or drifted out of range. Drop the
+    // frozen reading so the derived house load disappears rather than lying, and fall back
+    // to 'listening' — the scan is still up and the controller may return.
+    if (solarState.value !== 'live') return
+    solar.value = null
+    solarState.value = 'listening'
+  },
   onError: (error) => (solarError.value = error.message),
 })
 

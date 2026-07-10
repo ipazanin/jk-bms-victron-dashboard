@@ -28,6 +28,15 @@ import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../domain/bms/
 
 const STALL_TIMEOUT_MS = 8_000
 const STALL_CHECK_MS = 2_000
+/**
+ * A GATT link can stay "connected" while the BMS quietly stops notifying — a firmware
+ * hiccup, a dropped subscription, an MTU loss — with no gattserverdisconnected to tell us.
+ * The stall poke below is then our only prod. After this many consecutive stalls with no
+ * frame in between (roughly STALL_TIMEOUT_MS apart, so about twenty-four seconds of silence)
+ * we stop hoping and tear the link down, so the UI leaves 'live' instead of trusting a
+ * frozen reading forever.
+ */
+const MAX_STALL_STRIKES = 3
 
 export interface JkBmsHandlers {
   onSnapshot?: (snapshot: BatterySnapshot) => void
@@ -43,6 +52,7 @@ export class JkBmsClient {
   private readonly assembler = new FrameAssembler()
   private readonly handlers: JkBmsHandlers
   private lastFrameAt = 0
+  private stallStrikes = 0
   private stallTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(handlers: JkBmsHandlers = {}) {
@@ -87,11 +97,20 @@ export class JkBmsClient {
     }
 
     this.lastFrameAt = Date.now()
+    this.stallStrikes = 0
     this.stallTimer = setInterval(this.checkStall, STALL_CHECK_MS)
   }
 
   async disconnect(): Promise<void> {
     this.stopStallTimer()
+    // Detach the drop handler before the first await. If the physical link drops during
+    // stopNotifications() below — common when the user disconnects precisely because the
+    // unit is going out of range — handleDisconnect must not fire and paint a scary
+    // "Lost the BMS" error over what is a deliberate teardown.
+    const device = this.device
+    this.device = null
+    device?.removeEventListener('gattserverdisconnected', this.handleDisconnect)
+
     const characteristic = this.characteristic
     this.characteristic = null
     if (characteristic) {
@@ -102,12 +121,7 @@ export class JkBmsClient {
         // The link may already be gone; nothing to unsubscribe from.
       }
     }
-    const device = this.device
-    this.device = null
-    if (device) {
-      device.removeEventListener('gattserverdisconnected', this.handleDisconnect)
-      device.gatt?.disconnect()
-    }
+    device?.gatt?.disconnect()
     this.assembler.reset()
   }
 
@@ -129,6 +143,7 @@ export class JkBmsClient {
 
     for (const frame of this.assembler.feed(chunk)) {
       this.lastFrameAt = Date.now()
+      this.stallStrikes = 0
       try {
         switch (frameType(frame)) {
           case FRAME_CELL_INFO:
@@ -150,8 +165,21 @@ export class JkBmsClient {
   private readonly checkStall = (): void => {
     if (!this.connected) return
     if (Date.now() - this.lastFrameAt < STALL_TIMEOUT_MS) return
+    this.stallStrikes += 1
+    if (this.stallStrikes >= MAX_STALL_STRIKES) {
+      // The link is up but the BMS has gone silent and is not answering the pokes. Give up
+      // loudly: tear it down through the normal disconnect path, then run onDisconnect
+      // ourselves (disconnect() detaches the drop handler, so it will not fire on its own).
+      void this.giveUp()
+      return
+    }
     this.lastFrameAt = Date.now()
     void this.request(CMD_CELL_INFO).catch(() => undefined)
+  }
+
+  private async giveUp(): Promise<void> {
+    await this.disconnect()
+    this.handlers.onDisconnect?.()
   }
 
   private readonly handleDisconnect = (): void => {
