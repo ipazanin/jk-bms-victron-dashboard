@@ -137,6 +137,11 @@ npm run build
 npm run check:visual   # renders in real Chrome, asserts no overflow or console errors
 ```
 
+`check:visual` drives the *built* site, so run `npm run build && npm run preview` first and leave the
+preview server up (it serves `http://localhost:4173/jk-bms-victron-dashboard/`, the script's default
+target). It launches your installed Chrome, resolved per platform; set `CHROME_PATH` to point at a
+different binary if the check cannot find one.
+
 `?demo` replays a recorded passage; `?demo=bms` replays the battery alone, to exercise the degraded
 page. `?theme=light` forces light mode.
 
@@ -153,7 +158,8 @@ src/components/      hand-rolled inline SVG. No chart library.
 
 Protocol work stands on the shoulders of the [ESPHome JK-BMS component](https://github.com/syssi/esphome-jk-bms)
 and [`victron-ble`](https://github.com/keshavdv/victron-ble). Neither is used at runtime — this page
-ships no dependency beyond Vue.
+ships no third-party JavaScript beyond Vue. The fonts are self-hosted via `@fontsource`, so no CDN
+is ever contacted.
 
 ## Licence
 

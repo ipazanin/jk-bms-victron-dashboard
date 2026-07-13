@@ -1,3 +1,5 @@
+/// <reference types="node" />
+
 import { describe, expect, it } from 'vitest'
 
 import fixtures from './fixtures.json'
@@ -7,8 +9,10 @@ import {
   CMD_DEVICE_INFO,
   FRAME_CELL_INFO,
   FRAME_DEVICE_INFO,
+  FRAME_LENGTH,
   FRAME_SETTINGS,
   FrameAssembler,
+  RESPONSE_HEADER,
   buildCommand,
   frameType,
   isChecksumValid,
@@ -124,6 +128,29 @@ describe('FrameAssembler', () => {
     // A valid frame still parses afterwards, so the buffer was trimmed rather than wedged.
     const recovered = assembler.feed(cellInfo)
     expect(recovered.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('stays bounded and resynchronises under an endless run of header-lookalikes', () => {
+    // The adversarial case the removed MAX_BUFFER guard claimed to cover, but never did: a
+    // stream that is nothing but back-to-back response headers. Every position looks like a
+    // frame start and none carries a valid checksum, so nothing is ever emitted; the
+    // incomplete-frame trim is what keeps the buffer from running away.
+    const assembler = new FrameAssembler()
+    const header = new Uint8Array(RESPONSE_HEADER)
+    const junk = new Uint8Array(header.length * 100)
+    for (let offset = 0; offset < junk.length; offset += header.length) junk.set(header, offset)
+
+    for (let round = 0; round < 200; round += 1) {
+      expect(assembler.feed(junk)).toHaveLength(0)
+      // The bound itself, not just the emitted count: the incomplete-frame trim keeps what is
+      // held back under one frame length no matter how much header-lookalike junk arrives.
+      expect(assembler.bufferedBytes).toBeLessThan(FRAME_LENGTH)
+    }
+
+    // A genuine frame still parses, proving the buffer neither wedged nor grew without bound.
+    const emitted = assembler.feed(cellInfo)
+    expect(emitted.length).toBeGreaterThanOrEqual(1)
+    expect(emitted.some((frame) => frameType(frame) === FRAME_CELL_INFO)).toBe(true)
   })
 })
 

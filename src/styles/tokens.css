@@ -46,7 +46,10 @@
 
   --ink: #0b0b0b;
   --ink-secondary: #52514e;
-  --ink-muted: #898781;
+  /* Darkened from the dark theme's #898781: this backs 0.75rem captions and tick labels, and
+     #898781 clears only ~3.5:1 on the light surfaces (#f9f9f7–#ffffff), below the 4.5:1 AA
+     minimum for normal text. #6d6c67 reaches ~4.99:1 on the darkest of them (#f9f9f7). */
+  --ink-muted: #6d6c67;
 
   --gridline: #e1e0d9;
   --baseline: #c3c2b7;

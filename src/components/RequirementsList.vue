@@ -26,6 +26,14 @@ interface Requirement {
 
 const GLYPHS: Record<Level, string> = { ok: '✓', blocked: '✕', unknown: '?' }
 
+// The '?' glyph is aria-hidden, so the announced text must carry the same uncertainty:
+// an unknown radio state is 'status unknown', not the false 'not satisfied' a two-way split gives.
+const SCREEN_READER_STATUS: Record<Level, string> = {
+  ok: 'satisfied',
+  blocked: 'not satisfied',
+  unknown: 'status unknown',
+}
+
 const requirements = computed<Requirement[]>(() => [
   {
     label: 'Browser speaks Web Bluetooth',
@@ -81,7 +89,7 @@ const blocking = computed(() => requirements.value.filter((item) => item.level !
           {{ item.label }}
           <span class="scope">{{ item.needed }}</span>
         </span>
-        <span class="sr-only">{{ item.level === 'ok' ? 'satisfied' : 'not satisfied' }}</span>
+        <span class="sr-only">{{ SCREEN_READER_STATUS[item.level] }}</span>
       </li>
     </ul>
 

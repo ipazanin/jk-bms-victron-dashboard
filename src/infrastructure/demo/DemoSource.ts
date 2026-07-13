@@ -91,8 +91,8 @@ export class DemoSource {
     const sample = timeline.samples[this.cursor]
     this.cursor = (this.cursor + 1) % timeline.samples.length
 
-    this.handlers.onSnapshot?.(withDerivedFields(sample.battery))
-
+    // Solar leads the snapshot so that when the snapshot is applied — and a trend sample is
+    // recorded off it — the solar it reads belongs to this tick, not the previous one.
     if (sample.solar && this.withSolar) {
       this.handlers.onSolar?.({
         chargeState: sample.solar.chargeState as ChargeState,
@@ -104,5 +104,7 @@ export class DemoSource {
         loadCurrent: sample.solar.loadCurrent,
       })
     }
+
+    this.handlers.onSnapshot?.(withDerivedFields(sample.battery))
   }
 }

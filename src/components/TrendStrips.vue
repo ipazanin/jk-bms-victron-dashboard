@@ -8,7 +8,7 @@
  */
 import { computed, ref } from 'vue'
 
-import { ampsAbsolute, clockTime, watts } from '../application/format'
+import { amps, ampsAbsolute, clockTime, watts } from '../application/format'
 import type { TrendPoint } from '../application/telemetry'
 
 const props = defineProps<{ history: TrendPoint[] }>()
@@ -101,7 +101,7 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
           <line x1="0" :y1="packZeroY" :x2="WIDTH" :y2="packZeroY" class="zero" />
           <path :d="packPath" class="trace pack" />
         </svg>
-        <span class="now readout">{{ latest ? `${latest.packCurrent >= 0 ? '+' : '−'}${Math.abs(latest.packCurrent).toFixed(1)} A` : '—' }}</span>
+        <span class="now readout">{{ latest ? amps(latest.packCurrent) : '—' }}</span>
       </div>
 
       <div v-if="hasSolar" class="strip">
