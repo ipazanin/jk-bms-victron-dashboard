@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+/// <reference types="web-bluetooth" />
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 

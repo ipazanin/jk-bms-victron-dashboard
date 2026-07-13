@@ -9,6 +9,7 @@ import { DemoSource } from '../infrastructure/demo/DemoSource'
 import { adapterAvailable, detectCapabilities, watchAdapter } from '../infrastructure/ble/capabilities'
 import { describeConnectError, describeScanError } from './errors'
 import { saveAdvertisementKey } from './storage'
+import { worstOf, type FaultLevel } from './severity'
 import {
   REMEMBERED_SCHEMA_VERSION,
   forgetRememberedSession,
@@ -19,7 +20,7 @@ import type { RememberedStatus } from './rememberedSession'
 
 export type LinkState = 'idle' | 'connecting' | 'listening' | 'live' | 'error'
 export type Source = 'none' | 'live' | 'demo' | 'remembered'
-export type FaultLevel = 'good' | 'warning' | 'serious' | 'critical'
+export type { FaultLevel }
 
 export interface Fault {
   readonly level: FaultLevel
@@ -153,10 +154,7 @@ const faults = computed<Fault[]>(() => {
   return found
 })
 
-const worstFault = computed<FaultLevel>(() => {
-  const order: FaultLevel[] = ['good', 'warning', 'serious', 'critical']
-  return faults.value.reduce<FaultLevel>((worst, fault) => (order.indexOf(fault.level) > order.indexOf(worst) ? fault.level : worst), 'good')
-})
+const worstFault = computed<FaultLevel>(() => worstOf(faults.value.map((fault) => fault.level)))
 
 function currentStatus(): RememberedStatus {
   return { worst: worstFault.value, headline: faults.value[0]?.title ?? 'All nominal' }
@@ -224,6 +222,7 @@ const bmsClient = new JkBmsClient({
     bmsState.value = 'idle'
     bmsError.value = 'Lost the BMS. Move closer to the boat’s panel and reconnect.'
     settleAfterLive()
+    if (solarState.value !== 'idle') clearBmsView()
   },
   onError: (error) => (bmsError.value = error.message),
 })
@@ -262,6 +261,20 @@ function resetReadings(): void {
   settings.value = null
   history.splice(0, history.length)
   lastSampleAt = 0
+}
+
+/**
+ * Clears the BMS-side view while a solar scan is still live. settleAfterLive early-returns in
+ * that case (solarState is not idle) so source stays 'live' — without this, a frozen battery
+ * would sit under a live solar badge. The freshest frame was just force-flushed to disk, so it
+ * returns as the remembered view once solar ends too: settleAfterLive's no-battery branch
+ * restores it from disk. The solar refs are left untouched — that link is still reporting.
+ */
+function clearBmsView(): void {
+  battery.value = null
+  device.value = null
+  settings.value = null
+  history.splice(0, history.length)
 }
 
 /**
@@ -390,6 +403,7 @@ export function useTelemetry() {
     await bmsClient.disconnect()
     bmsState.value = 'idle'
     settleAfterLive()
+    if (solarState.value !== 'idle') clearBmsView()
   }
 
   async function startSolar(key: string): Promise<void> {

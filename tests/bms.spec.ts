@@ -1,3 +1,5 @@
+/// <reference types="node" />
+
 import { describe, expect, it } from 'vitest'
 
 import fixtures from './fixtures.json'
@@ -7,6 +9,7 @@ import {
   CMD_DEVICE_INFO,
   FRAME_CELL_INFO,
   FRAME_DEVICE_INFO,
+  FRAME_LENGTH,
   FRAME_SETTINGS,
   FrameAssembler,
   RESPONSE_HEADER,
@@ -139,6 +142,9 @@ describe('FrameAssembler', () => {
 
     for (let round = 0; round < 200; round += 1) {
       expect(assembler.feed(junk)).toHaveLength(0)
+      // The bound itself, not just the emitted count: the incomplete-frame trim keeps what is
+      // held back under one frame length no matter how much header-lookalike junk arrives.
+      expect(assembler.bufferedBytes).toBeLessThan(FRAME_LENGTH)
     }
 
     // A genuine frame still parses, proving the buffer neither wedged nor grew without bound.

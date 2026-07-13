@@ -3,7 +3,7 @@ import { computed } from 'vue'
 
 import StatusChip from './StatusChip.vue'
 import { celsius } from '../application/format'
-import type { FaultLevel } from '../application/telemetry'
+import { levelForThresholds, worstOf, type FaultLevel } from '../application/severity'
 import type { BatterySnapshot } from '../domain/bms/types'
 
 const props = defineProps<{ battery: BatterySnapshot }>()
@@ -14,17 +14,10 @@ const AXIS_MAX = 90
 /** A gauge past a threshold must say so in more than colour. */
 const GLYPHS: Record<FaultLevel, string> = { good: '', warning: '!', serious: '▲', critical: '✕' }
 
-function level(value: number, warn: number, serious: number, critical: number): FaultLevel {
-  if (value >= critical) return 'critical'
-  if (value >= serious) return 'serious'
-  if (value >= warn) return 'warning'
-  return 'good'
-}
-
 const gauges = computed(() => [
-  { label: 'MOSFET', value: props.battery.mosfetTemperature, level: level(props.battery.mosfetTemperature, 55, 70, 80) },
-  { label: 'Cell 1', value: props.battery.temperatureSensor1, level: level(props.battery.temperatureSensor1, 45, 55, 65) },
-  { label: 'Cell 2', value: props.battery.temperatureSensor2, level: level(props.battery.temperatureSensor2, 45, 55, 65) },
+  { label: 'MOSFET', value: props.battery.mosfetTemperature, level: levelForThresholds(props.battery.mosfetTemperature, 55, 70, 80) },
+  { label: 'Cell 1', value: props.battery.temperatureSensor1, level: levelForThresholds(props.battery.temperatureSensor1, 45, 55, 65) },
+  { label: 'Cell 2', value: props.battery.temperatureSensor2, level: levelForThresholds(props.battery.temperatureSensor2, 45, 55, 65) },
 ])
 
 function fraction(value: number): number {
@@ -37,14 +30,7 @@ const hottest = computed(() => gauges.value.reduce((worst, gauge) => (gauge.valu
 // reading is not always the highest-severity one — a 72 °C serious MOSFET must not mask a
 // 66 °C critical cell. The header badge carries the worst level across all three; the figure
 // beside it stays the hottest reading.
-const SEVERITY_ORDER: readonly FaultLevel[] = ['good', 'warning', 'serious', 'critical']
-
-const worstLevel = computed<FaultLevel>(() =>
-  gauges.value.reduce<FaultLevel>(
-    (worst, gauge) => (SEVERITY_ORDER.indexOf(gauge.level) > SEVERITY_ORDER.indexOf(worst) ? gauge.level : worst),
-    'good',
-  ),
-)
+const worstLevel = computed<FaultLevel>(() => worstOf(gauges.value.map((gauge) => gauge.level)))
 </script>
 
 <template>

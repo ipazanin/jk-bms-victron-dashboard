@@ -77,6 +77,11 @@ function indexOfHeader(buffer: Uint8Array, from: number): number {
 export class FrameAssembler {
   private buffer = new Uint8Array(0)
 
+  /** Bytes held back awaiting the rest of a frame. Bounded under FRAME_LENGTH by construction. */
+  get bufferedBytes(): number {
+    return this.buffer.length
+  }
+
   feed(chunk: Uint8Array): Uint8Array[] {
     const merged = new Uint8Array(this.buffer.length + chunk.length)
     merged.set(this.buffer, 0)

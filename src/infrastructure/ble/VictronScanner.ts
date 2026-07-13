@@ -54,6 +54,8 @@ export class VictronScanner {
 
   /** Call from a user gesture. requestLEScan is awaited before any other async work. */
   async start(keyHex: string): Promise<void> {
+    // Idempotent: a second start must not orphan the first scan or its stale timer.
+    this.stop()
     const key = parseAdvertisementKey(keyHex)
 
     if (typeof navigator.bluetooth?.requestLEScan !== 'function') {
