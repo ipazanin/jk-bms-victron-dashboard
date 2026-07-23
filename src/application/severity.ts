@@ -9,6 +9,16 @@
 
 export type FaultLevel = 'good' | 'warning' | 'serious' | 'critical'
 
+/**
+ * One line on the annunciator. It lives here rather than in telemetry so the recorder can name it
+ * without importing the module that imports the recorder — the two meet on this neutral type.
+ */
+export interface Fault {
+  readonly level: FaultLevel
+  readonly title: string
+  readonly detail: string
+}
+
 export const SEVERITY_ORDER: readonly FaultLevel[] = ['good', 'warning', 'serious', 'critical']
 
 /** The most severe level present, or 'good' when none are given. */

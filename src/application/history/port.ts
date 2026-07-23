@@ -35,6 +35,7 @@ import type {
   SolarChunk,
   StreamName,
   TimeWindow,
+  WarningRecord,
 } from '../../domain/history/types'
 import type { SolarReading } from '../../domain/solar/types'
 
@@ -172,6 +173,16 @@ export interface HistoryStore {
   /** Row and chunks die together. An orphan chunk is unreachable and holds budget forever. */
   deleteSession(id: SessionId): Promise<void>
 
+  /**
+   * Appends one warning episode. Out of the sample budget — warnings are bounded per session and
+   * die with it, so they never trip pruning and pruning never counts them.
+   */
+  appendWarning(record: WarningRecord): Promise<void>
+  /** Every warning of one session, in the order they fired. */
+  warningsOf(id: SessionId): Promise<readonly WarningRecord[]>
+  /** Warnings across every session, most recent first, for the standalone log. */
+  listWarnings(limit?: number): Promise<readonly WarningRecord[]>
+
   /** Newest first. */
   listSessions(limit?: number): Promise<readonly SessionListing[]>
   listDevices(): Promise<readonly DeviceRecord[]>
@@ -251,6 +262,9 @@ export function unavailableHistoryStore(reason: HistoryUnavailableReason): Histo
     }),
     closeSession: async () => undefined,
     deleteSession: async () => undefined,
+    appendWarning: async () => undefined,
+    warningsOf: async () => [],
+    listWarnings: async () => [],
     listSessions: async () => [],
     listDevices: async () => [],
     readSession: async () => null,

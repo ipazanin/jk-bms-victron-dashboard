@@ -33,6 +33,8 @@ import type {
   SessionRecord,
   SolarChunk,
   SolarSample,
+  WarningRecord,
+  WarningSnapshot,
 } from '../../src/domain/history/types'
 import { SNAPSHOT_SCHEMA_VERSION } from '../../src/domain/schemaVersion'
 import type { SolarReading } from '../../src/domain/solar/types'
@@ -293,6 +295,44 @@ export function deviceRecord(overrides: Partial<DeviceRecord> = {}): DeviceRecor
     firstSeenAt: SAMPLE_EPOCH,
     lastSeenAt: SAMPLE_EPOCH,
     sessionCount: 1,
+    ...overrides,
+  }
+}
+
+// ── warnings ─────────────────────────────────────────────────────────────────
+
+export function warningSnapshot(overrides: Partial<WarningSnapshot> = {}): WarningSnapshot {
+  return {
+    packCurrentA: -8.4,
+    packVoltageV: 13.573,
+    stateOfCharge: 98,
+    cellDeltaMv: 1,
+    highestCell: 1,
+    lowestCell: 3,
+    mosfetTemperatureC: 30.1,
+    temperature1C: 27.5,
+    temperature2C: 27.1,
+    chargingEnabled: true,
+    dischargingEnabled: true,
+    solarChargeState: 'bulk',
+    pvPowerW: 168,
+    solarBatteryCurrentA: 12.3,
+    housePowerW: 176,
+    houseCurrentA: 13,
+    houseLoadPlausible: true,
+    ...overrides,
+  }
+}
+
+export function warningRecord(overrides: Partial<WarningRecord> = {}): WarningRecord {
+  return {
+    sessionId: SESSION_ID,
+    seq: 0,
+    at: SAMPLE_EPOCH,
+    level: 'warning',
+    title: 'MOSFET hot',
+    detail: '72.0 °C. Reduce load or improve ventilation.',
+    snapshot: warningSnapshot(),
     ...overrides,
   }
 }

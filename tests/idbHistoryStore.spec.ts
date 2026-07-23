@@ -148,11 +148,17 @@ describe('the schema', () => {
     await adapter.dispose()
   })
 
-  it('builds all four stores and every index the archive reads through', async () => {
+  it('builds every store and every index the archive reads through', async () => {
     adapter = await openAdapter()
     const { database } = adapter
 
-    expect([...database.objectStoreNames].sort()).toEqual(['chunks', 'devices', 'meta', 'sessions'])
+    expect([...database.objectStoreNames].sort()).toEqual([
+      'chunks',
+      'devices',
+      'meta',
+      'sessions',
+      'warnings',
+    ])
 
     const transaction = database.transaction([...database.objectStoreNames], 'readonly')
     expect([...transaction.objectStore('sessions').indexNames].sort()).toEqual([
@@ -163,6 +169,7 @@ describe('the schema', () => {
     expect([...transaction.objectStore('chunks').indexNames]).toEqual(['bySession'])
     expect([...transaction.objectStore('devices').indexNames]).toEqual(['byLastSeen'])
     expect([...transaction.objectStore('meta').indexNames]).toEqual([])
+    expect([...transaction.objectStore('warnings').indexNames]).toEqual(['byTime'])
   })
 
   it('keys a chunk on its session, stream and sequence together', async () => {
@@ -170,6 +177,13 @@ describe('the schema', () => {
     const transaction = adapter.database.transaction(['chunks'], 'readonly')
 
     expect(transaction.objectStore('chunks').keyPath).toEqual(['sessionId', 'stream', 'seq'])
+  })
+
+  it('keys a warning on its session and sequence together', async () => {
+    adapter = await openAdapter()
+    const transaction = adapter.database.transaction(['warnings'], 'readonly')
+
+    expect(transaction.objectStore('warnings').keyPath).toEqual(['sessionId', 'seq'])
   })
 })
 

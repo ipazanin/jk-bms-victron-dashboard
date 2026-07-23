@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import StatusChip from './StatusChip.vue'
 import { relativeAge } from '../application/format'
+import { hashOf } from '../application/route'
 import type { RememberedStatus } from '../application/rememberedSession'
 
 const props = defineProps<{
@@ -33,6 +34,8 @@ const statusLabel = computed(() => {
   if (!status || status.worst === 'good') return 'All nominal when last seen'
   return `Last status: ${status.headline}`
 })
+
+const connectHref = hashOf({ name: 'connect' })
 </script>
 
 <template>
@@ -48,7 +51,7 @@ const statusLabel = computed(() => {
     <span class="stale-tag">STALE — not live data</span>
 
     <div class="controls">
-      <span class="hint">Connect the BMS below to go live.</span>
+      <span class="hint">Open <a :href="connectHref">Connect</a> to go live.</span>
       <button type="button" aria-label="Forget remembered data" @click="emit('forget')">Forget</button>
     </div>
   </header>
@@ -104,6 +107,15 @@ const statusLabel = computed(() => {
 .hint {
   font-size: 0.875rem;
   color: var(--ink-muted);
+}
+
+.hint a {
+  color: var(--pack-ink);
+  text-decoration: none;
+}
+
+.hint a:hover {
+  text-decoration: underline;
 }
 
 button {

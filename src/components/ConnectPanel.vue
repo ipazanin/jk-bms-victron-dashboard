@@ -16,10 +16,15 @@ const props = defineProps<{
   solarError: string | null
   foreignDeviceSeen: boolean
   initialKey: string
+  /** True when a last pack is remembered and this browser can rejoin it without the chooser. */
+  canReconnect: boolean
+  /** The remembered pack's name for the reconnect button, or null when it has none. */
+  reconnectName: string | null
 }>()
 
 const emit = defineEmits<{
   connectBms: [showAllDevices: boolean]
+  reconnectBms: []
   disconnectBms: []
   startSolar: [key: string]
   stopSolar: []
@@ -53,21 +58,43 @@ const keyLooksComplete = computed(() => /^[0-9a-f]{32}$/.test(normalisedKey.valu
     </p>
 
     <div class="actions">
-      <button
-        v-if="bmsState !== 'live'"
-        type="button"
-        class="primary"
-        :disabled="!capabilities.canConnect || bmsState === 'connecting'"
-        @click="emit('connectBms', showAllDevices)"
-      >
-        {{ bmsState === 'connecting' ? 'Connecting…' : 'Connect BMS' }}
+      <button v-if="bmsState === 'live'" type="button" @click="emit('disconnectBms')">
+        Disconnect BMS
       </button>
-      <button v-else type="button" @click="emit('disconnectBms')">Disconnect BMS</button>
+      <button v-else-if="bmsState === 'connecting'" type="button" class="primary" disabled>
+        Connecting…
+      </button>
+      <template v-else>
+        <!-- The remembered pack, rejoined without the chooser. Primary when it exists; the chooser
+             is then the escape hatch for connecting a different pack. -->
+        <button
+          v-if="canReconnect"
+          type="button"
+          class="primary"
+          :disabled="!capabilities.canConnect"
+          @click="emit('reconnectBms')"
+        >
+          Reconnect to {{ reconnectName ?? 'last pack' }}
+        </button>
+        <button
+          type="button"
+          :class="{ primary: !canReconnect }"
+          :disabled="!capabilities.canConnect"
+          @click="emit('connectBms', showAllDevices)"
+        >
+          {{ canReconnect ? 'Choose a different pack' : 'Connect BMS' }}
+        </button>
+      </template>
 
       <!-- Withheld only while a stored session is on the instruments: the log is where that
            session was opened from, and the banner above already carries the way back. -->
       <a v-if="source !== 'history'" class="button" :href="logHref">Browse the log</a>
     </div>
+
+    <p v-if="canReconnect && bmsState === 'idle'" class="hint">
+      Reconnect rejoins the pack you used last without the chooser. It also tries once on its own
+      each time this page loads.
+    </p>
 
     <label v-if="capabilities.canConnect && bmsState !== 'live'" class="checkbox">
       <input v-model="showAllDevices" type="checkbox" />

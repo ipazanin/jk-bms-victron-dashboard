@@ -12,6 +12,8 @@ export interface BleCapabilities {
   readonly hasBluetooth: boolean
   readonly secureContext: boolean
   readonly canConnect: boolean
+  /** getDevices() exists, so a previously-permitted pack can be reconnected without the chooser. */
+  readonly canReconnect: boolean
   readonly canScan: boolean
   readonly hasSubtleCrypto: boolean
 }
@@ -25,6 +27,7 @@ export function detectCapabilities(): BleCapabilities {
     hasBluetooth,
     secureContext,
     canConnect: hasBluetooth && typeof bluetooth!.requestDevice === 'function',
+    canReconnect: hasBluetooth && typeof bluetooth!.getDevices === 'function',
     canScan: hasBluetooth && typeof bluetooth!.requestLEScan === 'function',
     hasSubtleCrypto: typeof globalThis.crypto?.subtle?.decrypt === 'function',
   }

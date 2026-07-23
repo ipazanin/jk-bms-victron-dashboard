@@ -24,21 +24,37 @@ export interface FakeBmsLink {
   emitError(error: Error): void
   /** How a dismissed chooser reaches the app: connect() rejects and nothing else changes. */
   failNextConnectWith(error: Error): void
+  /** How an out-of-range or permission-gone pack reaches the app: reconnect() rejects. */
+  failNextReconnectWith(error: Error): void
+  /** The last id reconnect() was asked for, so a spec can assert the persisted id was used. */
+  readonly lastReconnectId: string | null
 }
 
-export function fakeBmsLink(options: { readonly deviceName?: string | null } = {}): FakeBmsLink {
+export function fakeBmsLink(
+  options: { readonly deviceName?: string | null; readonly deviceId?: string | null } = {},
+): FakeBmsLink {
   let handlers: JkBmsHandlers = {}
   let connected = false
   let nextConnectError: Error | null = null
+  let nextReconnectError: Error | null = null
+  let lastReconnectId: string | null = null
 
   const link: BmsLink = {
     deviceName: options.deviceName ?? null,
+    deviceId: options.deviceId ?? null,
     get connected() {
       return connected
     },
     async connect() {
       const failure = nextConnectError
       nextConnectError = null
+      if (failure !== null) throw failure
+      connected = true
+    },
+    async reconnect(deviceId: string) {
+      lastReconnectId = deviceId
+      const failure = nextReconnectError
+      nextReconnectError = null
       if (failure !== null) throw failure
       connected = true
     },
@@ -55,6 +71,9 @@ export function fakeBmsLink(options: { readonly deviceName?: string | null } = {
     get connected() {
       return connected
     },
+    get lastReconnectId() {
+      return lastReconnectId
+    },
     emitSnapshot: (snapshot) => handlers.onSnapshot?.(snapshot),
     emitDeviceInfo: (info) => handlers.onDeviceInfo?.(info),
     emitSettings: (settings) => handlers.onSettings?.(settings),
@@ -65,6 +84,9 @@ export function fakeBmsLink(options: { readonly deviceName?: string | null } = {
     emitError: (error) => handlers.onError?.(error),
     failNextConnectWith: (error) => {
       nextConnectError = error
+    },
+    failNextReconnectWith: (error) => {
+      nextReconnectError = error
     },
   }
 }

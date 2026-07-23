@@ -52,6 +52,7 @@ import type {
   SolarChunk,
   StreamName,
   TimeWindow,
+  WarningRecord,
 } from '../../src/domain/history/types'
 
 export interface MemoryHistoryStoreOptions {
@@ -82,6 +83,7 @@ export class MemoryHistoryStore implements HistoryStore {
   private readonly sessions = new Map<SessionId, SessionRecord>()
   private readonly chunks = new Map<string, HistoryChunk>()
   private readonly devices = new Map<DeviceKey, DeviceRecord>()
+  private readonly warnings = new Map<string, WarningRecord>()
   private readonly watchers = new Set<() => void>()
   private readonly now: () => number
 
@@ -175,6 +177,28 @@ export class MemoryHistoryStore implements HistoryStore {
 
   async deleteSession(id: SessionId): Promise<void> {
     this.removeSession(id)
+  }
+
+  async appendWarning(record: WarningRecord): Promise<void> {
+    this.warnings.set(`${record.sessionId}|${record.seq}`, structuredClone(record))
+  }
+
+  async warningsOf(id: SessionId): Promise<readonly WarningRecord[]> {
+    return [...this.warnings.values()]
+      .filter((warning) => warning.sessionId === id)
+      .sort((left, right) => left.seq - right.seq)
+      .map((warning) => structuredClone(warning))
+  }
+
+  async listWarnings(limit?: number): Promise<readonly WarningRecord[]> {
+    // Ties broken the way the adapter's byTime index breaks them on a 'prev' cursor: equal `at`
+    // falls back to descending primary key [sessionId, seq], so both stores select and order an
+    // equal-timestamp boundary identically.
+    const newestFirst = [...this.warnings.values()].sort(
+      (left, right) => right.at - left.at || compareWarningKeyDesc(left, right),
+    )
+    const rows = limit === undefined ? newestFirst : newestFirst.slice(0, limit)
+    return rows.map((warning) => structuredClone(warning))
   }
 
   // ── reading ────────────────────────────────────────────────────────────────
@@ -283,6 +307,9 @@ export class MemoryHistoryStore implements HistoryStore {
       this.chunks.delete(key)
       orphansRemoved += 1
     }
+    for (const [key, warning] of [...this.warnings]) {
+      if (!this.sessions.has(warning.sessionId)) this.warnings.delete(key)
+    }
 
     return { closed, orphansRemoved }
   }
@@ -354,6 +381,9 @@ export class MemoryHistoryStore implements HistoryStore {
       if (chunk.sessionId !== id) continue
       this.totalSamples -= countedRows(chunk)
       this.chunks.delete(key)
+    }
+    for (const [key, warning] of [...this.warnings]) {
+      if (warning.sessionId === id) this.warnings.delete(key)
     }
     this.sessions.delete(id)
   }
@@ -459,6 +489,12 @@ export class MemoryHistoryStore implements HistoryStore {
 
 function keyOf(chunk: ChunkKey): string {
   return `${chunk.sessionId}|${chunk.stream}|${chunk.seq}`
+}
+
+/** Descending [sessionId, seq], matching how a 'prev' cursor on the byTime index breaks equal-`at`. */
+function compareWarningKeyDesc(left: WarningRecord, right: WarningRecord): number {
+  if (left.sessionId !== right.sessionId) return left.sessionId > right.sessionId ? -1 : 1
+  return right.seq - left.seq
 }
 
 /** Rows the archive counter has been told about. An unsealed tail has told it nothing yet. */

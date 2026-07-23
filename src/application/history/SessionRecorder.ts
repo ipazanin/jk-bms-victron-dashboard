@@ -47,7 +47,12 @@ import {
   ledgerOfSample,
   mergeLedgers,
 } from '../../domain/history/ledger'
-import { CHUNK_CAPACITY, PACK_STREAM, SAMPLE_INTERVAL_MS } from '../../domain/history/types'
+import {
+  CHUNK_CAPACITY,
+  MAX_SESSION_WARNINGS,
+  PACK_STREAM,
+  SAMPLE_INTERVAL_MS,
+} from '../../domain/history/types'
 import type {
   CoverageRun,
   DeviceKey,
@@ -60,10 +65,12 @@ import type {
   SessionLedger,
   SessionRecord,
   SolarSample,
+  WarningRecord,
+  WarningSnapshot,
 } from '../../domain/history/types'
 import { SNAPSHOT_SCHEMA_VERSION } from '../../domain/schemaVersion'
 import type { SolarReading } from '../../domain/solar/types'
-import type { FaultLevel } from '../severity'
+import type { Fault, FaultLevel } from '../severity'
 import type {
   HistoryStore,
   HistoryUnavailableReason,
@@ -190,6 +197,11 @@ interface OpenSession {
   entries: SessionEntry[]
   entriesCapped: boolean
   faultStanding: boolean
+  /** Titles of the faults currently standing, so each episode is written once and only recurs
+   *  after it clears. */
+  activeWarnings: Set<string>
+  warnings: number
+  warningsCapped: boolean
   deepest: { readonly at: number; readonly stateOfCharge: number } | null
 
   /** Sealed chunks the store has not accepted yet, oldest first. */
@@ -354,6 +366,55 @@ export class SessionRecorder {
     const session = this.session
     if (session === null) return
     this.appendStatusEntry(session, this.clock.now(), worst, headline)
+  }
+
+  /**
+   * The faults standing this instant, with the readings behind them.
+   *
+   * A warning is written once, when its title first stands at a given level, and again if it
+   * clears and returns — so a fault standing for an hour is one row, not thirty-six hundred. An
+   * episode is keyed on level as well as title, so a fault that escalates (warning → serious) is
+   * recorded a second time at the higher level rather than frozen at the first: the imbalance and
+   * path-resistance faults share one title across two levels, where the MOSFET tiers do not. The
+   * snapshot is the caller's raw readings at this instant. Out of the sample budget: warnings die
+   * with their session, never on their own.
+   */
+  noteWarnings(faults: readonly Fault[], snapshot: WarningSnapshot, at: number): void {
+    if (this.disposed) return
+    const session = this.session
+    if (session === null || this.failure !== null) return
+
+    const present = new Set<string>()
+    for (const fault of faults) {
+      if (fault.level === 'good') continue
+      const key = `${fault.level}:${fault.title}`
+      present.add(key)
+      if (session.activeWarnings.has(key)) continue
+      session.activeWarnings.add(key)
+      if (session.warningsCapped) continue
+      if (session.warnings >= MAX_SESSION_WARNINGS) {
+        session.warningsCapped = true
+        continue
+      }
+      const record: WarningRecord = {
+        sessionId: session.id,
+        seq: session.warnings,
+        at,
+        level: fault.level,
+        title: fault.title,
+        detail: fault.detail,
+        snapshot,
+      }
+      session.warnings += 1
+      this.enqueue(async () => {
+        const store = this.usableStore()
+        if (store !== null) await store.appendWarning(record)
+      })
+    }
+    // Drop cleared episodes so a fault that returns, or steps back down a level, records afresh.
+    for (const key of session.activeWarnings) {
+      if (!present.has(key)) session.activeWarnings.delete(key)
+    }
   }
 
   /**
@@ -527,6 +588,9 @@ export class SessionRecorder {
       entries: [{ at, kind: 'begin', level: 'neutral', text: 'Session begins' }],
       entriesCapped: false,
       faultStanding: false,
+      activeWarnings: new Set(),
+      warnings: 0,
+      warningsCapped: false,
       deepest: null,
       pending: [],
       writing: false,

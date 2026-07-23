@@ -40,8 +40,12 @@ import type {
   SessionRecord,
   SolarSample,
   TimeWindow,
+  WarningRecord,
 } from '../../domain/history/types'
 import type { HistoryAvailability, HistoryStore, SessionListing, StoredSession } from './port'
+
+/** The standalone warnings log reads this many at most, most recent first. */
+const WARNING_LIST_LIMIT = 500
 
 /** The export is deliberately never windowed: a file holding part of a session would read as all
  *  of it, and on iOS it is the only copy anybody keeps. */
@@ -110,6 +114,8 @@ export interface HistoryBrowser {
   readonly availability: ComputedRef<HistoryAvailability | null>
   readonly sessions: Readonly<Ref<readonly SessionListing[]>>
   readonly devices: Readonly<Ref<readonly DeviceRecord[]>>
+  /** Warnings across every session, most recent first, refreshed with the session list. */
+  readonly warnings: Readonly<Ref<readonly WarningRecord[]>>
   readonly groups: ComputedRef<readonly SessionGroup[]>
   readonly archive: ComputedRef<ArchiveSummary>
   readonly usage: Readonly<Ref<ArchiveUsage | null>>
@@ -165,6 +171,7 @@ export function sessionDurationMs(record: SessionRecord, now: number): number {
 export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   const sessions = shallowRef<readonly SessionListing[]>([])
   const devices = shallowRef<readonly DeviceRecord[]>([])
+  const warnings = shallowRef<readonly WarningRecord[]>([])
   const usage = ref<ArchiveUsage | null>(null)
   const refreshing = ref(false)
   const loading = ref(false)
@@ -264,14 +271,16 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     const token = (listToken += 1)
     refreshing.value = true
     try {
-      const [listed, known, totals] = await Promise.all([
+      const [listed, known, totals, warned] = await Promise.all([
         store.listSessions(),
         store.listDevices(),
         store.usage(),
+        store.listWarnings(WARNING_LIST_LIMIT),
       ])
       if (token !== listToken) return
       sessions.value = listed
       devices.value = known
+      warnings.value = warned
       usage.value = usageOf(totals.totalSamples, totals.sessions)
       listedAt.value = deps.now()
       failure.value = null
@@ -485,6 +494,7 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     availability,
     sessions,
     devices,
+    warnings,
     groups,
     archive,
     usage,

@@ -14,6 +14,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import DeviceGroup from './DeviceGroup.vue'
+import LogTabs from './LogTabs.vue'
 import StorageLine from './StorageLine.vue'
 import { useHistoryBrowser } from '../../application/history/historyBrowser'
 import { useTelemetry } from '../../application/telemetry'
@@ -75,6 +76,8 @@ function spacedTotal(elapsedMs: number): string {
       <p v-if="archive.sessions > 0" class="readout totals">{{ totals }}</p>
       <StorageLine :usage="usage" :availability="availability" />
     </header>
+
+    <LogTabs />
 
     <p v-if="missing !== null" class="notice copy" role="status">
       That session was dropped to make room.

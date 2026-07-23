@@ -234,6 +234,55 @@ export interface SessionEntry {
   readonly text: string
 }
 
+// ── warnings: a fault kept with the data that caused it ───────────────────────
+
+/** A warning is never 'good' or 'neutral' — those are the absence of one. */
+export type WarningLevel = 'warning' | 'serious' | 'critical'
+
+/**
+ * The instrument readings at the instant a warning fired, kept beside it so the log can answer
+ * "what caused this" without replaying the whole session. Every field is what a radio actually
+ * said and nothing derived is stored except the house figures, which the reconciliation owns and
+ * which a later floor correction would change — so they carry their own plausibility flag.
+ */
+export interface WarningSnapshot {
+  readonly packCurrentA: number | null
+  readonly packVoltageV: number | null
+  readonly stateOfCharge: number | null
+  readonly cellDeltaMv: number | null
+  readonly highestCell: number | null
+  readonly lowestCell: number | null
+  readonly mosfetTemperatureC: number | null
+  readonly temperature1C: number | null
+  readonly temperature2C: number | null
+  readonly chargingEnabled: boolean | null
+  readonly dischargingEnabled: boolean | null
+  readonly solarChargeState: ChargeState | null
+  readonly pvPowerW: number | null
+  readonly solarBatteryCurrentA: number | null
+  readonly housePowerW: number | null
+  readonly houseCurrentA: number | null
+  readonly houseLoadPlausible: boolean | null
+}
+
+/**
+ * One warning episode: it is written once when the fault first appears, not once per second it
+ * stands, and it carries the annunciator text exactly as it read plus the snapshot behind it.
+ */
+export interface WarningRecord {
+  readonly sessionId: SessionId
+  /** 0-based within its session, so the primary key [sessionId, seq] orders episodes as they fired. */
+  readonly seq: number
+  readonly at: number
+  readonly level: WarningLevel
+  readonly title: string
+  readonly detail: string
+  readonly snapshot: WarningSnapshot
+}
+
+/** A flapping fault could otherwise write a warning a second; past this a session records no more. */
+export const MAX_SESSION_WARNINGS = 200
+
 export interface SessionRecord {
   readonly id: SessionId
   /** The snapshot schema in force when this row was written. */

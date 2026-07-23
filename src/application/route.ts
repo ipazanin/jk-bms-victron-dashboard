@@ -18,14 +18,23 @@ import type { SessionId } from '../domain/history/types'
 
 export type Route =
   | { readonly name: 'dashboard' }
+  | { readonly name: 'connect' }
+  | { readonly name: 'stats' }
   | { readonly name: 'log' }
+  | { readonly name: 'warnings' }
   | { readonly name: 'session'; readonly id: SessionId }
 
 const LOG_SEGMENT = 'log'
+const CONNECT_SEGMENT = 'connect'
+const STATS_SEGMENT = 'stats'
+const WARNINGS_SEGMENT = 'warnings'
 
 /** Shared instances, so a hashchange that resolves to the same place assigns nothing. */
 const DASHBOARD: Route = { name: 'dashboard' }
+const CONNECT: Route = { name: 'connect' }
+const STATS: Route = { name: 'stats' }
 const LOG: Route = { name: 'log' }
+const WARNINGS: Route = { name: 'warnings' }
 
 const current = ref<Route>(parseRoute(currentHash()))
 
@@ -34,9 +43,10 @@ export const route: Readonly<Ref<Route>> = current
 
 /**
  * The grammar, in one place and pure so it can be tested without a window: `#/` or no hash at all
- * is the dashboard, `#/log` is the list, `#/log/<sessionId>` is one session. Anything else is the
- * dashboard rather than an error page — a stale bookmark should land somewhere useful and say
- * nothing, which is what a hash the app no longer understands deserves.
+ * is the dashboard, `#/connect` and `#/stats` are the two standalone tabs, `#/log` is the list,
+ * `#/log/<sessionId>` is one session. Anything else is the dashboard rather than an error page — a
+ * stale bookmark should land somewhere useful and say nothing, which is what a hash the app no
+ * longer understands deserves.
  */
 export function parseRoute(hash: string): Route {
   const segments = hash
@@ -44,6 +54,9 @@ export function parseRoute(hash: string): Route {
     .split('/')
     .filter((segment) => segment.length > 0)
 
+  if (segments[0] === CONNECT_SEGMENT) return CONNECT
+  if (segments[0] === STATS_SEGMENT) return STATS
+  if (segments[0] === WARNINGS_SEGMENT) return WARNINGS
   if (segments[0] !== LOG_SEGMENT) return DASHBOARD
   if (segments.length === 1) return LOG
 
@@ -54,6 +67,12 @@ export function parseRoute(hash: string): Route {
 /** The href a link should carry, so navigation is real anchors the browser can open in a new tab. */
 export function hashOf(target: Route): string {
   switch (target.name) {
+    case 'connect':
+      return `#/${CONNECT_SEGMENT}`
+    case 'stats':
+      return `#/${STATS_SEGMENT}`
+    case 'warnings':
+      return `#/${WARNINGS_SEGMENT}`
     case 'log':
       return `#/${LOG_SEGMENT}`
     case 'session':

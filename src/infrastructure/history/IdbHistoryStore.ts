@@ -40,6 +40,7 @@ import type {
   SolarChunk,
   StreamName,
   TimeWindow,
+  WarningRecord,
 } from '../../domain/history/types'
 import { SNAPSHOT_SCHEMA_VERSION } from '../../domain/schemaVersion'
 import { renderWindowFor } from '../../application/history/port'
@@ -56,19 +57,21 @@ import type { ArchiveChannel } from './archiveChannel'
 import { classifyWriteFailure, cursorEach, requestAsPromise, runTransaction } from './idb'
 
 export const DATABASE_NAME = 'shunt.log'
-export const DATABASE_VERSION = 1
+export const DATABASE_VERSION = 2
 
 const SESSIONS = 'sessions'
 const CHUNKS = 'chunks'
 const DEVICES = 'devices'
 const META = 'meta'
-const EVERY_STORE = [SESSIONS, CHUNKS, DEVICES, META]
+const WARNINGS = 'warnings'
+const EVERY_STORE = [SESSIONS, CHUNKS, DEVICES, META, WARNINGS]
 
 const BY_STARTED_AT = 'byStartedAt'
 const BY_DEVICE = 'byDevice'
 const BY_STATE = 'byState'
 const BY_SESSION = 'bySession'
 const BY_LAST_SEEN = 'byLastSeen'
+const BY_TIME = 'byTime'
 
 const TOTALS_KEY = 'totals'
 
@@ -113,6 +116,12 @@ export function applySchema(database: IDBDatabase, oldVersion: number): void {
     devices.createIndex(BY_LAST_SEEN, 'lastSeenAt')
 
     database.createObjectStore(META, { keyPath: 'key' })
+  }
+  if (oldVersion < 2) {
+    // Keyed [sessionId, seq] so one session's warnings are a contiguous range that dies with it;
+    // indexed by time for the standalone log, which reads them most-recent-first across sessions.
+    const warnings = database.createObjectStore(WARNINGS, { keyPath: ['sessionId', 'seq'] })
+    warnings.createIndex(BY_TIME, 'at')
   }
 }
 
@@ -201,6 +210,38 @@ export class IdbHistoryStore implements HistoryStore {
       await this.writeTotal(transaction, meta, meta.totalSamples - freed, now)
     })
     this.channel.post('pruned')
+  }
+
+  async appendWarning(record: WarningRecord): Promise<void> {
+    if (!this.connected) return
+    await runTransaction(this.database, [WARNINGS], 'readwrite', async (transaction) => {
+      await requestAsPromise(transaction.objectStore(WARNINGS).put(record))
+    })
+  }
+
+  async warningsOf(id: SessionId): Promise<readonly WarningRecord[]> {
+    if (!this.connected) return []
+    return runTransaction(this.database, [WARNINGS], 'readonly', async (transaction) => {
+      const records: WarningRecord[] = []
+      const range = IDBKeyRange.bound([id], [id, HIGHEST_SEQ])
+      await cursorEach(transaction.objectStore(WARNINGS).openCursor(range), (cursor) => {
+        records.push(cursor.value as WarningRecord)
+      })
+      return records
+    })
+  }
+
+  async listWarnings(limit?: number): Promise<readonly WarningRecord[]> {
+    if (!this.connected) return []
+    return runTransaction(this.database, [WARNINGS], 'readonly', async (transaction) => {
+      const records: WarningRecord[] = []
+      const newestFirst = transaction.objectStore(WARNINGS).index(BY_TIME).openCursor(null, 'prev')
+      await cursorEach(newestFirst, (cursor) => {
+        if (limit !== undefined && records.length >= limit) return false
+        records.push(cursor.value as WarningRecord)
+      })
+      return records
+    })
   }
 
   async listSessions(limit: number = MAX_SESSIONS): Promise<readonly SessionListing[]> {
@@ -397,6 +438,13 @@ export class IdbHistoryStore implements HistoryStore {
           orphansRemoved += 1
         })
 
+        // Warnings whose session row is gone — a crash between two writes of a delete — go too.
+        const warnings = transaction.objectStore(WARNINGS)
+        await cursorEach(warnings.openKeyCursor(), (cursor) => {
+          const [sessionId] = cursor.primaryKey as [SessionId, number]
+          if (!surviving.has(sessionId)) warnings.delete(cursor.primaryKey)
+        })
+
         const meta = await this.readMeta(transaction, now)
         await this.writeTotal(transaction, meta, totalSamples, null)
         return { closed, orphansRemoved }
@@ -565,7 +613,7 @@ export class IdbHistoryStore implements HistoryStore {
     return { evicted: plan.evict, freedSamples, truncatedFrom: refined.truncate.retainedFrom }
   }
 
-  /** Drops a session whole: its row and every one of its chunks, or neither. Returns what it freed. */
+  /** Drops a session whole: its row, every chunk, and every warning, or none. Returns what it freed. */
   private async evictSession(transaction: IDBTransaction, id: SessionId): Promise<number> {
     const sessions = transaction.objectStore(SESSIONS)
     const chunks = transaction.objectStore(CHUNKS)
@@ -574,6 +622,10 @@ export class IdbHistoryStore implements HistoryStore {
     // missed would outlive its session row, and an unreachable chunk holds budget forever.
     await cursorEach(chunks.index(BY_SESSION).openKeyCursor(IDBKeyRange.only(id)), (cursor) => {
       chunks.delete(cursor.primaryKey)
+    })
+    const warnings = transaction.objectStore(WARNINGS)
+    await cursorEach(warnings.openKeyCursor(IDBKeyRange.bound([id], [id, HIGHEST_SEQ])), (cursor) => {
+      warnings.delete(cursor.primaryKey)
     })
     await requestAsPromise(sessions.delete(id))
     return stored?.sealedSamples ?? 0

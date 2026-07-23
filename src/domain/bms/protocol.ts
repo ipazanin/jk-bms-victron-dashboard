@@ -14,7 +14,9 @@ export const JK_CHARACTERISTIC = 0xffe1
 
 export const CMD_DEVICE_INFO = 0x97
 export const CMD_CELL_INFO = 0x96
-const READ_COMMANDS: ReadonlySet<number> = new Set([CMD_DEVICE_INFO, CMD_CELL_INFO])
+/** The event logbook: device-side history of protections, power cycles and mode changes. */
+export const CMD_LOGBOOK = 0xa1
+const READ_COMMANDS: ReadonlySet<number> = new Set([CMD_DEVICE_INFO, CMD_CELL_INFO, CMD_LOGBOOK])
 
 const COMMAND_HEADER = [0xaa, 0x55, 0x90, 0xeb] as const
 export const RESPONSE_HEADER = [0x55, 0xaa, 0xeb, 0x90] as const
@@ -25,6 +27,7 @@ export const COMMAND_LENGTH = 20
 export const FRAME_SETTINGS = 0x01
 export const FRAME_CELL_INFO = 0x02
 export const FRAME_DEVICE_INFO = 0x03
+export const FRAME_LOGBOOK = 0x05
 
 /** The cell-voltage and cell-resistance blocks each hold 32 slots, populated or not. */
 export const MAX_CELLS = 32

@@ -24,7 +24,7 @@ import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../domain/bms/typ
 import { JOINT_SERIOUS, JOINT_WARNING } from '../domain/cellBalance'
 import { reconcile } from '../domain/dcBus'
 import { solarDeviceKeyFor } from '../domain/history/identity'
-import type { DeviceKey, SessionEndReason, SessionRecord } from '../domain/history/types'
+import type { DeviceKey, SessionEndReason, SessionRecord, WarningSnapshot } from '../domain/history/types'
 import { SNAPSHOT_SCHEMA_VERSION } from '../domain/schemaVersion'
 import type { SolarReading } from '../domain/solar/types'
 import { adapterAvailable, detectCapabilities, watchAdapter } from '../infrastructure/ble/capabilities'
@@ -47,7 +47,12 @@ import {
   saveRememberedSession,
 } from './rememberedSession'
 import type { RememberedStatus } from './rememberedSession'
-import { worstOf, type FaultLevel } from './severity'
+import { worstOf } from './severity'
+import type { Fault, FaultLevel } from './severity'
+import { loadLastDevice, saveLastDevice } from './lastDevice'
+import type { LastDevice } from './lastDevice'
+import { loadLogbook, saveLogbook } from './logbook'
+import type { StoredLogbook } from './logbook'
 import { saveAdvertisementKey } from './storage'
 
 export type LinkState = 'idle' | 'connecting' | 'listening' | 'live' | 'error'
@@ -58,13 +63,7 @@ export type LinkState = 'idle' | 'connecting' | 'listening' | 'live' | 'error'
  * the remembered snapshot and cannot be recorded as if it were happening now.
  */
 export type Source = 'none' | 'live' | 'remembered' | 'history'
-export type { FaultLevel }
-
-export interface Fault {
-  readonly level: FaultLevel
-  readonly title: string
-  readonly detail: string
-}
+export type { Fault, FaultLevel } from './severity'
 
 export interface TrendPoint {
   readonly at: number
@@ -132,6 +131,15 @@ export function createTelemetry(deps: TelemetryDeps) {
   /** Populated only in 'remembered' mode, from the persisted session. */
   const rememberedAt = ref<number | null>(null)
   const rememberedStatus = ref<RememberedStatus | null>(null)
+
+  /**
+   * The pack this browser last connected to, so a return visit can reconnect without the chooser.
+   * Loaded from localStorage at construction and refreshed on every successful connect.
+   */
+  const lastDevice = ref<LastDevice | null>(loadLastDevice())
+
+  /** The device's own event history, fetched once per connection and kept for offline review. */
+  const logbook = shallowRef<StoredLogbook | null>(loadLogbook())
 
   let lastWriteAt = 0
   /** Observation time of the latest battery snapshot — the honest age of remembered data. */
@@ -255,6 +263,43 @@ export function createTelemetry(deps: TelemetryDeps) {
     faults.value = observations.latchFaults(found, at)
   }
 
+  /**
+   * Records each standing fault once, with the readings behind it. Called after the recorder has
+   * been told about the sample, never from inside `evaluateFaults`: the session opens on that
+   * sample, and a warning noted before it would attach to no session and be dropped. The recorder
+   * writes each title once and again only after it clears, so a fault that stands is one row.
+   */
+  function noteWarnings(at: number): void {
+    if (source.value !== 'live') return
+    recorder.noteWarnings(faults.value, warningSnapshotOf(), at)
+  }
+
+  /** The instrument readings behind a warning, taken from the raw snapshot and never a damped one. */
+  function warningSnapshotOf(): WarningSnapshot {
+    const pack = battery.value
+    const reading = solar.value
+    const reconciliation = bus.value
+    return {
+      packCurrentA: pack?.current ?? null,
+      packVoltageV: pack?.packVoltage ?? null,
+      stateOfCharge: pack?.stateOfCharge ?? null,
+      cellDeltaMv: pack ? Math.round(pack.cellDelta * 1000) : null,
+      highestCell: pack?.highestCell ?? null,
+      lowestCell: pack?.lowestCell ?? null,
+      mosfetTemperatureC: pack?.mosfetTemperature ?? null,
+      temperature1C: pack?.temperatureSensor1 ?? null,
+      temperature2C: pack?.temperatureSensor2 ?? null,
+      chargingEnabled: pack?.chargingEnabled ?? null,
+      dischargingEnabled: pack?.dischargingEnabled ?? null,
+      solarChargeState: reading?.chargeState ?? null,
+      pvPowerW: reading?.pvPower ?? null,
+      solarBatteryCurrentA: reading?.batteryCurrent ?? null,
+      housePowerW: reconciliation?.housePower ?? null,
+      houseCurrentA: reconciliation?.houseCurrent ?? null,
+      houseLoadPlausible: reconciliation?.houseLoadPlausible ?? null,
+    }
+  }
+
   /** A claim about the fault list, which is what this computes — never a clean bill of health. */
   function currentStatus(): RememberedStatus {
     return { worst: worstFault.value, headline: faults.value[0]?.title ?? 'No active faults' }
@@ -317,7 +362,10 @@ export function createTelemetry(deps: TelemetryDeps) {
     evaluateFaults(at)
     recordSample()
     persistRememberedNow()
-    if (source.value === 'live') recorder.notePack(snapshot)
+    if (source.value === 'live') {
+      recorder.notePack(snapshot)
+      noteWarnings(at)
+    }
   }
 
   const bmsLink = deps.createBmsLink({
@@ -329,6 +377,14 @@ export function createTelemetry(deps: TelemetryDeps) {
     onSettings: (parsed) => {
       settings.value = parsed
       recorder.noteSettings(parsed)
+    },
+    onLogbook: (events) => {
+      // Uptime is what turns seconds-since-boot into real dates; the pack streams it in the cell
+      // frame that arrives before the logbook, so it is normally known by now.
+      const uptimeSecondsAtFetch = battery.value?.uptimeSeconds ?? device.value?.uptimeSeconds ?? null
+      const stored: StoredLogbook = { fetchedAt: now(), uptimeSecondsAtFetch, events }
+      logbook.value = stored
+      saveLogbook(stored)
     },
     onDisconnect: (reason) => {
       bmsState.value = 'idle'
@@ -352,7 +408,10 @@ export function createTelemetry(deps: TelemetryDeps) {
       // Sample here too: a run of solar advertisements between BMS frames must still feed the
       // trend, and the SAMPLE_INTERVAL_MS gate keeps it to one point a second across both radios.
       recordSample()
-      if (source.value === 'live') recorder.noteSolar(reading, rssi)
+      if (source.value === 'live') {
+        recorder.noteSolar(reading, rssi)
+        noteWarnings(at)
+      }
     },
     onForeignDevice: () => (foreignDeviceSeen.value = true),
     onStale: () => {
@@ -360,9 +419,12 @@ export function createTelemetry(deps: TelemetryDeps) {
       // frozen reading so the derived house load disappears rather than lying, and fall back
       // to 'listening' — the scan is still up and the controller may return.
       if (solarState.value !== 'live') return
+      const at = now()
       solar.value = null
       solarState.value = 'listening'
-      evaluateFaults(now())
+      evaluateFaults(at)
+      // Clears any solar-only fault from the active set so it can record again if it returns.
+      noteWarnings(at)
       // Not a session end. Without it the recorder would stamp the last reading into every row
       // all night, and compute a house load against a frozen charge current.
       recorder.endSolarStream()
@@ -542,6 +604,7 @@ export function createTelemetry(deps: TelemetryDeps) {
       await bmsLink.connect(showAllDevices)
       bmsState.value = 'live'
       source.value = 'live'
+      rememberConnectedDevice()
     } catch (error) {
       bmsState.value = 'idle'
       bmsError.value = describeConnectError(error as Error)
@@ -549,6 +612,45 @@ export function createTelemetry(deps: TelemetryDeps) {
       // remembered view if nothing came live to replace it.
       if (source.value === 'none' && !battery.value) restoreRemembered()
     }
+  }
+
+  /**
+   * Reconnect to the last pack without the chooser. Needs no user gesture, so it also runs once on
+   * load — silently, so a pack that is simply out of range says nothing rather than painting an
+   * error over a page the owner did not ask to connect.
+   *
+   * The remembered view is held up through the attempt, banner and all, and only torn down once the
+   * link is genuinely live: a reconnect that times out ten seconds later must leave the last numbers
+   * on screen, not a blank. No frame can arrive between `reconnect` resolving and `source` flipping,
+   * because a notification handler cannot run until this synchronous tail yields.
+   */
+  async function reconnectBms(silent = false): Promise<void> {
+    if (bmsState.value === 'live' || bmsState.value === 'connecting') return
+    const remembered = lastDevice.value
+    if (remembered === null || !capabilities.canReconnect) return
+    bmsError.value = null
+    bmsState.value = 'connecting'
+    try {
+      await bmsLink.reconnect(remembered.id)
+      if (source.value === 'remembered') leaveRemembered()
+      else if (source.value === 'history') leaveHistory()
+      bmsState.value = 'live'
+      source.value = 'live'
+      rememberConnectedDevice()
+    } catch (error) {
+      bmsState.value = 'idle'
+      if (!silent) bmsError.value = describeConnectError(error as Error)
+      if (source.value === 'none' && !battery.value) restoreRemembered()
+    }
+  }
+
+  /** Persist the live pack's id and name so the next visit can skip the chooser. */
+  function rememberConnectedDevice(): void {
+    const id = bmsLink.deviceId
+    if (id === null) return
+    const record: LastDevice = { id, name: bmsLink.deviceName, at: now() }
+    saveLastDevice(record.id, record.name, record.at)
+    lastDevice.value = record
   }
 
   async function disconnectBms(): Promise<void> {
@@ -667,6 +769,8 @@ export function createTelemetry(deps: TelemetryDeps) {
     history,
     rememberedAt: readonly(rememberedAt),
     rememberedStatus: readonly(rememberedStatus),
+    lastDevice: readonly(lastDevice),
+    logbook,
     packReach: observations.packReach,
     solarReach: observations.solarReach,
     cellReach: observations.cellReach,
@@ -674,6 +778,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     projection: observations.projection,
     recording,
     connectBms,
+    reconnectBms,
     disconnectBms,
     startSolar,
     stopSolar,

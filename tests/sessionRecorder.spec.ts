@@ -17,9 +17,10 @@ import {
   SAMPLE_INTERVAL_MS,
 } from '../src/domain/history/types'
 import type { PackSample, SessionId, SolarSample } from '../src/domain/history/types'
+import type { Fault } from '../src/application/severity'
 import type { SolarReading } from '../src/domain/solar/types'
 import { MemoryHistoryStore } from './support/MemoryHistoryStore'
-import { SAMPLE_EPOCH, battery, deviceInfo, solarReading } from './support/samples'
+import { SAMPLE_EPOCH, battery, deviceInfo, solarReading, warningSnapshot } from './support/samples'
 
 // The recorder is driven exactly as the radios drive it: synchronous observations, no awaits on
 // the observation path, and every write pushed onto a chain the spec drains at the end. The clock
@@ -880,5 +881,44 @@ describe('the zombie guard', () => {
     await harness.recorder.drain()
 
     expect(harness.recorder.state.sessionId).toBe(id)
+  })
+})
+
+describe('warnings', () => {
+  const imbalance = (level: Fault['level'], detail: string): Fault[] => [
+    { level, title: 'Cell imbalance', detail },
+  ]
+
+  it('records an escalation of the same fault as a second row at the higher level', async () => {
+    harness = harnessFor()
+    harness.recorder.notePack(battery()) // opens a session
+    harness.recorder.noteWarnings(imbalance('warning', '20 mV'), warningSnapshot(), SAMPLE_EPOCH)
+    harness.recorder.noteWarnings(imbalance('serious', '55 mV'), warningSnapshot(), SAMPLE_EPOCH + 1_000)
+    await harness.recorder.drain()
+
+    const warnings = await harness.store.listWarnings()
+    expect(warnings.map((warning) => warning.level).sort()).toEqual(['serious', 'warning'])
+  })
+
+  it('writes one row while a fault stands at the same level', async () => {
+    harness = harnessFor()
+    harness.recorder.notePack(battery())
+    for (let index = 0; index < 4; index += 1) {
+      harness.recorder.noteWarnings(imbalance('warning', '20 mV'), warningSnapshot(), SAMPLE_EPOCH + index * 1_000)
+    }
+    await harness.recorder.drain()
+
+    expect(await harness.store.listWarnings()).toHaveLength(1)
+  })
+
+  it('records afresh after a fault clears and returns', async () => {
+    harness = harnessFor()
+    harness.recorder.notePack(battery())
+    harness.recorder.noteWarnings(imbalance('warning', 'x'), warningSnapshot(), SAMPLE_EPOCH)
+    harness.recorder.noteWarnings([], warningSnapshot(), SAMPLE_EPOCH + 1_000) // clears
+    harness.recorder.noteWarnings(imbalance('warning', 'x'), warningSnapshot(), SAMPLE_EPOCH + 2_000) // returns
+    await harness.recorder.drain()
+
+    expect(await harness.store.listWarnings()).toHaveLength(2)
   })
 })

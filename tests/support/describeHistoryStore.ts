@@ -31,6 +31,7 @@ import {
   sessionRecord,
   solarChunk,
   solarSamples,
+  warningRecord,
 } from './samples'
 
 /** What a spec has to hand back so the suite can open a store and let go of it again. */
@@ -519,6 +520,59 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
         expect(outcome.prunedSessionIds).toEqual(['session-0000', 'session-0001', 'session-0002'])
         expect((await store.usage()).sessions).toBe(MAX_SESSIONS)
         expect(await store.readSession('session-0000')).toBeNull()
+      })
+    })
+
+    describe('warnings', () => {
+      it("reads back a session's warnings in the order they fired", async () => {
+        await store.openSession(sessionRecord())
+        await store.appendWarning(warningRecord({ seq: 0, title: 'Cells warm' }))
+        await store.appendWarning(warningRecord({ seq: 1, title: 'MOSFET hot' }))
+
+        const warnings = await store.warningsOf(SESSION_ID)
+        expect(warnings.map((warning) => warning.title)).toEqual(['Cells warm', 'MOSFET hot'])
+        expect(warnings[0].snapshot.packCurrentA).toBe(-8.4)
+      })
+
+      it('lists warnings across sessions, most recent first, honouring a limit', async () => {
+        await store.openSession(sessionRecord({ id: 'session-a' }))
+        await store.openSession(sessionRecord({ id: 'session-b' }))
+        await store.appendWarning(warningRecord({ sessionId: 'session-a', seq: 0, at: SAMPLE_EPOCH }))
+        await store.appendWarning(warningRecord({ sessionId: 'session-b', seq: 0, at: SAMPLE_EPOCH + 5_000 }))
+        await store.appendWarning(warningRecord({ sessionId: 'session-a', seq: 1, at: SAMPLE_EPOCH + 10_000 }))
+
+        const all = await store.listWarnings()
+        expect(all.map((warning) => warning.at)).toEqual([
+          SAMPLE_EPOCH + 10_000,
+          SAMPLE_EPOCH + 5_000,
+          SAMPLE_EPOCH,
+        ])
+        expect(await store.listWarnings(2)).toHaveLength(2)
+      })
+
+      it('takes a session’s warnings with it when the session is deleted', async () => {
+        await openWithRows(4)
+        await store.appendWarning(warningRecord({ seq: 0 }))
+        await store.appendWarning(warningRecord({ seq: 1 }))
+
+        await store.deleteSession(SESSION_ID)
+
+        expect(await store.warningsOf(SESSION_ID)).toEqual([])
+        expect(await store.listWarnings()).toEqual([])
+      })
+
+      it('leaves another session’s warnings alone when one is deleted', async () => {
+        await openWithRows(4, 'session-a')
+        await openWithRows(4, 'session-b')
+        await store.appendWarning(warningRecord({ sessionId: 'session-a', seq: 0 }))
+        await store.appendWarning(warningRecord({ sessionId: 'session-b', seq: 0 }))
+
+        await store.deleteSession('session-a')
+
+        expect(await store.warningsOf('session-a')).toEqual([])
+        expect((await store.warningsOf('session-b')).map((warning) => warning.sessionId)).toEqual([
+          'session-b',
+        ])
       })
     })
 
