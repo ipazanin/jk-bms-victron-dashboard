@@ -4,10 +4,15 @@
  * the last-seen instruments instead of the empty landing page. Like the encryption key,
  * it never leaves the browser: the site is static and has no backend.
  *
- * Only genuinely live data is ever written here; demo replay never sets the source to
- * 'live', so it structurally cannot reach this module.
+ * This is the fast path, and the archive is not: localStorage is synchronous, so the last frame
+ * is on screen at first paint, whereas opening IndexedDB would flash the landing page first.
+ * The two are kept in step by SNAPSHOT_SCHEMA_VERSION rather than by separate version constants.
+ *
+ * Only a genuinely live session is ever written here — the write is guarded on the source being
+ * 'live', so nothing restored or replayed can overwrite the frame it was itself restored from.
  */
 
+import { SNAPSHOT_SCHEMA_VERSION } from '../domain/schemaVersion'
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../domain/bms/types'
 import type { ChargeState, SolarReading } from '../domain/solar/types'
 // Type-only: FaultLevel is erased at build, so this leaves no runtime import edge back
@@ -16,11 +21,20 @@ import type { FaultLevel } from './telemetry'
 
 const SESSION_STORAGE = 'shunt.rememberedSession'
 
-/** Bump when BatterySnapshot/SolarReading gain or rename fields; old payloads then drop. */
-export const REMEMBERED_SCHEMA_VERSION = 1
+/**
+ * Derived, never declared: this payload holds the same decoded shapes the Log stores, so a build
+ * that renames a field on either of them must invalidate both stores or leave one reading the
+ * other's ghosts.
+ */
+export const REMEMBERED_SCHEMA_VERSION = SNAPSHOT_SCHEMA_VERSION
 
-/** A month-old bank reading is noise, not memory — better to show the landing page. */
-export const MAX_REMEMBERED_AGE_MS = 30 * 24 * 60 * 60 * 1000
+/**
+ * Hours, not weeks. This file answers only "what was on screen last time"; the Log is where a
+ * bank's history actually lives, and it keeps its sessions on their own budget. A day-old frame
+ * presented as the dashboard's current state is a claim about the boat right now that nothing
+ * has checked since.
+ */
+export const MAX_REMEMBERED_AGE_MS = 12 * 60 * 60 * 1000
 
 export interface RememberedStatus {
   /** Captured annunciator severity, preserved as history rather than re-run as a live alarm. */

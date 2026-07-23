@@ -3,8 +3,17 @@
 A static web page that talks Bluetooth directly to a **JK-BMS** and a **Victron SmartSolar MPPT**,
 and reconciles them. No app, no account, no backend, no cloud.
 
-**[Open the live demo →](https://ipazanin.github.io/jk-bms-victron-dashboard/?demo)** — replays a real
-recording, so it works with no hardware at all.
+**[Open it →](https://ipazanin.github.io/jk-bms-victron-dashboard/)** — needs Chrome or Edge and the
+two radios. With no hardware you get the instrument drawn empty, the copy explaining what it will
+show, and nothing else: no numbers, no charge figure, no sample data. The page shows what its own
+radios recorded, and until they have recorded something there is nothing honest to draw.
+
+| The bus, reconciled | The Log |
+|---|---|
+| ![The dashboard, with both radios seen](docs/desktop-remembered.png) | ![The Log, listing one recorded session](docs/desktop-log.png) |
+
+Both are rendered from the built app by `npm run check:visual`, which drives a recorded session
+through the same `localStorage` and IndexedDB the page uses in the field.
 
 ---
 
@@ -59,6 +68,19 @@ Web Bluetooth is a Chromium-only API. This is not something the page can work ar
   [WebBluetoothCG implementation status](https://github.com/WebBluetoothCG/web-bluetooth/blob/main/implementation-status.md)
   it exists only on **Android and macOS**.
 
+Storage is the opposite shape, and it changes what the Log can be. Firefox and Safari have perfect
+IndexedDB and no Web Bluetooth at all, so they can never record — and having never recorded, they
+have nothing to browse. The Log is per-origin and per-browser: a session recorded in Chrome is
+invisible from Safari on the same machine, and from a different Chrome profile, and there is no
+mechanism that could make it otherwise. Private browsing usually blocks storage outright; the page
+says so in a sentence and keeps working as a live instrument.
+
+**On iOS the JSON export is the durability story.** Bluefy is a WKWebView app, and WebKit wipes
+script-writable storage — IndexedDB included — after seven days without a visit. Nothing the page
+can do prevents that, so the download button sits in the session header on every platform rather
+than being shouted about on the one where it matters most. Bluefy also has GATT but no advertisement
+scanning, so every iOS session is pack-only.
+
 The page feature-detects all of this and degrades honestly. With no solar it is still a complete,
 correct battery instrument — it withholds the house-load span rather than faking it to zero.
 
@@ -84,12 +106,46 @@ It is 32 hex characters. The page verifies it before trusting it: byte 7 of ever
 check byte equal to the key's first byte, so a wrong key is rejected instead of rendering plausible
 garbage.
 
-**Where the key lives.** In your browser's `localStorage`, and nowhere else. This site is static —
-there is no server to send it to. Nothing is transmitted anywhere.
+**Where the key lives.** In your browser's `localStorage`, and nowhere else — alongside the last
+frame each radio sent, and beside the Log in IndexedDB. **The page issues zero network requests
+after it loads.** That is a statement about the code, not a policy: nothing in `src/` calls `fetch`,
+the fonts are bundled, and the site is static, so there is no server to send anything to even if it
+wanted to.
 
 **Why the check byte matters.** Every Victron device on earth advertises under company id `0x02E1`.
 In a marina you will receive your neighbours' broadcasts too. The check byte is what separates your
 controller from theirs; foreign advertisements are silently dropped.
+
+## The Log
+
+Every session is recorded, browsable at `#/log`, and kept in this browser only.
+
+Recording starts on its own — no button — the moment either radio produces its first sample, and
+ends when both links go idle. A session is one continuous recording period bounded by the radios,
+not by the pack link: a BMS that drops and reconnects while the solar scan is still up stays one
+session with a gap drawn in it.
+
+**What is stored is what the radios said.** The pack and the controller are two separate streams,
+never one joined row, because they run on separate cadences and a joined row would have to invent
+whichever half had not spoken yet. Each stream is columnar — 28 bytes a pack row, 17 a solar row,
+every field at the integer scale its radio transmits, so 3.394 V comes back as 3.394 V. There is no
+`housePower` column: house load is `solar − pack`, and deriving it on read is what lets a correction
+to the noise floor correct recordings already on disk.
+
+**The budget is 2,000,000 samples**, about 48 MB, which is roughly 278 hours of both radios at 1 Hz.
+Past that the oldest session is deleted whole, down to 90% of the cap so the next sample does not
+trigger another eviction. A single session larger than the entire budget loses its oldest chunks
+instead, and the row then says where its retained data really starts. The session being viewed and
+any session a tab is still writing are never evicted.
+
+**`[ DOWNLOAD JSON ]`** writes every sample exactly as the radios reported it, in engineering units,
+with the stored ledger and a ledger recomputed from the samples side by side so the two can be
+compared. On iOS it is the only durable copy — see the storage note above.
+
+**Where it degrades, it says so.** Storage blocked by private browsing, a disk too full to accept
+another chunk, or a database written by a newer build of this page each get their own sentence
+naming the real cause. In all three the live instruments are unaffected: a full disk stops the Log,
+never the instrument.
 
 ## Safety
 
@@ -134,7 +190,7 @@ npm run dev            # http://localhost:5173/jk-bms-victron-dashboard/
 npm test               # decoder tests against real captured frames
 npm run typecheck
 npm run build
-npm run check:visual   # renders in real Chrome, asserts no overflow or console errors
+npm run check:visual   # renders in real Chrome, asserts no overflow, no console errors, no jitter
 ```
 
 `check:visual` drives the *built* site, so run `npm run build && npm run preview` first and leave the
@@ -142,15 +198,32 @@ preview server up (it serves `http://localhost:4173/jk-bms-victron-dashboard/`, 
 target). It launches your installed Chrome, resolved per platform; set `CHROME_PATH` to point at a
 different binary if the check cannot find one.
 
-`?demo` replays a recorded passage; `?demo=bms` replays the battery alone, to exercise the degraded
-page. `?theme=light` forces light mode.
+It seeds `localStorage` and IndexedDB from `tests/fixtures/`, the same payloads the unit suite
+loads, and asserts four states at four widths: the cold landing (which must print no charge figure
+at all), the remembered session, the Log list and one session's detail. Screenshots land in `docs/`.
+It then runs the instrument for forty seconds at desktop width and fails on cumulative layout shift
+above 0.02, on the document height taking more than one value, or on the pack value label's `x`
+moving. Those three are the measurements the layout work was aimed at, taken the way they were taken
+on the boat, so a regression reads as the same number rather than as a proxy for it.
+
+Routes ride in the hash, because the page is served as static files: `#/` is the dashboard, `#/log`
+the archive, `#/log/<sessionId>` one session.
+
+Dark is the designed plane, not a fallback. With no choice recorded the page follows the system
+preference and keeps following it, so a machine that turns light at dusk takes the page with it.
+The toggle records a choice in `localStorage` under `shunt.theme`, which then wins over the system
+until you clear it. `?theme=light` and `?theme=dark` pin one visit's rendering — for a screenshot
+or a shared link — without recording anything; clicking the toggle releases the pin. The choice is
+resolved and applied before the app mounts, so a page opened in light mode never flashes dark
+first.
 
 Architecture is layered, and the layering is load-bearing:
 
 ```
-src/domain/          pure decoders and the reconciliation. No browser APIs. Unit-tested.
-src/infrastructure/  Web Bluetooth adapters, and a demo source that replays a recording.
-src/application/     reactive store, fault derivation, rolling history.
+src/domain/          pure decoders, the reconciliation and the archive's own arithmetic.
+                     No browser APIs. Unit-tested.
+src/infrastructure/  Web Bluetooth adapters and the IndexedDB session store.
+src/application/     reactive store, fault derivation, the recorder, rolling history.
 src/components/      hand-rolled inline SVG. No chart library.
 ```
 

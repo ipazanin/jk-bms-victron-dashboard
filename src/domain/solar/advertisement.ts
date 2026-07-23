@@ -52,6 +52,17 @@ export function parseAdvertisement(payload: Uint8Array): AdvertisementHeader | n
   }
 }
 
+/**
+ * The model id alone, or null when these bytes are not a Victron advertisement.
+ *
+ * It sits in the plaintext prologue, so it is the one thing a controller says about itself
+ * without a key and without ever being connected to — the only identity the archive can put on
+ * a device it never handshakes with.
+ */
+export function readAdvertisementModelId(payload: Uint8Array): number | null {
+  return parseAdvertisement(payload)?.modelId ?? null
+}
+
 /** True when this advertisement was produced by the device holding `key`. */
 export function matchesKey(header: AdvertisementHeader, key: Uint8Array): boolean {
   return header.keyCheckByte === key[0]

@@ -47,7 +47,9 @@ const worstLevel = computed<FaultLevel>(() => worstOf(gauges.value.map((gauge) =
           <span class="fill" :class="gauge.level" :style="{ width: `${fraction(gauge.value) * 100}%` }" />
         </span>
         <span class="value readout" :class="gauge.level">
-          <span v-if="gauge.level !== 'good'" class="glyph" aria-hidden="true">{{ GLYPHS[gauge.level] }}</span>
+          <!-- Always rendered, empty at 'good': the slot is fixed width, so a sensor crossing a
+               threshold cannot shift the digits beside it sideways as the glyph appears. -->
+          <span class="glyph" aria-hidden="true">{{ GLYPHS[gauge.level] }}</span>
           <span class="sr-only" v-if="gauge.level !== 'good'">{{ gauge.level }}: </span>
           {{ celsius(gauge.value) }}
         </span>
@@ -135,6 +137,8 @@ h2 {
 }
 
 .glyph {
+  display: inline-block;
+  width: 0.9em;
   font-weight: 700;
   margin-right: 0.15rem;
 }

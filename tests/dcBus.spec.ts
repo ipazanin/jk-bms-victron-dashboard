@@ -94,24 +94,24 @@ describe('reconcile — the virtual shunt', () => {
 
 describe('projections', () => {
   it('estimates time to full only while charging', () => {
-    expect(hoursToFull(battery({ current: -8.4 }))).toBeNull()
-    expect(hoursToFull(battery({ current: 5.9, remainingCapacity: 309.1 }))).toBeCloseTo(1.0, 1)
+    expect(hoursToFull(battery({ current: -8.4 }), -8.4)).toBeNull()
+    expect(hoursToFull(battery({ current: 5.9, remainingCapacity: 309.1 }), 5.9)).toBeCloseTo(1.0, 1)
   })
 
   it('reports zero hours when already at nominal capacity', () => {
-    expect(hoursToFull(battery({ current: 2, remainingCapacity: 315 }))).toBe(0)
+    expect(hoursToFull(battery({ current: 2, remainingCapacity: 315 }), 2)).toBe(0)
   })
 
   it('estimates time to empty only while discharging', () => {
-    expect(hoursToEmpty(battery({ current: 2 }))).toBeNull()
-    expect(hoursToEmpty(battery({ current: -10, remainingCapacity: 300 }))).toBeCloseTo(30, 6)
+    expect(hoursToEmpty(battery({ current: 2 }), 2)).toBeNull()
+    expect(hoursToEmpty(battery({ current: -10, remainingCapacity: 300 }), -10)).toBeCloseTo(30, 6)
   })
 
   it('leaves both projections blank across the rest deadband', () => {
-    expect(hoursToFull(battery({ current: 0.05 }))).toBeNull()
-    expect(hoursToEmpty(battery({ current: -0.05 }))).toBeNull()
+    expect(hoursToFull(battery({ current: 0.05 }), 0.05)).toBeNull()
+    expect(hoursToEmpty(battery({ current: -0.05 }), -0.05)).toBeNull()
     // A 0.04 A draw sits inside the deadband, so time-to-empty stays blank.
-    expect(hoursToEmpty(battery({ current: -0.04 }))).toBeNull()
-    expect(hoursToFull(battery({ current: 0.04 }))).toBeNull()
+    expect(hoursToEmpty(battery({ current: -0.04 }), -0.04)).toBeNull()
+    expect(hoursToFull(battery({ current: 0.04 }), 0.04)).toBeNull()
   })
 })

@@ -3,7 +3,7 @@ import { computed } from 'vue'
 
 import StageStepper from './StageStepper.vue'
 import StatusChip from './StatusChip.vue'
-import { kilowattHours, volts, watts } from '../application/format'
+import { amps, kilowattHours, volts, watts } from '../application/format'
 import type { BusReconciliation } from '../domain/dcBus'
 import type { SolarReading } from '../domain/solar/types'
 
@@ -40,7 +40,7 @@ const errorLevel = computed(() => (props.solar && props.solar.chargerError !== 0
         <div>
           <dt class="plate">To battery</dt>
           <dd class="secondary-figure">
-            {{ solar.batteryCurrent === null ? '—' : `${solar.batteryCurrent.toFixed(1)} A` }}
+            {{ solar.batteryCurrent === null ? '—' : amps(solar.batteryCurrent) }}
           </dd>
         </div>
         <div>

@@ -38,19 +38,44 @@ const STALL_CHECK_MS = 2_000
  */
 const MAX_STALL_STRIKES = 3
 
+/**
+ * How the link ended. 'dropped' is the radio going away underneath us — out of range, unit
+ * powered down, another client taking the single connection the JK allows. 'stalled' is a link
+ * the browser still calls connected that stopped notifying and stopped answering the pokes.
+ * A recording says which one it was, because they mean different things to whoever reads it.
+ */
+export type DisconnectReason = 'dropped' | 'stalled'
+
 export interface JkBmsHandlers {
   onSnapshot?: (snapshot: BatterySnapshot) => void
   onDeviceInfo?: (info: DeviceInfo) => void
   onSettings?: (settings: BmsSettings) => void
-  onDisconnect?: () => void
+  onDisconnect?: (reason: DisconnectReason) => void
   onError?: (error: Error) => void
 }
 
-export class JkBmsClient {
+/**
+ * The pack link as the layers above it see one. Only JkBmsClient touches a radio; the interface
+ * is what lets a fake stand in its place, which no object literal can do against the class
+ * itself — private fields make it nominal.
+ */
+export interface BmsLink {
+  readonly connected: boolean
+  /**
+   * The name the pack broadcasts, known from the moment the chooser returns. For a unit whose
+   * device-info frame never decodes it is the only identity we ever get.
+   */
+  readonly deviceName: string | null
+  connect(showAllDevices?: boolean): Promise<void>
+  disconnect(): Promise<void>
+}
+
+export class JkBmsClient implements BmsLink {
   private device: BluetoothDevice | null = null
   private characteristic: BluetoothRemoteGATTCharacteristic | null = null
   private readonly assembler = new FrameAssembler()
   private readonly handlers: JkBmsHandlers
+  private connecting = false
   private lastFrameAt = 0
   private stallStrikes = 0
   private stallTimer: ReturnType<typeof setInterval> | null = null
@@ -68,37 +93,48 @@ export class JkBmsClient {
   }
 
   async connect(showAllDevices = false): Promise<void> {
+    // One device at a time, and the guard is synchronous so it costs no transient activation.
+    // A second connect would overwrite `device` while the first still carries our
+    // gattserverdisconnected listener and nothing is left holding the reference needed to
+    // unbind it — the abandoned link would then report its drop over the top of the live one.
+    if (this.connecting || this.device !== null) return
+    this.connecting = true
+
     const options: RequestDeviceOptions = showAllDevices
       ? { acceptAllDevices: true, optionalServices: [JK_SERVICE] }
       : { filters: [{ services: [JK_SERVICE] }, { namePrefix: 'JK' }], optionalServices: [JK_SERVICE] }
 
-    const device = await navigator.bluetooth.requestDevice(options)
-    this.device = device
-    device.addEventListener('gattserverdisconnected', this.handleDisconnect)
-
     try {
-      const server = await device.gatt!.connect()
-      const service = await server.getPrimaryService(JK_SERVICE)
-      const characteristic = await service.getCharacteristic(JK_CHARACTERISTIC)
-      this.characteristic = characteristic
+      const device = await navigator.bluetooth.requestDevice(options)
+      this.device = device
+      device.addEventListener('gattserverdisconnected', this.handleDisconnect)
 
-      // Attach the listener and subscribe before commanding, or the first response frame
-      // arrives with no notification context and Chrome silently drops it.
-      characteristic.addEventListener('characteristicvaluechanged', this.handleValue)
-      await characteristic.startNotifications()
+      try {
+        const server = await device.gatt!.connect()
+        const service = await server.getPrimaryService(JK_SERVICE)
+        const characteristic = await service.getCharacteristic(JK_CHARACTERISTIC)
+        this.characteristic = characteristic
 
-      await this.request(CMD_DEVICE_INFO)
-      await this.request(CMD_CELL_INFO)
-    } catch (error) {
-      // A failure part-way through leaves listeners bound and the link open while the app
-      // believes it is idle. Unwind before surfacing.
-      await this.disconnect()
-      throw error
+        // Attach the listener and subscribe before commanding, or the first response frame
+        // arrives with no notification context and Chrome silently drops it.
+        characteristic.addEventListener('characteristicvaluechanged', this.handleValue)
+        await characteristic.startNotifications()
+
+        await this.request(CMD_DEVICE_INFO)
+        await this.request(CMD_CELL_INFO)
+      } catch (error) {
+        // A failure part-way through leaves listeners bound and the link open while the app
+        // believes it is idle. Unwind before surfacing.
+        await this.disconnect()
+        throw error
+      }
+
+      this.lastFrameAt = Date.now()
+      this.stallStrikes = 0
+      this.stallTimer = setInterval(this.checkStall, STALL_CHECK_MS)
+    } finally {
+      this.connecting = false
     }
-
-    this.lastFrameAt = Date.now()
-    this.stallStrikes = 0
-    this.stallTimer = setInterval(this.checkStall, STALL_CHECK_MS)
   }
 
   async disconnect(): Promise<void> {
@@ -179,7 +215,7 @@ export class JkBmsClient {
 
   private async giveUp(): Promise<void> {
     await this.disconnect()
-    this.handlers.onDisconnect?.()
+    this.handlers.onDisconnect?.('stalled')
   }
 
   private readonly handleDisconnect = (): void => {
@@ -190,7 +226,7 @@ export class JkBmsClient {
       this.device.removeEventListener('gattserverdisconnected', this.handleDisconnect)
       this.device = null
     }
-    this.handlers.onDisconnect?.()
+    this.handlers.onDisconnect?.('dropped')
   }
 
   private stopStallTimer(): void {

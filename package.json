@@ -23,6 +23,7 @@
     "@vitejs/plugin-vue": "^6.0.7",
     "@vitest/coverage-v8": "^4.1.10",
     "@vue/tsconfig": "^0.9.1",
+    "fake-indexeddb": "^6.2.5",
     "jsdom": "^29.1.1",
     "puppeteer-core": "^25.3.0",
     "typescript": "~6.0.2",

@@ -11,11 +11,18 @@
  *
  * With no solar connected the span is withheld rather than faked to zero, and what remains
  * is still a complete, honest centre-zero ammeter.
+ *
+ * Three marks, three different claims, and the instrument keeps them apart. The band is the
+ * envelope of the last thirty seconds — both edges samples a radio reported, nothing averaged.
+ * The bar is the latest sample at full fidelity. The figure is that same sample to a tenth.
+ * Only the band is windowed, and only the axis is derived from it.
  */
 import { computed, ref, watch } from 'vue'
 
-import { amps, ampsAbsolute, watts } from '../application/format'
+import { amps, ampsAbsolute, volts, watts } from '../application/format'
 import { useMediaQuery } from '../application/useMediaQuery'
+import type { Reach } from '../domain/reach'
+import { CURRENT_LADDER, nextStop } from '../domain/scaleLadder'
 
 const props = defineProps<{
   packCurrent: number
@@ -25,14 +32,21 @@ const props = defineProps<{
   housePower: number | null
   houseLoadPlausible: boolean | null
   pvPower: number | null
+  packReach: Reach | null
+  solarReach: Reach | null
 }>()
 
 /*
  * Font size inside an SVG is measured in viewBox units, so a fixed viewBox width means
  * text shrinks with the viewport. Rather than inflate the font on small screens — which
- * makes the tip labels collide — the whole coordinate system shrinks with it, keeping the
- * ratio of text to axis roughly constant. MARGIN is sized so a label at full deflection
- * still lands inside the box: the SVG clips its overflow, because letting text escape it
+ * makes the rows collide — the whole coordinate system shrinks with it, keeping the ratio
+ * of text to axis roughly constant.
+ *
+ * MARGIN is what reserves the value gutter. x() clamps every mark to MARGIN … WIDTH − MARGIN,
+ * so the columns outside it are provably free of bars and the three figures can hold one fixed
+ * x whatever the data does. The widest string a 320 A axis can print is eight characters, and
+ * --font-mono is fixed-advance at 0.6 em: 72 units against 120 of usable gutter on desktop,
+ * 77 against 84 on the phone. The SVG still clips its overflow, because letting text escape it
  * made the entire page scroll sideways.
  */
 const DESKTOP = { width: 1000, height: 196, margin: 128, axisY: 58, packY: 96, solarY: 128, spanY: 170, bar: 13 }
@@ -51,24 +65,32 @@ const SOLAR_Y = computed(() => box.value.solarY)
 const SPAN_Y = computed(() => box.value.spanY)
 const BAR_HEIGHT = computed(() => box.value.bar)
 
-const DOMAIN_LADDER = [5, 10, 20, 40, 80, 160, 320]
+const VALUE_X = computed(() => WIDTH.value - 8)
 
-const domain = ref(DOMAIN_LADDER[1])
+/** A band whose edges coincide draws as a tick rather than as nothing. */
+const MIN_BAND_WIDTH = 3
 
-const reach = computed(() =>
-  Math.max(Math.abs(props.packCurrent), Math.abs(props.solarCurrent ?? 0)),
-)
+/**
+ * The axis frames the recent envelope, not the instant, so one excursion cannot rescale the
+ * chart under a reading being taken. The latest samples are folded in as well: a remembered or
+ * browsed snapshot arrives with no window behind it, and an axis blind to it would draw a bar
+ * past its own end.
+ */
+const reach = computed(() => {
+  const edges = [Math.abs(props.packCurrent), Math.abs(props.solarCurrent ?? 0)]
+  for (const band of [props.packReach, props.solarReach]) {
+    if (band) edges.push(Math.abs(band.low), Math.abs(band.high))
+  }
+  return Math.max(...edges)
+})
 
-watch(
-  reach,
-  (value) => {
-    const needed = DOMAIN_LADDER.find((step) => step >= value * 1.15) ?? DOMAIN_LADDER.at(-1)!
-    // Grow immediately; shrink only once the trace is comfortably inside a smaller step,
-    // so the axis does not breathe on every sample.
-    if (needed > domain.value || value * 1.15 < domain.value * 0.45) domain.value = needed
-  },
-  { immediate: true },
-)
+const domain = ref(CURRENT_LADDER.stops[1])
+
+// The stop in force is state — the ladder grows on sight and releases only on hysteresis — so it
+// cannot live in a computed, which would have no previous value to hold against.
+watch(reach, (value) => (domain.value = nextStop(CURRENT_LADDER, domain.value, value)), {
+  immediate: true,
+})
 
 const unitsPerAmp = computed(() => (CENTER.value - box.value.margin) / domain.value)
 
@@ -111,6 +133,18 @@ const spanBar = computed(() => ({
   width: Math.abs(solarTip.value - packTip.value),
 }))
 
+/** Null when the window holds nothing: an empty band is not drawn and is never relabelled. */
+function bandOf(band: Reach | null): { x: number; width: number } | null {
+  if (band === null) return null
+  const from = x(band.low)
+  const to = x(band.high)
+  const width = Math.max(MIN_BAND_WIDTH, to - from)
+  return { x: (from + to) / 2 - width / 2, width }
+}
+
+const packBand = computed(() => bandOf(props.packReach))
+const solarBand = computed(() => bandOf(props.solarReach))
+
 const ticks = computed(() => {
   const step = domain.value / 2
   const values: number[] = []
@@ -118,19 +152,6 @@ const ticks = computed(() => {
     values.push(Number(value.toFixed(2)))
   }
   return values
-})
-
-/** Keeps a tip label inside the viewBox when the bar reaches full deflection. */
-function labelX(tip: number, toTheRight: boolean): number {
-  const offset = toTheRight ? 12 : -12
-  return Math.min(WIDTH.value - 6, Math.max(6, tip + offset))
-}
-
-/** Centres the span label over the bracket without letting it slide off either edge. */
-const spanLabelX = computed(() => {
-  const gutter = compact.value ? 62 : 110
-  const centre = spanBar.value.x + spanBar.value.width / 2
-  return Math.min(WIDTH.value - gutter, Math.max(gutter, centre))
 })
 
 const flow = computed(() => {
@@ -143,6 +164,32 @@ const solarHint = computed(() =>
   compact.value ? 'Connect the Victron' : 'Connect the Victron to see house load',
 )
 
+/** Direction in words: a screen reader reads the typographic minus in '−4.9 A' unreliably. */
+function spoken(current: number): string {
+  const rounded = Number(current.toFixed(1))
+  const magnitude = Math.abs(rounded).toFixed(1)
+  if (rounded > 0) return `${magnitude} A charging`
+  if (rounded < 0) return `${magnitude} A discharging`
+  return '0.0 A'
+}
+
+/**
+ * The band and the bar answer different questions, so the label states both rather than letting
+ * a sighted reader see an envelope a listener is never told about.
+ */
+const bandSentence = computed(() => {
+  const spans: string[] = []
+  if (props.packReach) {
+    spans.push(`the pack ranged from ${spoken(props.packReach.low)} to ${spoken(props.packReach.high)}`)
+  }
+  if (props.solarReach) {
+    spans.push(`solar from ${spoken(props.solarReach.low)} to ${spoken(props.solarReach.high)}`)
+  }
+  if (spans.length === 0) return ''
+  const windowMs = Math.max(props.packReach?.spanMs ?? 0, props.solarReach?.spanMs ?? 0)
+  return ` Shaded, over the last ${Math.round(windowMs / 1000)} seconds: ${spans.join(', and ')}.`
+})
+
 const summary = computed(() => {
   const pack = `The pack is ${flow.value} at ${ampsAbsolute(props.packCurrent)}.`
 
@@ -150,7 +197,7 @@ const summary = computed(() => {
     return (
       `Solar delivers ${ampsAbsolute(props.solarCurrent!)}, the pack is ${flow.value} at ` +
       `${ampsAbsolute(props.packCurrent)}, so the house is drawing ${ampsAbsolute(props.houseCurrent!)}, ` +
-      `about ${watts(props.housePower ?? 0)}.`
+      `about ${watts(props.housePower ?? 0)}.${bandSentence.value}`
     )
   }
   // The pack is taking more than solar delivers, so another charger is on the bus and the
@@ -158,15 +205,16 @@ const summary = computed(() => {
   if (houseCharged.value) {
     return (
       `Solar delivers ${ampsAbsolute(props.solarCurrent!)}, but the pack is ${flow.value} at ` +
-      `${ampsAbsolute(props.packCurrent)} — another source is charging, so house load is unavailable.`
+      `${ampsAbsolute(props.packCurrent)} — another source is charging, so house load is ` +
+      `unavailable.${bandSentence.value}`
     )
   }
   // Solar can be connected yet still not yield a house load, when the controller reports no
   // current or voltage. Telling the user to connect it would then be wrong.
   if (solarPresent.value) {
-    return `${pack} Solar delivers ${ampsAbsolute(props.solarCurrent!)}. House load is unavailable.`
+    return `${pack} Solar delivers ${ampsAbsolute(props.solarCurrent!)}. House load is unavailable.${bandSentence.value}`
   }
-  return `${pack} Connect the solar controller to see house load.`
+  return `${pack} Connect the solar controller to see house load.${bandSentence.value}`
 })
 </script>
 
@@ -177,7 +225,13 @@ const summary = computed(() => {
       <p class="muted">house = solar − pack</p>
     </header>
 
-    <svg :viewBox="`0 0 ${WIDTH} ${HEIGHT}`" class="chart" role="img" :aria-label="summary">
+    <svg
+      :viewBox="`0 0 ${WIDTH} ${HEIGHT}`"
+      class="chart"
+      role="img"
+      :aria-label="summary"
+      data-testid="shunt-ammeter"
+    >
       <text :x="MARGIN" :y="AXIS_Y - 30" text-anchor="start" class="pole">− discharge</text>
       <text :x="WIDTH - MARGIN" :y="AXIS_Y - 30" text-anchor="end" class="pole">charge +</text>
 
@@ -192,6 +246,15 @@ const summary = computed(() => {
       <line :x1="CENTER" :y1="AXIS_Y" :x2="CENTER" :y2="SPAN_Y + 12" class="zero" />
 
       <rect
+        v-if="packBand"
+        :x="packBand.x"
+        :y="PACK_Y - BAR_HEIGHT / 2"
+        :width="packBand.width"
+        :height="BAR_HEIGHT"
+        rx="2"
+        class="band pack"
+      />
+      <rect
         :x="packBar.x"
         :y="PACK_Y - BAR_HEIGHT / 2"
         :width="packBar.width"
@@ -200,16 +263,20 @@ const summary = computed(() => {
         class="bar pack"
       />
       <text :x="8" :y="PACK_Y + 5" class="row-label">PACK</text>
-      <text
-        :x="labelX(packTip, packCurrent >= 0)"
-        :y="PACK_Y + 5"
-        :text-anchor="packCurrent < 0 ? 'end' : 'start'"
-        class="value pack-ink"
-      >
+      <text :x="VALUE_X" :y="PACK_Y + 5" text-anchor="end" class="value pack-ink">
         {{ amps(packCurrent) }}
       </text>
 
       <template v-if="solarPresent">
+        <rect
+          v-if="solarBand"
+          :x="solarBand.x"
+          :y="SOLAR_Y - BAR_HEIGHT / 2"
+          :width="solarBand.width"
+          :height="BAR_HEIGHT"
+          rx="2"
+          class="band solar"
+        />
         <rect
           :x="solarBar.x"
           :y="SOLAR_Y - BAR_HEIGHT / 2"
@@ -219,8 +286,8 @@ const summary = computed(() => {
           class="bar solar"
         />
         <text :x="8" :y="SOLAR_Y + 5" class="row-label">SOLAR</text>
-        <text :x="labelX(solarTip, true)" :y="SOLAR_Y + 5" text-anchor="start" class="value solar-ink">
-          +{{ (solarCurrent ?? 0).toFixed(1) }} A
+        <text :x="VALUE_X" :y="SOLAR_Y + 5" text-anchor="end" class="value solar-ink">
+          {{ amps(solarCurrent ?? 0) }}
         </text>
       </template>
       <template v-else>
@@ -231,17 +298,11 @@ const summary = computed(() => {
 
       <g v-if="houseKnown" class="span">
         <text :x="8" :y="SPAN_Y + 5" class="row-label house-ink">HOUSE</text>
-        <line :x1="spanBar.x" :y1="SPAN_Y - 7" :x2="spanBar.x" :y2="SPAN_Y + 7" class="cap" />
-        <line
-          :x1="spanBar.x + spanBar.width"
-          :y1="SPAN_Y - 7"
-          :x2="spanBar.x + spanBar.width"
-          :y2="SPAN_Y + 7"
-          class="cap"
-        />
-        <line :x1="spanBar.x" :y1="SPAN_Y" :x2="spanBar.x + spanBar.width" :y2="SPAN_Y" class="rule" />
-        <text :x="spanLabelX" :y="SPAN_Y - 14" text-anchor="middle" class="value house-ink">
-          {{ ampsAbsolute(houseCurrent!) }} · {{ watts(housePower ?? 0) }}
+        <rect :x="spanBar.x - 1" :y="SPAN_Y - 7" width="2" height="14" class="cap" />
+        <rect :x="spanBar.x + spanBar.width - 1" :y="SPAN_Y - 7" width="2" height="14" class="cap" />
+        <rect :x="spanBar.x" :y="SPAN_Y - 1" :width="spanBar.width" height="2" class="rule" />
+        <text :x="VALUE_X" :y="SPAN_Y + 5" text-anchor="end" class="value house-ink">
+          {{ ampsAbsolute(houseCurrent!) }}
         </text>
       </g>
       <g v-else-if="houseCharged" class="span">
@@ -253,11 +314,14 @@ const summary = computed(() => {
     </svg>
 
     <footer class="legend">
-      <span class="key"><i class="swatch pack" />Pack {{ packVoltage.toFixed(3) }} V</span>
+      <span class="key"><i class="swatch pack" />Pack {{ volts(packVoltage, 2) }}</span>
       <span v-if="pvPower !== null" class="key"><i class="swatch solar" />Solar {{ watts(pvPower) }} in</span>
       <span v-if="houseKnown" class="key"><i class="swatch house" />House {{ watts(housePower ?? 0) }} out</span>
       <span v-else-if="houseCharged" class="key muted-key">House load unavailable — another source charging</span>
       <span v-else class="key muted-key">Solar not connected</span>
+      <span v-if="packBand || solarBand" class="key muted-key band-key">
+        shaded — range over the last 30 s
+      </span>
     </footer>
   </section>
 </template>
@@ -325,16 +389,29 @@ const summary = computed(() => {
   fill: var(--ink);
 }
 
-.bar {
-  transition:
-    x 400ms cubic-bezier(0.2, 0.7, 0.2, 1),
-    width 400ms cubic-bezier(0.2, 0.7, 0.2, 1);
-}
-
+/*
+ * Nothing below carries a transition, and nothing here may gain one. Every mark on this chart is
+ * fed a 1 Hz target, so a 400 ms glide buys 400 ms of motion followed by 600 ms of dead stop,
+ * once a second, for as long as the page is open — and motion onset is exactly what peripheral
+ * vision is tuned to. There is also no filter behind these marks, so a glide would be
+ * interpolating toward a value no radio ever reported.
+ */
 .bar.pack {
   fill: var(--pack);
 }
 .bar.solar {
+  fill: var(--solar);
+}
+
+/* Translucent enough that the live bar reads as the foreground claim and the band as context. */
+.band {
+  fill-opacity: 0.28;
+}
+
+.band.pack {
+  fill: var(--pack);
+}
+.band.solar {
   fill: var(--solar);
 }
 
@@ -348,13 +425,11 @@ const summary = computed(() => {
   fill: var(--house);
 }
 
+/* Filled geometry rather than strokes, so the bracket lives in the same coordinate system as
+   the two bars whose tips it measures. */
 .span .cap,
 .span .rule {
-  stroke: var(--house);
-  stroke-width: 2;
-  transition:
-    x1 400ms cubic-bezier(0.2, 0.7, 0.2, 1),
-    x2 400ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  fill: var(--house);
 }
 
 .ghost {
@@ -380,6 +455,11 @@ const summary = computed(() => {
   display: inline-flex;
   align-items: center;
   gap: 0.45rem;
+}
+
+/* Its own row: it describes the marks above rather than naming one more of them. */
+.band-key {
+  flex-basis: 100%;
 }
 
 .swatch {

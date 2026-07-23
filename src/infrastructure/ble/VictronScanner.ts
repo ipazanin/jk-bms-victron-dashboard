@@ -14,6 +14,7 @@ import {
   decodeSolarAdvertisement,
   importAdvertisementKey,
   parseAdvertisementKey,
+  readAdvertisementModelId,
 } from '../../domain/solar/advertisement'
 import { VICTRON_COMPANY_ID } from '../../domain/solar/types'
 import type { SolarReading } from '../../domain/solar/types'
@@ -31,16 +32,34 @@ export interface VictronHandlers {
   onReading?: (reading: SolarReading, rssi: number) => void
   onForeignDevice?: () => void
   onStale?: () => void
+  /**
+   * The model id of the controller this scan is decoding, once per scan. We never connect, so
+   * there is no serial and no device-info exchange: this number is the whole of what the unit
+   * says about itself, and the only thing a recording can name it by.
+   */
+  onIdentity?: (modelId: number) => void
   onError?: (error: Error) => void
 }
 
-export class VictronScanner {
+/**
+ * The solar radio as the layers above it see one. Only VictronScanner touches a radio; the
+ * interface is what lets a fake stand in its place, which no object literal can do against the
+ * class itself — private fields make it nominal.
+ */
+export interface SolarScan {
+  readonly scanning: boolean
+  start(keyHex: string): Promise<void>
+  stop(): void
+}
+
+export class VictronScanner implements SolarScan {
   private scan: BluetoothLEScan | null = null
   private key: Uint8Array | null = null
   private cryptoKey: CryptoKey | null = null
   private generation = 0
   private lastReadingAt = 0
   private staleNotified = false
+  private identityReported = false
   private staleTimer: ReturnType<typeof setInterval> | null = null
   private readonly handlers: VictronHandlers
 
@@ -75,6 +94,7 @@ export class VictronScanner {
     this.generation += 1
     this.lastReadingAt = Date.now()
     this.staleNotified = false
+    this.identityReported = false
     navigator.bluetooth.addEventListener('advertisementreceived', this.handleAdvertisement)
     this.staleTimer = setInterval(this.checkStale, SOLAR_STALE_CHECK_MS)
   }
@@ -99,6 +119,7 @@ export class VictronScanner {
     const payload = new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
     const generation = this.generation
     const rssi = advertisement.rssi ?? 0
+    const modelId = readAdvertisementModelId(payload)
 
     void decodeSolarAdvertisement(payload, this.key, this.cryptoKey)
       .then((reading) => {
@@ -112,6 +133,13 @@ export class VictronScanner {
         }
         this.lastReadingAt = Date.now()
         this.staleNotified = false
+        // Named after the key check and never before it: every Victron in the marina broadcasts
+        // a model id, and only the ones that decrypt under this key are the user's controller.
+        // Once per scan, because the unit on the other end of a scan cannot change.
+        if (modelId !== null && !this.identityReported) {
+          this.identityReported = true
+          this.handlers.onIdentity?.(modelId)
+        }
         this.handlers.onReading?.(reading, rssi)
       })
       .catch((error: Error) => this.handlers.onError?.(error))

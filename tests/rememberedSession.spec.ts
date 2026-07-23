@@ -9,6 +9,7 @@ import {
 } from '../src/application/rememberedSession'
 import type { RememberedSession } from '../src/application/rememberedSession'
 import type { BatterySnapshot } from '../src/domain/bms/types'
+import fixture from './fixtures/rememberedSession.json'
 
 const KEY = 'shunt.rememberedSession'
 
@@ -189,5 +190,34 @@ describe('rememberedSession', () => {
     forgetRememberedSession()
     expect(storage.has(KEY)).toBe(false)
     expect(loadRememberedSession()).toBeNull()
+  })
+})
+
+describe('the payload seeded into a real browser', () => {
+  // `scripts/visual-check.mjs` writes this same fixture into localStorage and then asserts the
+  // page renders it. Loading it through the real validator here is what keeps the two in step: a
+  // field added to BatterySnapshot fails this rather than quietly failing the visual check.
+
+  it('is accepted by the validator once it is stamped with a time', () => {
+    // capturedAt is zero in the file because a committed fixture cannot be fresh, and the age gate
+    // is right to discard a stale one. Both readers stamp it before writing it.
+    const seeded = { ...fixture, capturedAt: Date.now() } as unknown as RememberedSession
+
+    storage.setItem(KEY, JSON.stringify(seeded))
+
+    expect(loadRememberedSession()).toEqual(seeded)
+  })
+
+  it('is discarded unstamped, which is the age gate doing its job', () => {
+    storage.setItem(KEY, JSON.stringify(fixture))
+
+    expect(loadRememberedSession()).toBeNull()
+  })
+
+  it('carries everything the dashboard needs to draw a full instrument grid', () => {
+    expect(fixture.solar).not.toBeNull()
+    expect(fixture.device).not.toBeNull()
+    expect(fixture.settings).not.toBeNull()
+    expect(fixture.battery.cellVoltages.length).toBeGreaterThan(0)
   })
 })

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import RequirementsList from './RequirementsList.vue'
 import type { BleCapabilities } from '../infrastructure/ble/capabilities'
+import { hashOf } from '../application/route'
 import type { LinkState, Source } from '../application/telemetry'
 
 const props = defineProps<{
@@ -22,13 +23,22 @@ const emit = defineEmits<{
   disconnectBms: []
   startSolar: [key: string]
   stopSolar: []
-  startDemo: []
-  stopDemo: []
 }>()
 
 const advertisementKey = ref(props.initialKey)
 const revealKey = ref(false)
 const showAllDevices = ref(false)
+
+const logHref = hashOf({ name: 'log' })
+
+/**
+ * The gate has to forgive exactly what parseAdvertisementKey forgives. VictronConnect shows the
+ * key in spaced pairs, so a pasted key is routinely 47 characters of perfectly good hex, and a
+ * button measuring the raw field refuses it while the parser behind it would not — greyed out,
+ * with nothing on screen saying why.
+ */
+const normalisedKey = computed(() => advertisementKey.value.trim().toLowerCase().replace(/\s+/g, ''))
+const keyLooksComplete = computed(() => /^[0-9a-f]{32}$/.test(normalisedKey.value))
 </script>
 
 <template>
@@ -54,8 +64,9 @@ const showAllDevices = ref(false)
       </button>
       <button v-else type="button" @click="emit('disconnectBms')">Disconnect BMS</button>
 
-      <button v-if="source !== 'demo'" type="button" @click="emit('startDemo')">Play demo</button>
-      <button v-else type="button" @click="emit('stopDemo')">Stop demo</button>
+      <!-- Withheld only while a stored session is on the instruments: the log is where that
+           session was opened from, and the banner above already carries the way back. -->
+      <a v-if="source !== 'history'" class="button" :href="logHref">Browse the log</a>
     </div>
 
     <label v-if="capabilities.canConnect && bmsState !== 'live'" class="checkbox">
@@ -97,17 +108,27 @@ const showAllDevices = ref(false)
           and is never sent anywhere.
         </p>
 
+        <!-- Cancel stops this page listening; it cannot withdraw a permission prompt the browser
+             has already put up. Allowing that prompt afterwards starts the scan, and the panel
+             then says it is listening. -->
         <div class="actions">
           <button
-            v-if="solarState === 'idle' || solarState === 'connecting'"
+            v-if="solarState === 'idle'"
             type="button"
-            :disabled="advertisementKey.trim().length !== 32 || solarState === 'connecting'"
-            @click="emit('startSolar', advertisementKey)"
+            :disabled="!keyLooksComplete"
+            @click="emit('startSolar', normalisedKey)"
           >
-            {{ solarState === 'connecting' ? 'Starting…' : 'Connect solar' }}
+            Connect solar
           </button>
-          <button v-else type="button" @click="emit('stopSolar')">Stop solar</button>
+          <button v-else type="button" @click="emit('stopSolar')">
+            {{ solarState === 'connecting' ? 'Cancel' : 'Stop solar' }}
+          </button>
         </div>
+
+        <p v-if="solarState === 'connecting'" class="hint">
+          Your browser is asking whether this page may scan for nearby Bluetooth devices. Allow it
+          to start listening; dismissing the prompt cancels.
+        </p>
 
         <p v-if="solarState === 'listening' && !foreignDeviceSeen" class="hint">
           Listening. Nothing has answered yet — the controller may be out of range.
@@ -141,13 +162,20 @@ h3 {
   margin: 0.75rem 0;
 }
 
-button {
+/* The log link is an anchor so it can be opened in a new tab and copied, and wears the button
+   shape so the row of controls reads as one row. */
+button,
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border: 1px solid var(--baseline);
   color: var(--ink);
+  text-decoration: none;
   border-radius: var(--radius);
   padding: 0.6rem 1rem;
-  min-height: 44px;
+  min-height: var(--tap);
   font-family: var(--font-label);
   font-size: 0.8125rem;
   letter-spacing: 0.08em;
@@ -155,7 +183,8 @@ button {
   font-weight: 600;
 }
 
-button:hover:not(:disabled) {
+button:hover:not(:disabled),
+.button:hover {
   border-color: var(--ink-secondary);
 }
 
@@ -164,14 +193,15 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* --pack is a mark colour and this is a label on a fill: white on it measures 3.21:1 at 13px/600,
+   which is normal-size text on the page's main control. The ink pair is the one that clears AA. */
 button.primary {
-  background: var(--pack);
-  border-color: var(--pack);
-  color: #ffffff;
+  background: var(--pack-ink);
+  border-color: var(--pack-ink);
+  color: var(--on-pack);
 }
 
 button.ghost {
-  min-height: 0;
   padding: 0.35rem 0.6rem;
   border-color: var(--gridline);
   color: var(--ink-secondary);

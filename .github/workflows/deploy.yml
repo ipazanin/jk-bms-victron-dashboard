@@ -28,6 +28,21 @@ jobs:
         run: npm run typecheck
       - name: Unit tests
         run: npm test
+      - name: Build
+        run: npm run build
+      # The only thing in CI that draws an instrument. The unit suite covers the decoders, the
+      # store's failure paths and the archive's arithmetic, and none of it renders a pixel.
+      # ubuntu-latest ships Chrome at /usr/bin/google-chrome, which the script already probes for.
+      - name: Visual check
+        run: |
+          # Redirected, or the backgrounded server holds the step's stdout open and the job hangs
+          # after the check has already passed.
+          npm run preview -- --port 4173 > preview.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            curl -sf http://localhost:4173/jk-bms-victron-dashboard/ > /dev/null && break
+            sleep 1
+          done
+          npm run check:visual || { cat preview.log; exit 1; }
 
   deploy:
     needs: verify

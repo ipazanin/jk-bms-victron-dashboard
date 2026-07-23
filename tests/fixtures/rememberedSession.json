@@ -1,0 +1,72 @@
+{
+  "note": "The localStorage payload under shunt.rememberedSession. capturedAt is zero because a committed file cannot be fresh: both readers stamp it with a recent time before writing it, or the age gate discards it exactly as it should.",
+  "version": 1,
+  "capturedAt": 0,
+  "battery": {
+    "cellVoltages": [
+      3.394,
+      3.394,
+      3.393,
+      3.394
+    ],
+    "cellResistances": [
+      0.052,
+      0.053,
+      0.053,
+      0.053
+    ],
+    "averageCellVoltage": 3.393,
+    "cellDelta": 0.011,
+    "highestCell": 1,
+    "lowestCell": 3,
+    "packVoltage": 13.58,
+    "current": -5.037,
+    "power": 114,
+    "stateOfCharge": 61,
+    "remainingCapacity": 309.1,
+    "nominalCapacity": 315,
+    "cycleCount": 4,
+    "cycledCapacity": 1268.6,
+    "mosfetTemperature": 30.1,
+    "temperatureSensor1": 27.5,
+    "temperatureSensor2": 27.1,
+    "uptimeSeconds": 4481077,
+    "chargingEnabled": true,
+    "dischargingEnabled": true
+  },
+  "solar": {
+    "chargeState": "bulk",
+    "chargerError": 0,
+    "batteryVoltage": 13.57,
+    "batteryCurrent": 7.9,
+    "yieldTodayKwh": 0.42,
+    "pvPower": 151,
+    "loadCurrent": 0
+  },
+  "device": {
+    "model": "JK_B2A8S20P",
+    "hardwareVersion": "19H",
+    "softwareVersion": "19.10",
+    "serialNumber": "DEMO00000000001",
+    "uptimeSeconds": 4481077,
+    "powerOnCount": 37
+  },
+  "settings": {
+    "cellCount": 4,
+    "nominalCapacity": 315,
+    "cellOverVoltage": 3.65,
+    "cellUnderVoltage": 2.5,
+    "balanceTriggerDelta": 0.01,
+    "startBalanceVoltage": 3.1,
+    "maxBalanceCurrent": 2,
+    "chargeOverTemperature": 70,
+    "chargeUnderTemperature": -10,
+    "mosfetOverTemperature": 80,
+    "balancerEnabled": true
+  },
+  "solarRssi": -67,
+  "status": {
+    "worst": "good",
+    "headline": "No active faults"
+  }
+}

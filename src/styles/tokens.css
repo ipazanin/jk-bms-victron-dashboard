@@ -4,6 +4,11 @@
  *
  * Three entity hues carry identity: solar, pack, house. Each is also given a glyph, so
  * colour is never the only channel. Status colours mean state and are never a data series.
+ *
+ * A mark wears --pack / --solar / --house and needs only 3:1. The direct label welded to that
+ * mark wears --pack-ink / --solar-ink / --house-ink and clears 4.5:1. All other text wears
+ * --ink / --ink-secondary / --ink-muted. The mark palette is validated where it is used; every
+ * contrast failure in it is a failure as text, which is what the ink pairs exist to answer.
  */
 
 :root {
@@ -18,7 +23,10 @@
   --gridline: #2c2c2a;
   --baseline: #383835;
 
-  --solar: #eda100;
+  /* An entity hue holds the 0.48–0.67 OKLCH lightness band on this surface, or it reads as louder
+     than its peers rather than as their equal — amber above the band is the one that drifts.
+     Adjacent-pair separation must also clear CVD; this trio sits at ΔE 13.2 deutan. */
+  --solar: #c78600;
   --pack: #3f93e8;
   --house: #d55181;
 
@@ -26,6 +34,28 @@
   --status-warning: #fab219;
   --status-serious: #ec835a;
   --status-critical: #d03b3b;
+
+  /* The ink half of each mark: same identity, stepped until it clears 4.5:1 as normal-size text. */
+  --pack-ink: #3f93e8;
+  --solar-ink: #c78600;
+  --house-ink: #de5f8d;
+  --status-good-ink: #0ca30c;
+  --status-warning-ink: #fab219;
+  --status-serious-ink: #ec835a;
+  --status-critical-ink: #e05555;
+  /* Text laid on a --pack-ink fill. --plane is the darkest surface in each theme, so this pair
+     inverts with the theme and clears 6:1 in both. */
+  --on-pack: var(--plane);
+  /* The ribbon's house region. The interior of a band cannot carry contrast at any alpha this
+     design language would accept, so the fill is support and the 1px --house edge does the work. */
+  --house-wash: rgba(213, 81, 129, 0.16);
+
+  /* Coverage is an epistemic state, not an entity and not a status, so it is carried by
+     STRUCTURE — bar height and interruption — in ink tokens, never by a fourth hue and never
+     by two shades of near-black that vanish on a phone in daylight. */
+  --coverage-both: var(--ink-secondary);
+  --coverage-partial: var(--ink-muted);
+  --coverage-none: var(--baseline);
 
   --focus: #5bc8ff;
 
@@ -35,6 +65,15 @@
 
   --pad: 1.375rem;
   --radius: 3px;
+  /* The smallest a control may be in either axis. A boat is a moving platform read with wet
+     hands, so this is the floor for every control on the page, not a target for the new ones. */
+  --tap: 44px;
+
+  /* 0.875rem is the de-facto body size — hints, notices, errors, checkbox labels — and 13/15 px
+     are the two type sizes inside an SVG, where a font size is viewBox units and not CSS pixels. */
+  --text-copy: 0.875rem;
+  --svg-label: 13px;
+  --svg-value: 15px;
 
   color-scheme: dark;
 }
@@ -46,9 +85,9 @@
 
   --ink: #0b0b0b;
   --ink-secondary: #52514e;
-  /* Darkened from the dark theme's #898781: this backs 0.75rem captions and tick labels, and
-     #898781 clears only ~3.5:1 on the light surfaces (#f9f9f7–#ffffff), below the 4.5:1 AA
-     minimum for normal text. #6d6c67 reaches ~4.99:1 on the darkest of them (#f9f9f7). */
+  /* This backs 0.75rem captions and tick labels, so it must clear 4.5:1 against the lightest
+     surfaces here (#f9f9f7–#ffffff). #6d6c67 reaches ~4.99:1 on the darkest of them; the dark
+     theme's #898781 would reach only ~3.5:1 and fail AA at that size. */
   --ink-muted: #6d6c67;
 
   --gridline: #e1e0d9;
@@ -62,6 +101,15 @@
   --status-warning: #d9990f;
   --status-serious: #d9663f;
   --status-critical: #c22f2f;
+
+  --pack-ink: #1f5fae;
+  --solar-ink: #8a5a06;
+  --house-ink: #c23a6e;
+  --status-good-ink: #077507;
+  --status-warning-ink: #8a6106;
+  --status-serious-ink: #a8441f;
+  --status-critical-ink: #c22f2f;
+  --house-wash: rgba(194, 58, 110, 0.16);
 
   --focus: #0a6fb5;
 
@@ -114,18 +162,49 @@ body {
   letter-spacing: -0.01em;
 }
 
+/* Tabular, because these figures sit in rows beside each other: proportional digits let a PV
+   power falling 151 → 9 shove its neighbours sideways once a second. */
 .secondary-figure {
   font-family: var(--font-body);
-  font-variant-numeric: proportional-nums;
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
   font-size: 2rem;
   line-height: 1.05;
+}
+
+/* Signed amp-hours stacked in a column, where the digits have to line up vertically and
+   .secondary-figure's proportional Plex Sans will not. */
+.ledger-figure {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 1.375rem;
+  line-height: 1.1;
 }
 
 .muted {
   color: var(--ink-muted);
   font-family: var(--font-mono);
   font-size: 0.75rem;
+}
+
+/* Prose: a sentence the reader is meant to read, rather than a label or a figure. */
+.copy {
+  font-family: var(--font-body);
+  font-size: var(--text-copy);
+  color: var(--ink-secondary);
+  max-width: 62ch;
+}
+
+/* clip-path rather than the deprecated clip, which several browsers now ignore, leaving the
+   text laid out at 1px and unreadable to sighted users rather than hidden from them. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 button {
