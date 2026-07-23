@@ -32,6 +32,8 @@ import { JkBmsClient } from '../infrastructure/ble/JkBmsClient'
 import type { BmsLink, JkBmsHandlers } from '../infrastructure/ble/JkBmsClient'
 import { VictronScanner } from '../infrastructure/ble/VictronScanner'
 import type { SolarScan, VictronHandlers } from '../infrastructure/ble/VictronScanner'
+import { BridgeSolarScan } from '../infrastructure/ble/BridgeSolarScan'
+import { resolveSolarBridgeUrl } from '../infrastructure/ble/solarBridge'
 import { describeConnectError, describeScanError } from './errors'
 import { amps } from './format'
 import type { HistoryStore } from './history/port'
@@ -698,9 +700,14 @@ export function attachHistoryStore(store: HistoryStore): void {
 }
 
 function browserDeps(): TelemetryDeps {
+  // A `?bridge=` in the URL swaps the browser's own radio for the native helper — the only way to
+  // read solar on macOS, where requestLEScan never delivers. Absent it, nothing changes.
+  const bridgeUrl = resolveSolarBridgeUrl(typeof window !== 'undefined' ? window.location.search : '')
   return {
     createBmsLink: (handlers) => new JkBmsClient(handlers),
-    createSolarScan: (handlers) => new VictronScanner(handlers),
+    createSolarScan: bridgeUrl
+      ? (handlers) => new BridgeSolarScan(bridgeUrl, handlers)
+      : (handlers) => new VictronScanner(handlers),
     historyStore: () => attachedStore,
     now: () => Date.now(),
     // Not derived from the wall clock: the whole point of a monotonic reading is that a clock

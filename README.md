@@ -52,7 +52,7 @@ Web Bluetooth is a Chromium-only API. This is not something the page can work ar
 
 | Browser | Battery (GATT) | Solar (advertisements) |
 |---|---|---|
-| Chrome / Edge, macOS | ✅ | ⚠️ behind a flag |
+| Chrome / Edge, macOS | ✅ | ⚠️ flagged, but the scan finds nothing — [use the bridge](bridge/README.md) |
 | Chrome, Android | ✅ | ⚠️ behind a flag |
 | Chrome / Edge, Windows · Linux · ChromeOS | ✅ | ❌ not implemented |
 | Firefox, any platform | ❌ | ❌ |
@@ -66,7 +66,15 @@ Web Bluetooth is a Chromium-only API. This is not something the page can work ar
 - **Solar needs a flag.** Advertisement scanning (`requestLEScan`) is still behind
   `chrome://flags/#enable-experimental-web-platform-features`, and per the
   [WebBluetoothCG implementation status](https://github.com/WebBluetoothCG/web-bluetooth/blob/main/implementation-status.md)
-  it exists only on **Android and macOS**.
+  it is listed for **Android and macOS** — but the macOS entry is an open implementation issue
+  ([crbug.com/897312](https://crbug.com/897312)), so in practice only Android delivers.
+- **On macOS the scan opens its prompt and finds nothing.** The flag is honoured and the permission
+  dialog appears, but it sits on *Scanning…* with an empty device list forever — no advertisement
+  ever reaches the page, so the encryption key is never even consulted. The battery is unaffected;
+  GATT works fine on macOS. To read solar on a Mac, run the native helper in
+  [`bridge/`](bridge/README.md): it scans with CoreBluetooth (which does see the advertisements) and
+  relays the raw payload to the page over `ws://localhost`, where the same code decodes it with your
+  key exactly as a real scan would. Serve the app locally and open it with `?bridge=1`.
 
 Storage is the opposite shape, and it changes what the Log can be. Firefox and Safari have perfect
 IndexedDB and no Web Bluetooth at all, so they can never record — and having never recorded, they
