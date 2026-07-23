@@ -159,6 +159,28 @@ const PASSES = [
       if (report.ribbonPath === '') fail(scope, "the ribbon's pack trace carries an empty path")
     },
   },
+  {
+    name: 'stats',
+    archive: true,
+    remembered: true,
+    hash: '#/stats',
+    ready: '[data-testid="stats-view"]',
+    check(scope, report) {
+      if (!/daily energy/i.test(report.text)) fail(scope, 'the daily energy panel did not render')
+      if (!/device logbook/i.test(report.text)) fail(scope, 'the logbook panel did not render')
+      if (!/boot/i.test(report.text)) fail(scope, 'the seeded logbook events did not render')
+    },
+  },
+  {
+    name: 'warnings',
+    archive: true,
+    remembered: true,
+    hash: '#/warnings',
+    ready: '[data-testid="warnings-view"]',
+    check(scope, report) {
+      if (!/mosfet warm/i.test(report.text)) fail(scope, 'the seeded warning did not render')
+    },
+  },
 ]
 
 mkdirSync(SCREENSHOT_DIR, { recursive: true })
@@ -356,8 +378,8 @@ async function seedOrigin(page, pass) {
  */
 async function seedStores(remembered, archive) {
   const DATABASE = 'shunt.log'
-  const VERSION = 1
-  const STORES = ['sessions', 'chunks', 'devices', 'meta']
+  const VERSION = 2
+  const STORES = ['sessions', 'chunks', 'devices', 'meta', 'warnings']
 
   // JSON carries no typed arrays. Each column is widened back to the width the archive stores it
   // at, so what the page reads back is byte-for-byte what a recording would have left behind.
@@ -389,6 +411,21 @@ async function seedStores(remembered, archive) {
   }
   if (archive === null) return
 
+  // The device logbook the Stats tab shows, in the shape telemetry persists it.
+  localStorage.setItem(
+    'shunt.logbook',
+    JSON.stringify({
+      fetchedAt: archive.session.startedAt + 3_600_000,
+      uptimeSecondsAtFetch: 5_702_500,
+      events: [
+        { secondsSinceBoot: 0, code: 1, label: 'Boot' },
+        { secondsSinceBoot: 1023, code: 68, label: 'Discharge overcurrent protection III' },
+        { secondsSinceBoot: 152792, code: 100, label: 'Cell 1 overcharge protection' },
+        { secondsSinceBoot: 3005777, code: 18, label: 'Cell overcharge protection released' },
+      ],
+    }),
+  )
+
   const database = await new Promise((resolve, reject) => {
     const request = indexedDB.open(DATABASE, VERSION)
     request.onupgradeneeded = () => {
@@ -407,6 +444,9 @@ async function seedStores(remembered, archive) {
       devices.createIndex('byLastSeen', 'lastSeenAt')
 
       created.createObjectStore('meta', { keyPath: 'key' })
+
+      const warnings = created.createObjectStore('warnings', { keyPath: ['sessionId', 'seq'] })
+      warnings.createIndex('byTime', 'at')
     }
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
@@ -421,6 +461,34 @@ async function seedStores(remembered, archive) {
     transaction.objectStore('devices').put(archive.device)
     transaction.objectStore('sessions').put(archive.session)
     transaction.objectStore('meta').put(archive.meta)
+    // One warning tied to the seeded session, so the Warnings view renders a row with its readings.
+    transaction.objectStore('warnings').put({
+      sessionId: archive.session.id,
+      seq: 0,
+      at: archive.session.startedAt + 90_000,
+      level: 'warning',
+      title: 'MOSFET warm',
+      detail: '58.0 °C. Watch it under sustained load.',
+      snapshot: {
+        packCurrentA: -42.6,
+        packVoltageV: 13.2,
+        stateOfCharge: 61,
+        cellDeltaMv: 12,
+        highestCell: 1,
+        lowestCell: 3,
+        mosfetTemperatureC: 58,
+        temperature1C: 31,
+        temperature2C: 30,
+        chargingEnabled: true,
+        dischargingEnabled: true,
+        solarChargeState: 'float',
+        pvPowerW: 64,
+        solarBatteryCurrentA: 4.6,
+        housePowerW: 620,
+        houseCurrentA: 47,
+        houseLoadPlausible: true,
+      },
+    })
     for (const chunk of archive.chunks) {
       const widened = { ...chunk }
       for (const [column, Type] of Object.entries(COLUMN_TYPES)) {
