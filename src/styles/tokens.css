@@ -14,14 +14,30 @@
 :root {
   --plane: #0d0d0d;
   --surface: #1a1a19;
+  /* Elevation ladder: plane → surface → card → raised → overlay. --card sits a
+     visible step above --surface; --raised stays a step above --card. The steps
+     are small on near-black by necessity — --surface and --raised are locked and
+     close — so --card-border and the inset top-highlight in the shadows carry the
+     separation. Tint stays R=G>B, matching the locked surfaces. */
+  --card: #1f1f1d;
   --raised: #232322;
+  /* Frosted glass for the floating header: --surface at 0.80α over the page. Its
+     opaque equivalent never exceeds --raised, so --raised stays the lightest
+     neutral any ink lands on. */
+  --overlay: rgba(26, 26, 25, 0.80);
 
   --ink: #ffffff;
   --ink-secondary: #c3c2b7;
-  --ink-muted: #898781;
+  /* Backs 0.75rem captions and tick labels, so it must clear 4.5:1 on the lightest
+     surface it sits on in dark, --raised. #8e8c85 reaches ~4.67:1 there — still the
+     dimmest ink, and clear of AA on --card and the overlay above it. */
+  --ink-muted: #8e8c85;
 
   --gridline: #2c2c2a;
   --baseline: #383835;
+  /* Hairline card edge, one step more visible than --gridline and just under
+     --baseline — legible where the near-black drop shadow is weak. */
+  --card-border: #363633;
 
   /* An entity hue holds the 0.48–0.67 OKLCH lightness band on this surface, or it reads as louder
      than its peers rather than as their equal — amber above the band is the one that drifts.
@@ -42,7 +58,7 @@
   --status-good-ink: #0ca30c;
   --status-warning-ink: #fab219;
   --status-serious-ink: #ec835a;
-  --status-critical-ink: #e05555;
+  --status-critical-ink: #e56666;
   /* Text laid on a --pack-ink fill. --plane is the darkest surface in each theme, so this pair
      inverts with the theme and clears 6:1 in both. */
   --on-pack: var(--plane);
@@ -75,23 +91,64 @@
   --svg-label: 13px;
   --svg-value: 15px;
 
+  /* Theme-aware elevation. A drop shadow alone is nearly invisible on near-black,
+     so each dark shadow pairs a soft amber-black drop with a 1px inset top
+     highlight; --card-border completes the separation. */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --shadow-2: 0 6px 18px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.40), 0 6px 16px rgba(0, 0, 0, 0.30), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+  /* Decorative area-under-curve fills — SUPPORT, not identity. Derived from
+     --solar / --pack / --house at 0.18α fading to 0 at the baseline; the trace
+     stroke keeps the solid entity hue. For an SVG area, feed the same two rgba
+     stops into a vertical <linearGradient>. */
+  --solar-fill: linear-gradient(to bottom, rgba(199, 134, 0, 0.18), rgba(199, 134, 0, 0));
+  --pack-fill: linear-gradient(to bottom, rgba(63, 147, 232, 0.18), rgba(63, 147, 232, 0));
+  --house-fill: linear-gradient(to bottom, rgba(213, 81, 129, 0.18), rgba(213, 81, 129, 0));
+
+  --header-border: rgba(255, 255, 255, 0.08);
+
+  /* Theme-independent: defined once here, inherited by the light block. --radius
+     (3px) stays sharp for instruments and SVG chrome; cards use the scale below. */
+  --r-sm: 6px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-pill: 999px;
+
+  --header-bg: var(--overlay);
+  --header-blur: 12px;
+  --header-height: 60px;
+
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur: 200ms;
+
   color-scheme: dark;
 }
 
 :root[data-theme='light'] {
   --plane: #f9f9f7;
   --surface: #fcfcfb;
+  /* Elevation ladder. --raised is already #ffffff, so --card sits one hair below
+     it; in light mode the fill step is near-invisible by design and --shadow-*
+     (a soft grey drop) carries the elevation. */
+  --card: #fefefd;
   --raised: #ffffff;
+  --overlay: rgba(252, 252, 251, 0.80);
 
   --ink: #0b0b0b;
   --ink-secondary: #52514e;
   /* This backs 0.75rem captions and tick labels, so it must clear 4.5:1 against the lightest
      surfaces here (#f9f9f7–#ffffff). #6d6c67 reaches ~4.99:1 on the darkest of them; the dark
-     theme's #898781 would reach only ~3.5:1 and fail AA at that size. */
+     theme's #8e8c85 would reach only ~3.5:1 and fail AA at that size. */
   --ink-muted: #6d6c67;
 
   --gridline: #e1e0d9;
   --baseline: #c3c2b7;
+  /* One step more visible than --gridline, just above --baseline. --ink-muted is
+     not retuned in light — #6d6c67 already clears 4.99:1 on its binding surface. */
+  --card-border: #d6d5cd;
 
   --solar: #b5760a;
   --pack: #2a78d6;
@@ -112,6 +169,18 @@
   --house-wash: rgba(194, 58, 110, 0.16);
 
   --focus: #0a6fb5;
+
+  /* Conventional soft grey drop, warm-tinted (rgba 20,20,18); no inset needed. */
+  --shadow-1: 0 1px 2px rgba(20, 20, 18, 0.06), 0 1px 3px rgba(20, 20, 18, 0.08);
+  --shadow-2: 0 8px 24px rgba(20, 20, 18, 0.12), 0 2px 6px rgba(20, 20, 18, 0.08);
+  --shadow-card: 0 1px 2px rgba(20, 20, 18, 0.05), 0 4px 14px rgba(20, 20, 18, 0.09);
+
+  /* Derived from the light entity hues (#b5760a / #2a78d6 / #c23a6e). */
+  --solar-fill: linear-gradient(to bottom, rgba(181, 118, 10, 0.18), rgba(181, 118, 10, 0));
+  --pack-fill: linear-gradient(to bottom, rgba(42, 120, 214, 0.18), rgba(42, 120, 214, 0));
+  --house-fill: linear-gradient(to bottom, rgba(194, 58, 110, 0.18), rgba(194, 58, 110, 0));
+
+  --header-border: rgba(20, 20, 18, 0.08);
 
   color-scheme: light;
 }
@@ -194,6 +263,18 @@ body {
   font-size: var(--text-copy);
   color: var(--ink-secondary);
   max-width: 62ch;
+}
+
+/* The elevated surface every top-level block sits on: the plane → card step, a hairline edge and a
+   soft shadow do the separating, so panels read apart without a 1px rule between them. One global
+   definition keeps the Bus, Stats and Log screens on the exact same card. A block supplies its own
+   padding; the card sets only surface, edge, radius and shadow. */
+.card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-card);
+  min-width: 0;
 }
 
 /* clip-path rather than the deprecated clip, which several browsers now ignore, leaving the

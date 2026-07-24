@@ -123,14 +123,14 @@ const houseAh = computed(() => geometry.value.houseAh)
 
 const summary = computed(() => {
   if (!props.solarSeen) {
-    return `Across the whole session the pack ${flowWords(shown.value.packAh)}. The solar controller never reported, so there is no house figure.`
+    return `Across the whole session the pack ${flowWords(shown.value.packAh)}. The solar controller never reported, so there is no boat figure.`
   }
 
   const parts = [
     `Over ${Math.round(props.ledger.countedMs / 60_000)} minutes in which both radios reported:`,
     `the pack ${flowWords(props.ledger.packAh)},`,
     `the panels delivered ${Math.abs(props.ledger.solarAh).toFixed(1)} amp hours,`,
-    `so the house drew ${Math.abs(houseAh.value).toFixed(1)} amp hours, about ${Math.round(Math.abs(houseWh.value))} watt hours.`,
+    `so the boat drew ${Math.abs(houseAh.value).toFixed(1)} amp hours, about ${Math.round(Math.abs(houseWh.value))} watt hours.`,
   ]
   if (props.ledger.foreignAhFloor > 0) {
     parts.push(
@@ -233,7 +233,7 @@ function tickX(tick: number): number {
           </text>
 
           <!-- Caps and rule, not a bar: the house figure is the distance between the two tips. -->
-          <text :x="8" :y="box.spanY + 5" class="row-label house-ink">HOUSE</text>
+          <text :x="8" :y="box.spanY + 5" class="row-label house-ink">BOAT</text>
           <rect :x="geometry.house.x - 1" :y="box.spanY - 7" width="2" height="14" class="cap" />
           <rect
             :x="geometry.house.x + geometry.house.width - 1"
@@ -278,7 +278,7 @@ function tickX(tick: number): number {
             class="ghost"
           />
           <text :x="8" :y="box.solarY + 5" class="row-label ghost-ink">SOLAR</text>
-          <text :x="8" :y="box.spanY + 5" class="row-label ghost-ink">HOUSE</text>
+          <text :x="8" :y="box.spanY + 5" class="row-label ghost-ink">BOAT</text>
           <text :x="tickX(0) + 20" :y="box.spanY + 5" class="hint ghost-ink">not measurable</text>
         </template>
 
@@ -303,7 +303,7 @@ function tickX(tick: number): number {
       </svg>
 
       <p v-if="!solarSeen && !recessive" class="copy">
-        The Victron was never connected, so nothing differences the pack. Solar in and house out
+        The Victron was never connected, so nothing differences the pack. Solar in and boat out
         need both radios; the pack column is complete on its own.
       </p>
     </template>

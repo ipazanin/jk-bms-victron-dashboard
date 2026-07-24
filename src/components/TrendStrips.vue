@@ -19,8 +19,8 @@ import { computed, onScopeDispose, ref, watch } from 'vue'
 
 import { amps, clockTime, watts } from '../application/format'
 import type { TrendPoint } from '../application/telemetry'
-import { linearScale, maxMagnitudeOf, positionOn, tracePath } from '../domain/history/geometry'
-import type { LinearScale, TracePoint } from '../domain/history/geometry'
+import { bandPath, linearScale, maxMagnitudeOf, positionOn, tracePath } from '../domain/history/geometry'
+import type { BandPoint, LinearScale, TracePoint } from '../domain/history/geometry'
 import { MAX_SAMPLE_GAP_MS } from '../domain/history/join'
 import { CURRENT_LADDER, POWER_LADDER, nextStop } from '../domain/scaleLadder'
 
@@ -140,6 +140,33 @@ const housePath = computed(() =>
   tracePath(traced((point) => point.housePower), timeScale.value, houseValue.value),
 )
 
+/**
+ * The same trace closed to its strip's zero line, so a low-alpha gradient can wash the area beneath
+ * it. It breaks at the identical gaps — a null upper closes the run in `bandPath` exactly where the
+ * trace opens — and never fabricates fill across a stall the line itself refuses to cross.
+ */
+function* area(pick: (point: TrendPoint) => number | null): Generator<BandPoint> {
+  let previousAt: number | null = null
+  for (const point of props.history) {
+    if (previousAt !== null && point.at - previousAt > MAX_SAMPLE_GAP_MS) {
+      yield { at: previousAt, lower: null, upper: null }
+    }
+    const value = pick(point)
+    yield { at: point.at, upper: value, lower: value === null ? null : 0 }
+    previousAt = point.at
+  }
+}
+
+const packArea = computed(() =>
+  bandPath(area((point) => point.packCurrent), timeScale.value, packValue.value),
+)
+const pvArea = computed(() =>
+  bandPath(area((point) => point.pvPower), timeScale.value, pvValue.value),
+)
+const houseArea = computed(() =>
+  bandPath(area((point) => point.housePower), timeScale.value, houseValue.value),
+)
+
 /** Where the traces are broken, so the hole is marked rather than merely left blank. */
 const gaps = computed(() => {
   const runs: { readonly x: number; readonly width: number }[] = []
@@ -257,6 +284,14 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
             :aria-label="`Pack current, ${spanLabel.toLowerCase()}, band plus or minus ${packBand} amps`"
             @pointermove="moveCursor"
           >
+            <defs>
+              <linearGradient id="trend-fill-pack" x1="0" y1="0" x2="0" y2="1">
+                <stop class="fill-top pack" offset="0" />
+                <stop class="fill-bottom pack" offset="1" />
+              </linearGradient>
+            </defs>
+            <path :d="packArea" class="area pack" fill="url(#trend-fill-pack)" />
+
             <text :x="GUTTER - 6" :y="INSET + 8" text-anchor="end" class="band">±{{ packBand }} A</text>
             <text :x="GUTTER - 6" :y="packZeroY" text-anchor="end" class="band">0</text>
 
@@ -292,6 +327,14 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
             :aria-label="`Solar input power, ${spanLabel.toLowerCase()}, band zero to ${pvBand} watts`"
             @pointermove="moveCursor"
           >
+            <defs>
+              <linearGradient id="trend-fill-solar" x1="0" y1="0" x2="0" y2="1">
+                <stop class="fill-top solar" offset="0" />
+                <stop class="fill-bottom solar" offset="1" />
+              </linearGradient>
+            </defs>
+            <path :d="pvArea" class="area solar" fill="url(#trend-fill-solar)" />
+
             <text :x="GUTTER - 6" :y="INSET + 8" text-anchor="end" class="band">{{ pvBand }} W</text>
             <text :x="GUTTER - 6" :y="pvZeroY" text-anchor="end" class="band">0</text>
 
@@ -321,13 +364,21 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
         </div>
 
         <div v-if="hasHouse" class="strip">
-          <span class="key"><i class="swatch house" />House W</span>
+          <span class="key"><i class="swatch house" />Boat W</span>
           <svg
             :viewBox="`0 0 ${plotWidth} ${STRIP_HEIGHT}`"
             role="img"
-            :aria-label="`House load power, ${spanLabel.toLowerCase()}, band zero to ${houseBand} watts`"
+            :aria-label="`Boat load power, ${spanLabel.toLowerCase()}, band zero to ${houseBand} watts`"
             @pointermove="moveCursor"
           >
+            <defs>
+              <linearGradient id="trend-fill-house" x1="0" y1="0" x2="0" y2="1">
+                <stop class="fill-top house" offset="0" />
+                <stop class="fill-bottom house" offset="1" />
+              </linearGradient>
+            </defs>
+            <path :d="houseArea" class="area house" fill="url(#trend-fill-house)" />
+
             <text :x="GUTTER - 6" :y="INSET + 8" text-anchor="end" class="band">{{ houseBand }} W</text>
             <text :x="GUTTER - 6" :y="houseZeroY" text-anchor="end" class="band">0</text>
 
@@ -363,7 +414,7 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
           <span>{{ cursor.at }}</span>
           <span>pack {{ cursor.pack }}</span>
           <span v-if="hasSolar">PV {{ cursor.pv }}</span>
-          <span v-if="hasHouse">house {{ cursor.house }}</span>
+          <span v-if="hasHouse">boat {{ cursor.house }}</span>
         </template>
         <template v-else-if="span">
           <span>{{ clockTime(span.start) }}</span>
@@ -374,31 +425,33 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
 
     <details class="numbers">
       <summary>Show the numbers</summary>
-      <table class="twin">
-        <caption class="muted">
-          The newest {{ tableRows.length }} of {{ history.length }} samples. Nothing here is
-          averaged or thinned.
-        </caption>
-        <thead>
-          <tr>
-            <th scope="col">Time</th>
-            <th scope="col">Pack A</th>
-            <th scope="col">PV W</th>
-            <th scope="col">House W</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-if="tableRows.length === 0">
-            <td colspan="4">— no samples —</td>
-          </tr>
-          <tr v-for="row in tableRows" :key="row.at">
-            <td>{{ stamp(row.at) }}</td>
-            <td>{{ row.packCurrent.toFixed(2) }}</td>
-            <td>{{ row.pvPower === null ? '—' : Math.round(row.pvPower) }}</td>
-            <td>{{ row.housePower === null ? '—' : Math.round(row.housePower) }}</td>
-          </tr>
-        </tbody>
-      </table>
+      <div class="table-scroll">
+        <table class="twin">
+          <caption class="muted">
+            The newest {{ tableRows.length }} of {{ history.length }} samples. Nothing here is
+            averaged or thinned.
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Time</th>
+              <th scope="col">Pack A</th>
+              <th scope="col">PV W</th>
+              <th scope="col">Boat W</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="tableRows.length === 0">
+              <td colspan="4">— no samples —</td>
+            </tr>
+            <tr v-for="row in tableRows" :key="row.at">
+              <td>{{ stamp(row.at) }}</td>
+              <td>{{ row.packCurrent.toFixed(2) }}</td>
+              <td>{{ row.pvPower === null ? '—' : Math.round(row.pvPower) }}</td>
+              <td>{{ row.housePower === null ? '—' : Math.round(row.housePower) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </details>
   </section>
 </template>
@@ -406,7 +459,6 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
 <style scoped>
 .panel {
   padding: var(--pad);
-  border-top: 1px solid var(--gridline);
 }
 
 header {
@@ -473,6 +525,41 @@ header .muted {
   fill: var(--ink-muted);
 }
 
+/*
+ * Decorative wash under each trace: SUPPORT, not identity. The gradient stops carry the entity hue
+ * and its 0.18 → 0 alpha through CSS, because var() does not resolve inside an SVG presentation
+ * attribute. objectBoundingBox (the default) keeps the fill strongest at the crest and fading to
+ * the baseline; the solid stroke above still carries the reading.
+ */
+.area {
+  stroke: none;
+}
+
+.fill-top.pack {
+  stop-color: var(--pack);
+  stop-opacity: 0.18;
+}
+.fill-bottom.pack {
+  stop-color: var(--pack);
+  stop-opacity: 0;
+}
+.fill-top.solar {
+  stop-color: var(--solar);
+  stop-opacity: 0.18;
+}
+.fill-bottom.solar {
+  stop-color: var(--solar);
+  stop-opacity: 0;
+}
+.fill-top.house {
+  stop-color: var(--house);
+  stop-opacity: 0.18;
+}
+.fill-bottom.house {
+  stop-color: var(--house);
+  stop-opacity: 0;
+}
+
 .zero {
   stroke: var(--gridline);
   stroke-width: 1;
@@ -515,7 +602,7 @@ header .muted {
 }
 
 .dot {
-  fill: var(--surface);
+  fill: var(--card);
   stroke-width: 2;
 }
 
@@ -558,6 +645,12 @@ header .muted {
 
 .numbers summary:hover {
   color: var(--ink);
+}
+
+/* The table fits at every width today; this keeps it in its own scroll box so a future column can
+   never push the page body sideways, matching the Stats tables. */
+.table-scroll {
+  overflow-x: auto;
 }
 
 .twin {

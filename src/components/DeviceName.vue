@@ -84,9 +84,9 @@ function cancel(): void {
 .rename,
 .action {
   background: transparent;
-  border: 1px solid var(--gridline);
+  border: 1px solid var(--card-border);
   color: var(--ink-secondary);
-  border-radius: 2px;
+  border-radius: var(--r-sm);
   padding: 0.25rem 0.7rem;
   min-height: var(--tap);
   display: inline-flex;
@@ -115,8 +115,8 @@ function cancel(): void {
   min-width: 0;
   min-height: var(--tap);
   background: var(--plane);
-  border: 1px solid var(--baseline);
-  border-radius: var(--radius);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-sm);
   color: var(--ink);
   font-family: var(--font-body);
   font-size: 1rem;

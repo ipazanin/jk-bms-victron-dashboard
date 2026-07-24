@@ -108,7 +108,7 @@ const keyLooksComplete = computed(() => /^[0-9a-f]{32}$/.test(normalisedKey.valu
 
       <p v-if="!capabilities.canScan || !capabilities.hasSubtleCrypto" class="notice">
         The solar controller can’t be read in this browser. See <em>What this page needs</em>
-        above — the battery works regardless, it just can’t show house load.
+        above — the battery works regardless, it just can’t show boat load.
       </p>
 
       <template v-else>
@@ -197,10 +197,10 @@ button,
   align-items: center;
   justify-content: center;
   background: transparent;
-  border: 1px solid var(--baseline);
+  border: 1px solid var(--card-border);
   color: var(--ink);
   text-decoration: none;
-  border-radius: var(--radius);
+  border-radius: var(--r-sm);
   padding: 0.6rem 1rem;
   min-height: var(--tap);
   font-family: var(--font-label);
@@ -230,7 +230,7 @@ button.primary {
 
 button.ghost {
   padding: 0.35rem 0.6rem;
-  border-color: var(--gridline);
+  border-color: var(--card-border);
   color: var(--ink-secondary);
 }
 
@@ -272,9 +272,9 @@ input[type='text'] {
   flex: 1;
   min-width: 0;
   background: var(--raised);
-  border: 1px solid var(--gridline);
+  border: 1px solid var(--card-border);
   color: var(--ink);
-  border-radius: var(--radius);
+  border-radius: var(--r-sm);
   padding: 0.6rem 0.7rem;
   font-family: var(--font-mono);
   font-size: 0.875rem;

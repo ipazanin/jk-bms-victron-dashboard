@@ -360,7 +360,7 @@ function signedAmps(current: number): string {
   <section class="ribbon">
     <header class="head">
       <h2 class="plate">Ribbon</h2>
-      <p class="muted">the house load is the gap, filled</p>
+      <p class="muted">the boat load is the gap, filled</p>
     </header>
 
     <div class="plot-frame">
@@ -481,12 +481,12 @@ function signedAmps(current: number): string {
         <template v-else>
           <p><span class="tip-key">pack</span>{{ tooltip.pack === null ? '—' : signedAmps(tooltip.pack) }}</p>
           <p><span class="tip-key">solar</span>{{ tooltip.solar === null ? '—' : signedAmps(tooltip.solar) }}</p>
-          <p v-if="tooltip.house === null"><span class="tip-key">house</span>—</p>
+          <p v-if="tooltip.house === null"><span class="tip-key">boat</span>—</p>
           <p v-else-if="!tooltip.house.plausible">
-            <span class="tip-key">house</span>— another source charging
+            <span class="tip-key">boat</span>— another source charging
           </p>
           <p v-else>
-            <span class="tip-key">house</span>{{ Math.abs(tooltip.house.currentA).toFixed(1) }} A ·
+            <span class="tip-key">boat</span>{{ Math.abs(tooltip.house.currentA).toFixed(1) }} A ·
             {{ Math.round(Math.abs(tooltip.house.powerW)) }} W
           </p>
           <p class="tip-coverage">{{ tooltip.coverage }}</p>
@@ -497,12 +497,12 @@ function signedAmps(current: number): string {
     <p class="legend readout">
       <span class="key"><i class="swatch pack" />Pack A</span>
       <span class="key"><i class="swatch solar" />Solar A</span>
-      <span class="key"><i class="swatch house" />House A</span>
+      <span class="key"><i class="swatch house" />Boat A</span>
       <span class="key"><i class="swatch withheld" />another source</span>
       <span class="key"><i class="swatch silence" />no samples</span>
     </p>
 
-    <p v-if="withheldPresent" class="copy">another source charging — house load unavailable</p>
+    <p v-if="withheldPresent" class="copy">another source charging — boat load unavailable</p>
 
     <p class="copy caption">
       Drawn from {{ grouped(timeline.length) }} samples, thinned to fit — the highest and lowest of
@@ -520,7 +520,6 @@ function signedAmps(current: number): string {
 <style scoped>
 .ribbon {
   padding: var(--pad);
-  border-top: 1px solid var(--gridline);
 }
 
 .head {
@@ -743,9 +742,9 @@ function signedAmps(current: number): string {
 
 .nudge {
   background: transparent;
-  border: 1px solid var(--gridline);
+  border: 1px solid var(--card-border);
   color: var(--ink-secondary);
-  border-radius: 2px;
+  border-radius: var(--r-sm);
   padding: 0.2rem 0.7rem;
   min-height: var(--tap);
   display: inline-flex;

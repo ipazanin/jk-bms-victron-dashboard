@@ -33,15 +33,15 @@ const GLYPHS: Record<FaultLevel, string> = {
 }
 
 .good {
-  color: var(--status-good);
+  color: var(--status-good-ink);
 }
 .warning {
-  color: var(--status-warning);
+  color: var(--status-warning-ink);
 }
 .serious {
-  color: var(--status-serious);
+  color: var(--status-serious-ink);
 }
 .critical {
-  color: var(--status-critical);
+  color: var(--status-critical-ink);
 }
 </style>

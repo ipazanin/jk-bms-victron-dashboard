@@ -71,112 +71,138 @@ function spacedTotal(elapsedMs: number): string {
 <template>
   <section class="log">
     <header class="head">
-      <h2 class="plate">Log</h2>
-      <p class="copy">Every session this browser recorded. 1 Hz, exactly what the radios reported.</p>
+      <h2 class="head-title">Log</h2>
+      <p class="copy head-sub">
+        Every session this browser recorded. 1 Hz, exactly what the radios reported.
+      </p>
       <p v-if="archive.sessions > 0" class="readout totals">{{ totals }}</p>
-      <StorageLine :usage="usage" :availability="availability" />
     </header>
 
     <LogTabs />
 
-    <p v-if="missing !== null" class="notice copy" role="status">
-      That session was dropped to make room.
-    </p>
+    <div class="body">
+      <StorageLine class="card" :usage="usage" :availability="availability" />
 
-    <p v-if="failure !== null" class="notice copy" role="status">{{ failure }}</p>
-
-    <template v-if="blocked === 'version-newer'">
-      <p class="copy state">
-        This browser holds a log recorded by a newer version of this page. It is left untouched.
+      <p v-if="missing !== null" class="notice copy card" role="status">
+        That session was dropped to make room.
       </p>
-    </template>
 
-    <template v-else-if="blocked === 'quota-exhausted'">
-      <p class="copy state">
-        The log is full and the archive is not accepting new samples. The instruments are
-        unaffected. Delete a session to make room.
-      </p>
-    </template>
+      <p v-if="failure !== null" class="notice copy card" role="status">{{ failure }}</p>
 
-    <template v-else-if="blocked !== null">
-      <p class="state-title">This browser will not keep a log.</p>
-      <p class="copy state">
-        Storage is blocked, which is what private browsing normally does. The page still works as a
-        live instrument and still remembers the last frame, but nothing is being written down.
-      </p>
-    </template>
-
-    <DeviceGroup
-      v-for="group in groups"
-      :key="group.key"
-      :group="group"
-      :now="now"
-      :sticky="groups.length > 1"
-      @rename="rename"
-    />
-
-    <template v-if="groups.length === 0 && blocked === null && availability !== null">
-      <template v-if="capabilities.canConnect">
-        <p class="state-title">No sessions yet.</p>
+      <div v-if="blocked === 'version-newer'" class="card state-card">
         <p class="copy state">
-          Recording starts on its own, the moment the BMS sends its first cell frame.
+          This browser holds a log recorded by a newer version of this page. It is left untouched.
         </p>
-      </template>
-      <template v-else>
-        <p class="state-title">Nothing recorded in this browser.</p>
+      </div>
+
+      <div v-else-if="blocked === 'quota-exhausted'" class="card state-card">
         <p class="copy state">
-          The log lives in this browser and nowhere else, and this browser cannot talk to the
-          hardware — so nothing was ever recorded here. It also cannot read what Chrome recorded on
-          the same machine.
+          The log is full and the archive is not accepting new samples. The instruments are
+          unaffected. Delete a session to make room.
         </p>
-      </template>
-    </template>
+      </div>
+
+      <div v-else-if="blocked !== null" class="card state-card">
+        <p class="state-title">This browser will not keep a log.</p>
+        <p class="copy state">
+          Storage is blocked, which is what private browsing normally does. The page still works as a
+          live instrument and still remembers the last frame, but nothing is being written down.
+        </p>
+      </div>
+
+      <DeviceGroup
+        v-for="group in groups"
+        :key="group.key"
+        class="card"
+        :group="group"
+        :now="now"
+        :sticky="groups.length > 1"
+        @rename="rename"
+      />
+
+      <div
+        v-if="groups.length === 0 && blocked === null && availability !== null"
+        class="card state-card"
+      >
+        <template v-if="capabilities.canConnect">
+          <p class="state-title">No sessions yet.</p>
+          <p class="copy state">
+            Recording starts on its own, the moment the BMS sends its first cell frame.
+          </p>
+        </template>
+        <template v-else>
+          <p class="state-title">Nothing recorded in this browser.</p>
+          <p class="copy state">
+            The log lives in this browser and nowhere else, and this browser cannot talk to the
+            hardware — so nothing was ever recorded here. It also cannot read what Chrome recorded on
+            the same machine.
+          </p>
+        </template>
+      </div>
+    </div>
   </section>
 </template>
 
 <style scoped>
+/* A vertical stack of elevated cards on the page plane: the intro sits above, the storage line,
+   state notices and per-device lists are cards separated by the stack gap rather than 1px rules. */
 .log {
-  background: var(--surface);
+  --stack-gap: clamp(0.75rem, 1.5vw, 1.25rem);
+  container-type: inline-size;
 }
 
 .head {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  padding: 1.25rem var(--pad);
-  border-bottom: 1px solid var(--gridline);
+  padding: clamp(1rem, 3vw, 1.75rem) var(--pad) 0;
 }
 
-.head h2 {
+.head-title {
   margin: 0;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: clamp(1.35rem, 1rem + 1.6vw, 1.85rem);
+  letter-spacing: -0.01em;
+  color: var(--ink);
 }
 
-.head .copy {
-  margin: 0;
+.head-sub {
+  margin: 0.4rem 0 0;
 }
 
 .totals {
-  margin: 0;
+  margin: 0.5rem 0 0;
   color: var(--ink-secondary);
+}
+
+/* The cards go full width of the workspace and each supplies its own padding, so the device list
+   keeps exactly the horizontal room it had before it was carded. */
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--stack-gap);
+  padding: var(--stack-gap) 0 2.5rem;
 }
 
 .notice {
   margin: 0;
-  padding: 0.75rem var(--pad);
-  border-bottom: 1px solid var(--gridline);
+  padding: var(--pad);
   color: var(--ink);
+}
+
+.state-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: var(--pad);
 }
 
 .state-title {
   margin: 0;
-  padding: 1.25rem var(--pad) 0;
   font-family: var(--font-body);
   font-size: 1.125rem;
   font-weight: 600;
 }
 
 .state {
-  margin: 0.4rem 0 0;
-  padding: 0 var(--pad) 1.5rem;
+  margin: 0;
 }
 </style>

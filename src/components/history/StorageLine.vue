@@ -94,10 +94,12 @@ function megabytes(bytes: number): string {
 </template>
 
 <style scoped>
+/* Its own elevated card in the Log body; the meter and the sentences below it share one padding. */
 .storage {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
+  padding: var(--pad);
 }
 
 .track {

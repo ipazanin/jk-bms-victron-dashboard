@@ -11,7 +11,7 @@ import LogTabs from '../history/LogTabs.vue'
 import { useHistoryBrowser } from '../../application/history/historyBrowser'
 import { amps, celsius, chargeStateLabel, volts, watts } from '../../application/format'
 import { hashOf } from '../../application/route'
-import type { WarningRecord, WarningSnapshot } from '../../domain/history/types'
+import type { WarningLevel, WarningRecord, WarningSnapshot } from '../../domain/history/types'
 
 const browser = useHistoryBrowser()
 const { warnings } = browser
@@ -39,6 +39,14 @@ function sessionHref(warning: WarningRecord): string {
   return hashOf({ name: 'session', id: warning.sessionId })
 }
 
+/** The severity in words, so the tier is not carried by the dot's colour alone — a channel a screen
+ *  reader and a colour-blind reader both lose. */
+const TIER_WORDS: Readonly<Record<WarningLevel, string>> = {
+  warning: 'Warning',
+  serious: 'Serious',
+  critical: 'Critical',
+}
+
 interface Reading {
   readonly label: string
   readonly value: string
@@ -62,7 +70,7 @@ function readingsOf(snapshot: WarningSnapshot): Reading[] {
   push('Solar', snapshot.solarChargeState === null ? null : chargeStateLabel(snapshot.solarChargeState))
   push('PV power', snapshot.pvPowerW === null ? null : watts(snapshot.pvPowerW))
   push('Solar current', snapshot.solarBatteryCurrentA === null ? null : amps(snapshot.solarBatteryCurrentA))
-  push('House load', houseLabel(snapshot))
+  push('Boat load', houseLabel(snapshot))
   return rows
 }
 
@@ -80,8 +88,8 @@ function houseLabel(snapshot: WarningSnapshot): string | null {
 <template>
   <section class="warnings" data-testid="warnings-view">
     <header class="head">
-      <h2 class="plate">Warnings</h2>
-      <p class="copy">
+      <h2 class="head-title">Warnings</h2>
+      <p class="copy head-sub">
         Faults captured as they fired, each with the readings behind it. Kept so a fault can be
         debugged later — what caused it, and what the pack was doing at the time.
       </p>
@@ -89,56 +97,75 @@ function houseLabel(snapshot: WarningSnapshot): string | null {
 
     <LogTabs />
 
-    <p v-if="loaded && warnings.length === 0" class="state copy">
-      No warnings recorded. A warning is written the moment a fault first appears during a live
-      session — a hot MOSFET, a cell imbalance, a charger error — and stays here afterwards.
-    </p>
+    <div class="body">
+      <section class="card list-card">
+        <p v-if="loaded && warnings.length === 0" class="state copy">
+          No warnings recorded. A warning is written the moment a fault first appears during a live
+          session — a hot MOSFET, a cell imbalance, a charger error — and stays here afterwards.
+        </p>
 
-    <ul class="list">
-      <li v-for="warning in warnings" :key="`${warning.sessionId}:${warning.seq}`" class="item">
-        <details>
-          <summary>
-            <span class="dot" :class="warning.level" aria-hidden="true" />
-            <span class="title">{{ warning.title }}</span>
-            <span class="when readout">{{ stamp.format(warning.at) }}</span>
-          </summary>
-          <p class="detail copy">{{ warning.detail }}</p>
-          <dl class="readings">
-            <div v-for="reading in readingsOf(warning.snapshot)" :key="reading.label" class="reading">
-              <dt>{{ reading.label }}</dt>
-              <dd class="readout">{{ reading.value }}</dd>
-            </div>
-          </dl>
-          <a class="session-link" :href="sessionHref(warning)">Open the session →</a>
-        </details>
-      </li>
-    </ul>
+        <ul class="list">
+          <li v-for="warning in warnings" :key="`${warning.sessionId}:${warning.seq}`" class="item">
+            <details>
+              <summary>
+                <span class="dot" :class="warning.level" aria-hidden="true" />
+                <span class="tier" :class="warning.level">{{ TIER_WORDS[warning.level] }}</span>
+                <span class="title">{{ warning.title }}</span>
+                <span class="when readout">{{ stamp.format(warning.at) }}</span>
+              </summary>
+              <p class="detail copy">{{ warning.detail }}</p>
+              <dl class="readings">
+                <div
+                  v-for="reading in readingsOf(warning.snapshot)"
+                  :key="reading.label"
+                  class="reading"
+                >
+                  <dt>{{ reading.label }}</dt>
+                  <dd class="readout">{{ reading.value }}</dd>
+                </div>
+              </dl>
+              <a class="session-link" :href="sessionHref(warning)">Open the session →</a>
+            </details>
+          </li>
+        </ul>
+      </section>
+    </div>
   </section>
 </template>
 
 <style scoped>
-.warnings {
-  background: var(--surface);
+.head {
+  padding: clamp(1rem, 3vw, 1.75rem) var(--pad) 0;
 }
 
-.head {
+.head-title {
+  margin: 0;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: clamp(1.35rem, 1rem + 1.6vw, 1.85rem);
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.head-sub {
+  margin: 0.4rem 0 0;
+}
+
+/* One stack gap replaces the old inter-panel gridline rules; the card below carries its own
+   elevation, so blocks separate on space rather than a 1px border. */
+.body {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
-  padding: 1.25rem var(--pad);
-  border-bottom: 1px solid var(--gridline);
+  gap: clamp(1rem, 2.5vw, 1.5rem);
+  padding: 1.25rem var(--pad) 2.5rem;
 }
 
-.head h2 {
-  margin: 0;
-}
-
-.head .copy {
-  margin: 0;
+.list-card {
+  padding: var(--pad);
 }
 
 .state {
-  padding: 1.5rem var(--pad);
+  margin: 0;
 }
 
 .list {
@@ -151,12 +178,20 @@ function houseLabel(snapshot: WarningSnapshot): string | null {
   border-bottom: 1px solid var(--gridline);
 }
 
+.item:first-child summary {
+  padding-top: 0;
+}
+
+.item:last-child {
+  border-bottom: none;
+}
+
 summary {
   display: flex;
   align-items: center;
   gap: 0.75rem;
   min-height: var(--tap);
-  padding: 0.5rem var(--pad);
+  padding: 0.5rem 0;
   cursor: pointer;
   list-style: none;
 }
@@ -184,6 +219,31 @@ summary::-webkit-details-marker {
   background: var(--status-critical);
 }
 
+/* The severity in words, so the tier is not colour-only: the dot beside it now reinforces this
+   label rather than being the only channel that carries it. The -ink half of each status hue is the
+   one that clears AA as text on the card. Fixed width so the titles rule down the page. */
+.tier {
+  flex: none;
+  min-width: 4rem;
+  font-family: var(--font-label);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.tier.warning {
+  color: var(--status-warning-ink);
+}
+
+.tier.serious {
+  color: var(--status-serious-ink);
+}
+
+.tier.critical {
+  color: var(--status-critical-ink);
+}
+
 .title {
   flex: 1;
   font-weight: 600;
@@ -196,8 +256,8 @@ summary::-webkit-details-marker {
 
 .detail {
   margin: 0;
-  padding: 0 var(--pad) 0.75rem;
-  padding-left: calc(var(--pad) + 9px + 0.75rem);
+  padding: 0 0 0.75rem;
+  padding-left: calc(9px + 0.75rem);
 }
 
 .readings {
@@ -205,8 +265,8 @@ summary::-webkit-details-marker {
   grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
   gap: 1px;
   margin: 0;
-  padding: 0 var(--pad) 1rem;
-  padding-left: calc(var(--pad) + 9px + 0.75rem);
+  padding: 0 0 1rem;
+  padding-left: calc(9px + 0.75rem);
 }
 
 .reading {
@@ -230,9 +290,11 @@ summary::-webkit-details-marker {
 }
 
 .session-link {
-  display: inline-block;
-  margin: 0 var(--pad) 1rem;
-  margin-left: calc(var(--pad) + 9px + 0.75rem);
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  margin: 0 0 1rem;
+  margin-left: calc(9px + 0.75rem);
   color: var(--pack-ink);
   text-decoration: none;
   font-size: 0.875rem;

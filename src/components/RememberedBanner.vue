@@ -39,7 +39,9 @@ const connectHref = hashOf({ name: 'connect' })
 </script>
 
 <template>
-  <header class="remembered">
+  <!-- Sits above the Bus cards on the same stack rhythm as the annunciator it replaces, one
+       elevated card rather than a flat full-bleed bar. -->
+  <header class="remembered card">
     <div class="left">
       <span class="dot" aria-hidden="true" />
       <span class="plate">Remembered</span>
@@ -59,13 +61,12 @@ const connectHref = hashOf({ name: 'connect' })
 
 <style scoped>
 .remembered {
+  margin-top: clamp(0.75rem, 1.5vw, 1.25rem);
   display: flex;
   align-items: center;
   gap: 1rem;
   flex-wrap: wrap;
   padding: 0.75rem var(--pad);
-  background: var(--surface);
-  border-bottom: 1px solid var(--gridline);
 }
 
 .left {
@@ -120,19 +121,24 @@ const connectHref = hashOf({ name: 'connect' })
 
 button {
   margin-left: auto;
+  min-height: var(--tap);
   background: transparent;
-  border: 1px solid var(--baseline);
+  border: 1px solid var(--card-border);
   color: var(--ink);
-  border-radius: var(--radius);
+  border-radius: var(--r-sm);
   padding: 0.35rem 0.8rem;
   font-family: var(--font-label);
   font-size: 0.75rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   font-weight: 600;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
 }
 
 button:hover {
+  background: var(--raised);
   border-color: var(--ink-secondary);
 }
 </style>

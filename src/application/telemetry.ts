@@ -256,7 +256,7 @@ export function createTelemetry(deps: TelemetryDeps) {
       found.push({
         level: 'warning',
         title: 'Devices disagree on bus voltage',
-        detail: `${Math.abs(reconciliation.voltageDelta).toFixed(2)} V apart. Check the sense wiring before trusting the house load.`,
+        detail: `${Math.abs(reconciliation.voltageDelta).toFixed(2)} V apart. Check the sense wiring before trusting the boat load.`,
       })
     }
 

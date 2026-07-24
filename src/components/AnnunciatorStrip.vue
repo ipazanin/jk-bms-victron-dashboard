@@ -59,43 +59,51 @@ const watchList = computed(() =>
 </script>
 
 <template>
-  <header class="annunciator">
-    <div class="left">
-      <span class="pulse" :class="{ on: watching }" aria-hidden="true" />
-      <span class="plate">{{ mode }}</span>
-      <span class="readout links">{{ links }}</span>
-      <span v-if="deviceLabel" class="readout name">{{ deviceLabel }}</span>
+  <!-- One elevated card holds the reading and the watch list together, so the two read as one
+       instrument rather than two flat bars stacked with a seam between them. -->
+  <div class="strip card">
+    <header class="annunciator">
+      <div class="left">
+        <span class="pulse" :class="{ on: watching }" aria-hidden="true" />
+        <span class="plate">{{ mode }}</span>
+        <span class="readout links">{{ links }}</span>
+        <span v-if="deviceLabel" class="readout name">{{ deviceLabel }}</span>
+      </div>
+
+      <StatusChip v-if="watching" :level="worstFault" :label="summary" />
+      <span v-else class="nothing">Nothing connected</span>
+
+      <!-- The recording plate belongs on this line, at the right. It is passed in rather than
+           imported so the strip stays a presentation component with no view of the archive. -->
+      <span class="trailing"><slot /></span>
+    </header>
+
+    <div v-if="watching" class="banners" aria-live="polite">
+      <p v-if="faults.length === 0" class="banner">
+        <StatusChip level="good" label="Watching" />
+        <span class="detail">{{ watchList }}</span>
+      </p>
+      <p v-for="fault in faults" :key="fault.title" class="banner" :class="fault.level">
+        <StatusChip :level="fault.level" :label="fault.title" />
+        <span class="detail">{{ fault.detail }}</span>
+      </p>
     </div>
-
-    <StatusChip v-if="watching" :level="worstFault" :label="summary" />
-    <span v-else class="nothing">Nothing connected</span>
-
-    <!-- The recording plate belongs on this line, at the right. It is passed in rather than
-         imported so the strip stays a presentation component with no view of the archive. -->
-    <span class="trailing"><slot /></span>
-  </header>
-
-  <div v-if="watching" class="banners" aria-live="polite">
-    <p v-if="faults.length === 0" class="banner">
-      <StatusChip level="good" label="Watching" />
-      <span class="detail">{{ watchList }}</span>
-    </p>
-    <p v-for="fault in faults" :key="fault.title" class="banner" :class="fault.level">
-      <StatusChip :level="fault.level" :label="fault.title" />
-      <span class="detail">{{ fault.detail }}</span>
-    </p>
   </div>
 </template>
 
 <style scoped>
+/* Sits above the Bus cards on the same stack rhythm: the gap below comes from the first card's
+   own top padding, so only the gap above needs stating here. */
+.strip {
+  margin-top: clamp(0.75rem, 1.5vw, 1.25rem);
+}
+
 .annunciator {
   display: flex;
   align-items: center;
   gap: 1rem;
   flex-wrap: wrap;
   padding: 0.75rem var(--pad);
-  background: var(--surface);
-  border-bottom: 1px solid var(--gridline);
 }
 
 .left {
@@ -148,13 +156,12 @@ const watchList = computed(() =>
 /*
  * Rendered whenever a radio is live, occupied or not. The nominal row reuses the fault row's own
  * classes so the reserved height is the fault row's height by construction — a magic min-height
- * would drift the first time the padding or the border changes.
+ * would drift the first time the padding or the border changes. A hairline keeps separating each
+ * row from the one above it; the card edge now does the job the strip's own border used to.
  */
 .banners {
   display: flex;
   flex-direction: column;
-  background: var(--surface);
-  border-bottom: 1px solid var(--gridline);
 }
 
 .banner {

@@ -408,17 +408,17 @@ function grouped(value: number): string {
       </div>
     </header>
 
-    <p v-if="missing !== null" class="notice copy" role="status">
+    <p v-if="missing !== null" class="notice copy card" role="status">
       That session was dropped to make room.
     </p>
-    <p v-else-if="failure !== null" class="notice copy" role="status">{{ failure }}</p>
-    <p v-else-if="loading && !loaded" class="notice copy" role="status">Reading the session…</p>
+    <p v-else-if="failure !== null" class="notice copy card" role="status">{{ failure }}</p>
+    <p v-else-if="loading && !loaded" class="notice copy card" role="status">Reading the session…</p>
 
     <template v-if="loaded && record && ledger">
-      <section class="band">
+      <section class="band card">
         <header class="band-head">
           <h3 class="plate">{{ ledgerHeading }}</h3>
-          <p class="muted">house = solar − pack, integrated</p>
+          <p class="muted">boat = solar − pack, integrated</p>
         </header>
         <p class="copy window">{{ windowSentence }}</p>
 
@@ -431,13 +431,13 @@ function grouped(value: number): string {
             <summary class="copy">Why this is a floor</summary>
             <p class="copy">
               The pack took more than the panels gave for {{ spacedSpan(foreignMs) }} — an
-              alternator or shore charger was on the bus. This is a floor: the house was drawing at
+              alternator or shore charger was on the bus. This is a floor: the boat was drawing at
               the same time, so the real figure is higher.
             </p>
           </details>
           <p v-else class="copy">
             The pack took more than the panels gave for {{ spacedSpan(foreignMs) }} — an
-            alternator or shore charger was on the bus. This is a floor: the house was drawing at
+            alternator or shore charger was on the bus. This is a floor: the boat was drawing at
             the same time, so the real figure is higher.
           </p>
         </div>
@@ -462,6 +462,7 @@ function grouped(value: number): string {
       </section>
 
       <CoverageTape
+        class="card"
         :coverage="coverage"
         :window="loaded.window"
         :selection="selection"
@@ -471,6 +472,7 @@ function grouped(value: number): string {
       />
 
       <SessionRibbon
+        class="card"
         :timeline="loaded.timeline"
         :window="loaded.window"
         :cursor-at="cursorAt"
@@ -481,7 +483,7 @@ function grouped(value: number): string {
         @shift="shiftWindow"
       />
 
-      <section class="band scrub">
+      <section class="band scrub card">
         <header class="band-head">
           <h3 class="plate">
             <template v-if="activeAt === null">At —</template>
@@ -519,35 +521,37 @@ function grouped(value: number): string {
         <p class="copy">Per-cell voltages are not kept. The Log stores the spread, not the ladder.</p>
       </section>
 
-      <EntryList :entries="record.entries" :cursor-at="cursorAt" @scrub="onScrub" />
+      <EntryList class="card" :entries="record.entries" :cursor-at="cursorAt" @scrub="onScrub" />
 
-      <section class="band">
+      <section class="band card">
         <details>
           <summary class="plate">Show the numbers</summary>
 
-          <table class="twin">
-            <caption class="muted">{{ tableCaption }}</caption>
-            <thead>
-              <tr>
-                <th scope="col">Time</th>
-                <th scope="col">Pack A</th>
-                <th scope="col">Solar A</th>
-                <th scope="col">House A</th>
-                <th scope="col">House W</th>
-                <th scope="col">SOC %</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in tableRows" :key="row.at">
-                <td>{{ clockSeconds(row.at) }}</td>
-                <td>{{ row.packA }}</td>
-                <td>{{ row.solarA }}</td>
-                <td>{{ row.houseA }}</td>
-                <td>{{ row.houseW }}</td>
-                <td>{{ row.stateOfCharge }}</td>
-              </tr>
-            </tbody>
-          </table>
+          <div class="table-scroll">
+            <table class="twin">
+              <caption class="muted">{{ tableCaption }}</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Time</th>
+                  <th scope="col">Pack A</th>
+                  <th scope="col">Solar A</th>
+                  <th scope="col">Boat A</th>
+                  <th scope="col">Boat W</th>
+                  <th scope="col">SOC %</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in tableRows" :key="row.at">
+                  <td>{{ clockSeconds(row.at) }}</td>
+                  <td>{{ row.packA }}</td>
+                  <td>{{ row.solarA }}</td>
+                  <td>{{ row.houseA }}</td>
+                  <td>{{ row.houseW }}</td>
+                  <td>{{ row.stateOfCharge }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
 
           <div class="paging">
             <button type="button" class="action" :disabled="tableStart === 0" @click="pageTable(-1)">
@@ -569,8 +573,15 @@ function grouped(value: number): string {
 </template>
 
 <style scoped>
+/* A vertical stack of elevated cards on the page plane. The header reads as an intro above them;
+   the ledger, coverage tape, ribbon, scrub readout, entries and table are each a card, separated by
+   the stack gap rather than the 1px rules that used to divide them. */
 .session {
-  background: var(--surface);
+  --stack-gap: clamp(0.75rem, 1.5vw, 1.25rem);
+  display: flex;
+  flex-direction: column;
+  gap: var(--stack-gap);
+  padding-block: var(--stack-gap);
 }
 
 .head {
@@ -578,8 +589,7 @@ function grouped(value: number): string {
   flex-direction: column;
   align-items: flex-start;
   gap: 0.5rem;
-  padding: 1.25rem var(--pad);
-  border-bottom: 1px solid var(--gridline);
+  padding: 0 var(--pad);
 }
 
 .back {
@@ -629,9 +639,9 @@ function grouped(value: number): string {
 
 .action {
   background: transparent;
-  border: 1px solid var(--gridline);
+  border: 1px solid var(--card-border);
   color: var(--ink-secondary);
-  border-radius: 2px;
+  border-radius: var(--r-sm);
   padding: 0.25rem 0.8rem;
   min-height: var(--tap);
   display: inline-flex;
@@ -659,14 +669,12 @@ function grouped(value: number): string {
 
 .notice {
   margin: 0;
-  padding: 0.75rem var(--pad);
-  border-bottom: 1px solid var(--gridline);
+  padding: var(--pad);
   color: var(--ink);
 }
 
 .band {
   padding: var(--pad);
-  border-top: 1px solid var(--gridline);
 }
 
 .band-head {
@@ -732,6 +740,12 @@ summary {
   min-height: var(--tap);
   display: flex;
   align-items: center;
+}
+
+/* The six-column table scrolls inside this box; the page body never scrolls sideways, even though
+   this table lives in a collapsed <details> that the overflow check does not open. */
+.table-scroll {
+  overflow-x: auto;
 }
 
 .twin {

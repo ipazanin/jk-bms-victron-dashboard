@@ -161,7 +161,7 @@ const flow = computed(() => {
 })
 
 const solarHint = computed(() =>
-  compact.value ? 'Connect the Victron' : 'Connect the Victron to see house load',
+  compact.value ? 'Connect the Victron' : 'Connect the Victron to see boat load',
 )
 
 /** Direction in words: a screen reader reads the typographic minus in '−4.9 A' unreliably. */
@@ -196,7 +196,7 @@ const summary = computed(() => {
   if (houseKnown.value) {
     return (
       `Solar delivers ${ampsAbsolute(props.solarCurrent!)}, the pack is ${flow.value} at ` +
-      `${ampsAbsolute(props.packCurrent)}, so the house is drawing ${ampsAbsolute(props.houseCurrent!)}, ` +
+      `${ampsAbsolute(props.packCurrent)}, so the boat is drawing ${ampsAbsolute(props.houseCurrent!)}, ` +
       `about ${watts(props.housePower ?? 0)}.${bandSentence.value}`
     )
   }
@@ -205,16 +205,16 @@ const summary = computed(() => {
   if (houseCharged.value) {
     return (
       `Solar delivers ${ampsAbsolute(props.solarCurrent!)}, but the pack is ${flow.value} at ` +
-      `${ampsAbsolute(props.packCurrent)} — another source is charging, so house load is ` +
+      `${ampsAbsolute(props.packCurrent)} — another source is charging, so boat load is ` +
       `unavailable.${bandSentence.value}`
     )
   }
   // Solar can be connected yet still not yield a house load, when the controller reports no
   // current or voltage. Telling the user to connect it would then be wrong.
   if (solarPresent.value) {
-    return `${pack} Solar delivers ${ampsAbsolute(props.solarCurrent!)}. House load is unavailable.${bandSentence.value}`
+    return `${pack} Solar delivers ${ampsAbsolute(props.solarCurrent!)}. Boat load is unavailable.${bandSentence.value}`
   }
-  return `${pack} Connect the solar controller to see house load.${bandSentence.value}`
+  return `${pack} Connect the solar controller to see boat load.${bandSentence.value}`
 })
 </script>
 
@@ -222,7 +222,7 @@ const summary = computed(() => {
   <section class="shunt">
     <header class="head">
       <h2 class="plate">DC bus reconciliation</h2>
-      <p class="muted">house = solar − pack</p>
+      <p class="muted">boat = solar − pack</p>
     </header>
 
     <svg
@@ -297,7 +297,7 @@ const summary = computed(() => {
       </template>
 
       <g v-if="houseKnown" class="span">
-        <text :x="8" :y="SPAN_Y + 5" class="row-label house-ink">HOUSE</text>
+        <text :x="8" :y="SPAN_Y + 5" class="row-label house-ink">BOAT</text>
         <rect :x="spanBar.x - 1" :y="SPAN_Y - 7" width="2" height="14" class="cap" />
         <rect :x="spanBar.x + spanBar.width - 1" :y="SPAN_Y - 7" width="2" height="14" class="cap" />
         <rect :x="spanBar.x" :y="SPAN_Y - 1" :width="spanBar.width" height="2" class="rule" />
@@ -306,9 +306,9 @@ const summary = computed(() => {
         </text>
       </g>
       <g v-else-if="houseCharged" class="span">
-        <text :x="8" :y="SPAN_Y + 5" class="row-label ghost-ink">HOUSE</text>
+        <text :x="8" :y="SPAN_Y + 5" class="row-label ghost-ink">BOAT</text>
         <text :x="CENTER + 20" :y="SPAN_Y + 5" class="ghost-ink hint">
-          another source charging — house load unavailable
+          another source charging — boat load unavailable
         </text>
       </g>
     </svg>
@@ -316,8 +316,8 @@ const summary = computed(() => {
     <footer class="legend">
       <span class="key"><i class="swatch pack" />Pack {{ volts(packVoltage, 2) }}</span>
       <span v-if="pvPower !== null" class="key"><i class="swatch solar" />Solar {{ watts(pvPower) }} in</span>
-      <span v-if="houseKnown" class="key"><i class="swatch house" />House {{ watts(housePower ?? 0) }} out</span>
-      <span v-else-if="houseCharged" class="key muted-key">House load unavailable — another source charging</span>
+      <span v-if="houseKnown" class="key"><i class="swatch house" />Boat {{ watts(housePower ?? 0) }} out</span>
+      <span v-else-if="houseCharged" class="key muted-key">Boat load unavailable — another source charging</span>
       <span v-else class="key muted-key">Solar not connected</span>
       <span v-if="packBand || solarBand" class="key muted-key band-key">
         shaded — range over the last 30 s
@@ -328,9 +328,7 @@ const summary = computed(() => {
 
 <style scoped>
 .shunt {
-  background: var(--surface);
   padding: var(--pad);
-  border-bottom: 1px solid var(--gridline);
 }
 
 .head {
@@ -416,13 +414,13 @@ const summary = computed(() => {
 }
 
 .pack-ink {
-  fill: var(--pack);
+  fill: var(--pack-ink);
 }
 .solar-ink {
-  fill: var(--solar);
+  fill: var(--solar-ink);
 }
 .house-ink {
-  fill: var(--house);
+  fill: var(--house-ink);
 }
 
 /* Filled geometry rather than strokes, so the bracket lives in the same coordinate system as

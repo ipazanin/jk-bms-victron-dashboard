@@ -4,6 +4,7 @@ import { computed } from 'vue'
 import AnnunciatorStrip from '../AnnunciatorStrip.vue'
 import BreakerPanel from '../BreakerPanel.vue'
 import CellLadder from '../CellLadder.vue'
+import EnergyFlow from '../bus/EnergyFlow.vue'
 import RememberedBanner from '../RememberedBanner.vue'
 import ShuntAmmeter from '../ShuntAmmeter.vue'
 import SocCluster from '../SocCluster.vue'
@@ -100,24 +101,64 @@ const chassisCentre = computed(() => chassis.value.width / 2)
   />
 
   <main>
-    <ShuntAmmeter
-      v-if="battery"
-      :pack-current="battery.current"
-      :pack-voltage="battery.packVoltage"
-      :solar-current="solar?.batteryCurrent ?? null"
-      :house-current="bus?.houseCurrent ?? null"
-      :house-power="bus?.housePower ?? null"
-      :house-load-plausible="bus?.houseLoadPlausible ?? null"
-      :pv-power="solar?.pvPower ?? null"
-      :pack-reach="packReach"
-      :solar-reach="solarReach"
-    />
+    <template v-if="battery">
+      <EnergyFlow
+        class="card"
+        :pack-current="battery.current"
+        :pack-voltage="battery.packVoltage"
+        :solar-current="solar?.batteryCurrent ?? null"
+        :pv-power="solar?.pvPower ?? null"
+        :house-current="bus?.houseCurrent ?? null"
+        :house-power="bus?.housePower ?? null"
+        :house-load-plausible="bus?.houseLoadPlausible ?? null"
+        :pack-reach="packReach"
+        :solar-reach="solarReach"
+      />
+
+      <ShuntAmmeter
+        class="card"
+        :pack-current="battery.current"
+        :pack-voltage="battery.packVoltage"
+        :solar-current="solar?.batteryCurrent ?? null"
+        :house-current="bus?.houseCurrent ?? null"
+        :house-power="bus?.housePower ?? null"
+        :house-load-plausible="bus?.houseLoadPlausible ?? null"
+        :pv-power="solar?.pvPower ?? null"
+        :pack-reach="packReach"
+        :solar-reach="solarReach"
+      />
+
+      <div class="instruments">
+        <SocCluster :battery="battery" :projection="projection" />
+        <CellLadder
+          :battery="battery"
+          :balance="balance"
+          :cell-reach="cellReach"
+          :balance-trigger="settings?.balanceTriggerDelta ?? null"
+        />
+        <TempTrio :battery="battery" />
+        <BreakerPanel :battery="battery" :device="device" />
+      </div>
+
+      <SolarRow
+        class="card"
+        :solar="solar"
+        :bus="bus"
+        :pack-voltage="battery.packVoltage"
+        :rssi="solarRssi"
+        :can-scan="capabilities.canScan"
+      />
+
+      <!-- The live trend sits last: a strip mounting when a series first arrives grows the panel,
+           and from the foot of the stack that nudges only the footer, never the instruments above. -->
+      <TrendStrips v-if="source === 'live'" class="card" :history="history" />
+    </template>
 
     <template v-else>
-      <section class="chassis">
+      <section class="chassis card">
         <header class="chassis-head">
           <h2 class="plate">DC bus reconciliation</h2>
-          <p class="muted">house = solar − pack</p>
+          <p class="muted">boat = solar − pack</p>
         </header>
 
         <svg
@@ -125,7 +166,7 @@ const chassisCentre = computed(() => chassis.value.width / 2)
           class="chart"
           data-testid="shunt-chassis"
           role="img"
-          aria-label="The instrument, unpowered: a centre-zero current axis with a row each for pack, solar and house. It fills in when you connect."
+          aria-label="The instrument, unpowered: a centre-zero current axis with a row each for pack, solar and boat. It fills in when you connect."
         >
           <text :x="chassis.margin" :y="chassis.axisY - 30" text-anchor="start" class="pole">
             − discharge
@@ -175,7 +216,7 @@ const chassisCentre = computed(() => chassis.value.width / 2)
             :y2="chassis.houseY"
             class="ghost"
           />
-          <text :x="8" :y="chassis.houseY + 5" class="row-label">HOUSE</text>
+          <text :x="8" :y="chassis.houseY + 5" class="row-label">BOAT</text>
           <text :x="chassisCentre + 20" :y="chassis.houseY + 5" class="hint">
             needs both radios
           </text>
@@ -184,11 +225,11 @@ const chassisCentre = computed(() => chassis.value.width / 2)
         <p class="muted caption">This is the instrument. It fills in when you connect.</p>
       </section>
 
-      <section class="landing">
+      <section class="landing card">
         <h2>Read your DC bus.</h2>
         <p>
           Connect the battery to see charge, discharge and cell health. Add the Victron to see solar
-          in and house load — the number neither vendor app shows, and which normally needs a shunt
+          in and boat load — the number neither vendor app shows, and which normally needs a shunt
           you never installed.
         </p>
         <p class="copy">
@@ -200,36 +241,39 @@ const chassisCentre = computed(() => chassis.value.width / 2)
         </p>
       </section>
     </template>
-
-    <div v-if="battery" class="instruments">
-      <SocCluster :battery="battery" :projection="projection" />
-      <CellLadder
-        :battery="battery"
-        :balance="balance"
-        :cell-reach="cellReach"
-        :balance-trigger="settings?.balanceTriggerDelta ?? null"
-      />
-      <TempTrio :battery="battery" />
-      <BreakerPanel :battery="battery" :device="device" />
-    </div>
-
-    <SolarRow
-      v-if="battery"
-      :solar="solar"
-      :bus="bus"
-      :pack-voltage="battery.packVoltage"
-      :rssi="solarRssi"
-      :can-scan="capabilities.canScan"
-    />
-
-    <TrendStrips v-if="battery && source === 'live'" :history="history" />
   </main>
 </template>
 
 <style scoped>
+main {
+  --stack-gap: clamp(0.75rem, 1.5vw, 1.25rem);
+  display: flex;
+  flex-direction: column;
+  gap: var(--stack-gap);
+  padding-block: var(--stack-gap);
+  /* The cluster wraps against the width actually available to it, not the raw viewport, so the
+     four columns fold to two before the rail and page padding can push them off the edge. */
+  container: bus / inline-size;
+}
+
+/*
+ * The elevated-card treatment shared by every top-level block on the Bus: the flow hero, the
+ * ammeter, the trend, the solar row, the landing chassis, and each instrument in the cluster.
+ * Contrast between blocks comes from the plane → card elevation step, not a 1px rule. The class
+ * falls through to each child component's root, which carries this scope, and each panel supplies
+ * its own padding, so the card sets only surface, edge, radius and shadow.
+ */
+.card,
+.instruments > * {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-card);
+  min-width: 0;
+}
+
 .chassis {
   padding: var(--pad);
-  border-bottom: 1px solid var(--gridline);
 }
 
 .chassis-head {
@@ -286,7 +330,6 @@ const chassisCentre = computed(() => chassis.value.width / 2)
 
 .landing {
   padding: 3rem var(--pad);
-  border-bottom: 1px solid var(--gridline);
 }
 
 .landing h2 {
@@ -322,7 +365,7 @@ const chassisCentre = computed(() => chassis.value.width / 2)
   background: var(--pack-ink);
   border: 1px solid var(--pack-ink);
   color: var(--on-pack);
-  border-radius: var(--radius);
+  border-radius: var(--r-sm);
   font-family: var(--font-label);
   font-size: 0.8125rem;
   font-weight: 600;
@@ -346,32 +389,28 @@ const chassisCentre = computed(() => chassis.value.width / 2)
 }
 
 /*
- * Track floors, not equal fractions: CellLadder spends 11.5rem on fixed tracks before its bar
- * track gets anything, so an equal quarter of 1080px left the widest drawn mark about a pixel
- * across. The dividers are the container's 1px gaps showing through, which keeps them full
- * height at every breakpoint and turns the row and column rules into the same rule.
+ * Track floors, not equal fractions: CellLadder spends ~11.5rem on fixed columns before its bar
+ * track gets anything, so an equal quarter of the row leaves the widest drawn mark about a pixel
+ * across. The wide second track is the ladder's; the other three hold the readouts they carry.
+ * Cards separate on the stack gap now, so there is no gridline show-through to keep aligned.
  */
 .instruments {
   display: grid;
   grid-template-columns:
     minmax(13rem, 0.85fr) minmax(22rem, 1.7fr) minmax(12rem, 0.75fr)
     minmax(12rem, 0.8fr);
-  gap: 1px;
-  background: var(--gridline);
+  gap: var(--stack-gap);
 }
 
-.instruments > * {
-  background: var(--surface);
-  min-width: 0;
-}
-
-@media (max-width: 1180px) {
+/* The four fixed floors sum to ~59rem plus gaps; below that the row cannot hold four without
+   overflowing, so fold to two, then to one when even two would crowd. */
+@container bus (max-width: 1060px) {
   .instruments {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-@media (max-width: 720px) {
+@container bus (max-width: 680px) {
   .instruments {
     grid-template-columns: minmax(0, 1fr);
   }

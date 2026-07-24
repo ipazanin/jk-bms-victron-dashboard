@@ -67,7 +67,7 @@ const errorLevel = computed(() => (props.solar && props.solar.chargerError !== 0
     </template>
 
     <template v-else>
-      <p class="empty">Solar not connected. House load needs both radios.</p>
+      <p class="empty">Solar not connected. Boat load needs both radios.</p>
       <p v-if="!canScan" class="hint">
         This browser cannot read Bluetooth advertisements. Enable
         <code>chrome://flags/#enable-experimental-web-platform-features</code> in Chrome on Android
@@ -80,7 +80,6 @@ const errorLevel = computed(() => (props.solar && props.solar.chargerError !== 0
 <style scoped>
 .panel {
   padding: var(--pad);
-  border-top: 1px solid var(--gridline);
 }
 
 header {

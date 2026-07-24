@@ -95,7 +95,6 @@ function clockSeconds(at: number): string {
 <style scoped>
 .entries {
   padding: var(--pad);
-  border-top: 1px solid var(--gridline);
 }
 
 .head {

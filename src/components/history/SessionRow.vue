@@ -178,7 +178,7 @@ function stateOfChargeWords(row: SessionRecord): string {
     </span>
 
     <span class="cell figure">
-      <span class="cell-label">House out</span>
+      <span class="cell-label">Boat out</span>
       <span class="house-ink">{{ solarSeen ? signedAh(houseOutAh) : '—' }}</span>
     </span>
 
@@ -366,7 +366,10 @@ function stateOfChargeWords(row: SessionRecord): string {
   color: var(--ink-muted);
 }
 
-@media (max-width: 720px) {
+/* Matches DeviceGroup's fold, keyed to the same `sessions` container the group establishes: the row
+   folds when the card's content box can no longer hold the six fixed tracks, so an expanded rail
+   folds it rather than scrolling the page. */
+@container sessions (max-width: 48rem) {
   .row {
     grid-template-columns: 1fr 1fr 1fr;
     column-gap: 0.75rem;
@@ -392,6 +395,15 @@ function stateOfChargeWords(row: SessionRecord): string {
     align-items: flex-start;
     text-align: left;
     gap: 0.15rem;
+  }
+
+  /* Each figure column is a ~73px 1fr track, and the amp-hour readouts are white-space:nowrap. A
+     long value would otherwise spill a few pixels past its neighbour; overflow:hidden lets the
+     nowrap span clip to the track and end in an ellipsis instead. */
+  .figure:not(.length) > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .pack {

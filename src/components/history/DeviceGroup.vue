@@ -84,7 +84,7 @@ function spacedTotal(elapsedMs: number): string {
       <span class="plate">Watch</span>
       <span class="plate right">Length</span>
       <span class="plate right">Solar in</span>
-      <span class="plate right">House out</span>
+      <span class="plate right">Boat out</span>
       <span class="plate right">Pack</span>
       <span aria-hidden="true" />
     </div>
@@ -129,7 +129,12 @@ function spacedTotal(elapsedMs: number): string {
  */
 .group {
   --session-columns: minmax(11rem, 1.6fr) 6.5rem 6.5rem 6.5rem 9rem 1.25rem;
-  padding: 0 var(--pad) 1.25rem;
+  /* The header, column plate and every row read the width available inside this card's padding, not
+     the raw viewport: with the rail expanded the workspace is far narrower than the window, and the
+     six fixed tracks would out-measure that content box and scroll the page sideways. SessionRow
+     queries this same container, so the two fold in lockstep. */
+  container: sessions / inline-size;
+  padding: var(--pad);
 }
 
 .head {
@@ -137,8 +142,8 @@ function spacedTotal(elapsedMs: number): string {
   grid-template-columns: 1fr auto;
   align-items: baseline;
   column-gap: 1rem;
-  padding: 1rem 0 0.75rem;
-  background: var(--surface);
+  padding: 0 0 0.75rem;
+  background: var(--card);
 }
 
 .sticky {
@@ -247,7 +252,10 @@ h3 {
   color: var(--ink-muted);
 }
 
-@media (max-width: 720px) {
+/* Folds once the card's own content box can no longer hold the six fixed tracks (their floor is
+   ~45.75rem plus gaps); 48rem keeps a margin over that floor so the row never overflows before it
+   folds. Keyed to the container, not the viewport, so an expanded rail folds the row too. */
+@container sessions (max-width: 48rem) {
   .head {
     grid-template-columns: 1fr;
   }

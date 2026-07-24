@@ -182,6 +182,12 @@ export interface HistoryStore {
   warningsOf(id: SessionId): Promise<readonly WarningRecord[]>
   /** Warnings across every session, most recent first, for the standalone log. */
   listWarnings(limit?: number): Promise<readonly WarningRecord[]>
+  /**
+   * Every warning whose `at` lies inside the window, across every session. Read straight off the
+   * time index and uncapped, so a wide range's tally counts the whole window rather than only the
+   * most recent few the standalone log holds.
+   */
+  warningsInWindow(window: TimeWindow): Promise<readonly WarningRecord[]>
 
   /** Newest first. */
   listSessions(limit?: number): Promise<readonly SessionListing[]>
@@ -265,6 +271,7 @@ export function unavailableHistoryStore(reason: HistoryUnavailableReason): Histo
     appendWarning: async () => undefined,
     warningsOf: async () => [],
     listWarnings: async () => [],
+    warningsInWindow: async () => [],
     listSessions: async () => [],
     listDevices: async () => [],
     readSession: async () => null,

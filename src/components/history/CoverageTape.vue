@@ -316,7 +316,6 @@ function spacedSpan(elapsedMs: number): string {
 <style scoped>
 .tape {
   padding: var(--pad);
-  border-top: 1px solid var(--gridline);
   /* A drag that begins on the tape must not sweep a text selection across the legend below it. */
   user-select: none;
 }
@@ -371,11 +370,12 @@ function spacedSpan(elapsedMs: number): string {
   background: var(--coverage-partial);
 }
 
-/* The same bar, cut by surface-coloured diagonals: the pack was charging from something no radio
-   here measures, so the run is interrupted rather than recoloured. */
+/* The same bar, cut by card-coloured diagonals to the surface the tape's own card sits on: the pack
+   was charging from something no radio here measures, so the run is interrupted rather than
+   recoloured. */
 .run.foreign {
   background:
-    repeating-linear-gradient(45deg, transparent 0 3px, var(--surface) 3px 5px),
+    repeating-linear-gradient(45deg, transparent 0 3px, var(--card) 3px 5px),
     var(--coverage-both);
 }
 
@@ -485,9 +485,9 @@ function spacedSpan(elapsedMs: number): string {
 
 .nudge {
   background: transparent;
-  border: 1px solid var(--gridline);
+  border: 1px solid var(--card-border);
   color: var(--ink-secondary);
-  border-radius: 2px;
+  border-radius: var(--r-sm);
   padding: 0.2rem 0.7rem;
   min-height: var(--tap);
   display: inline-flex;

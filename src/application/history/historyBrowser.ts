@@ -43,6 +43,8 @@ import type {
   WarningRecord,
 } from '../../domain/history/types'
 import type { HistoryAvailability, HistoryStore, SessionListing, StoredSession } from './port'
+import { POWER_COLUMNS, powerTracks } from './statsRange'
+import type { PowerTracks, SessionSamples } from './statsRange'
 
 /** The standalone warnings log reads this many at most, most recent first. */
 const WARNING_LIST_LIMIT = 500
@@ -105,6 +107,23 @@ export interface ExportSize {
 }
 
 /**
+ * The per-sample power trace for a range window, read across every session that overlaps it.
+ *
+ * Kept apart from `loaded`: the Stats power chart and the Session view read different spans for
+ * different reasons, and a shared slot would have them evicting each other's work. A window here is
+ * never protected from pruning — it is a scan of what is on disk, and a pruned session simply yields
+ * an honest gap rather than being held back.
+ */
+export interface WindowPower {
+  readonly window: TimeWindow
+  readonly tracks: PowerTracks
+  /** Overlapping sessions actually read; a skipped or vanished one does not count. */
+  readonly sessions: number
+  /** Any session read hit `MAX_RENDER_WINDOW_MS`. Never fires for hour or day, both ≤ 24 h. */
+  readonly clamped: boolean
+}
+
+/**
  * Every ref here is exposed read-only by type rather than through Vue's `readonly()`. That helper
  * is deep: wrapping the loaded session would hand out a proxy that re-wraps every sample object on
  * every access, on arrays tens of thousands of rows long.
@@ -132,10 +151,25 @@ export interface HistoryBrowser {
   readonly account: ComputedRef<SessionAccount | null>
   readonly exportSize: ComputedRef<ExportSize | null>
   readonly exportState: Readonly<Ref<ExportState>>
+  /** The per-sample power trace for the last loaded range window, or null when none is loaded. */
+  readonly windowPower: Readonly<Ref<WindowPower | null>>
+  readonly powerLoading: Readonly<Ref<boolean>>
+  /**
+   * Every warning inside the last range window read, or null until that read resolves. Kept apart
+   * from the capped `warnings` list so a Stats range tally counts the whole window rather than the
+   * most recent few — the view falls back to `warnings` only while this is null.
+   */
+  readonly windowWarnings: Readonly<Ref<readonly WarningRecord[] | null>>
 
   refresh(): Promise<void>
   loadSession(id: SessionId, window?: TimeWindow): Promise<void>
   unloadSession(): void
+  /** Reads every session overlapping `window` and derives a downsampled power trace across them. */
+  loadWindowPower(window: TimeWindow, columns?: number): Promise<void>
+  /** Releases the loaded window and supersedes any read in flight. */
+  clearWindowPower(): void
+  /** Reads every warning inside `window`, uncapped, for an honest range tally. Latest wins. */
+  loadWindowWarnings(window: TimeWindow): Promise<void>
   select(window: TimeWindow | null): void
   renameDevice(key: DeviceKey, label: string | null): Promise<void>
   deleteSession(id: SessionId): Promise<void>
@@ -180,6 +214,9 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   const failure = ref<string | null>(null)
   const selection = shallowRef<TimeWindow | null>(null)
   const exportState = ref<ExportState>('idle')
+  const windowPower = shallowRef<WindowPower | null>(null)
+  const powerLoading = ref(false)
+  const windowWarnings = shallowRef<readonly WarningRecord[] | null>(null)
   /** Frozen at each refresh so the durations below are a pure function of reactive state; a
    *  component that wants a live figure calls sessionDurationMs with its own ticking clock. */
   const listedAt = ref(0)
@@ -191,6 +228,8 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   let deferredId: SessionId | null = null
   let listToken = 0
   let loadToken = 0
+  let powerToken = 0
+  let windowWarningsToken = 0
   let unsubscribe: (() => void) | null = null
   let subscribedTo: HistoryStore | null = null
 
@@ -322,6 +361,91 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     exportState.value = 'idle'
     // Nothing is on screen, so pruning is free to reclaim whatever it was holding back.
     deps.store()?.noteViewing?.(null)
+  }
+
+  /**
+   * Reads every session overlapping the window and derives one downsampled power trace across them.
+   *
+   * The overlapping sessions are found in the cached list, so no chunk is read to discover them;
+   * each is then read for the window alone (clamped to 24 h in the port, harmless for hour and day),
+   * decoded, and handed to `powerTracks`. Latest wins by token, so switching ranges quickly
+   * supersedes a read still in flight rather than letting a stale one land.
+   */
+  async function loadWindowPower(window: TimeWindow, columns = POWER_COLUMNS): Promise<void> {
+    const store = activeStore()
+    if (!store) {
+      windowPower.value = null
+      return
+    }
+
+    const token = (powerToken += 1)
+    powerLoading.value = true
+    try {
+      const overlapping = sessions.value
+        .filter(
+          (listing) =>
+            listing.record.startedAt <= window.to &&
+            (listing.record.endedAt ?? listing.record.heartbeatAt) >= window.from,
+        )
+        .slice()
+        .sort((left, right) => left.record.startedAt - right.record.startedAt)
+
+      const runs: SessionSamples[] = []
+      let clamped = false
+      for (const listing of overlapping) {
+        const stored = await store.readSession(listing.record.id, window)
+        if (token !== powerToken) return
+        if (stored === null) continue
+        if (stored.windowClamped) clamped = true
+        const { pack, solar } = decodeStored(stored)
+        runs.push({ pack, solar })
+      }
+
+      windowPower.value = {
+        window,
+        tracks: powerTracks(runs, window, columns),
+        sessions: runs.length,
+        clamped,
+      }
+    } catch {
+      // A window that could not be read is honestly no per-sample data, which the chart already
+      // draws as such. Kept off the shared failure line so a Stats read cannot alarm the Log.
+      if (token === powerToken) windowPower.value = null
+    } finally {
+      if (token === powerToken) powerLoading.value = false
+    }
+  }
+
+  function clearWindowPower(): void {
+    powerToken += 1
+    powerLoading.value = false
+    windowPower.value = null
+  }
+
+  /**
+   * Reads every warning inside the window, uncapped, so a range tally counts the whole window
+   * rather than the most recent few the standalone log caps at. Isolated like `loadWindowPower`:
+   * latest wins by token, and it never touches the shared `warnings` list or `failure` line. Reset
+   * to null before the read so the capped list stands in until this window's own answer lands.
+   */
+  async function loadWindowWarnings(window: TimeWindow): Promise<void> {
+    const store = activeStore()
+    if (!store) {
+      windowWarnings.value = null
+      return
+    }
+
+    const token = (windowWarningsToken += 1)
+    windowWarnings.value = null
+    try {
+      const found = await store.warningsInWindow(window)
+      if (token !== windowWarningsToken) return
+      windowWarnings.value = found
+    } catch {
+      // A windowed read that failed is honestly no windowed tally; the view falls back to the
+      // capped list. Kept off the shared failure line so a Stats read cannot alarm the Log.
+      if (token === windowWarningsToken) windowWarnings.value = null
+    }
   }
 
   function select(window: TimeWindow | null): void {
@@ -507,9 +631,15 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     account,
     exportSize,
     exportState,
+    windowPower,
+    powerLoading,
+    windowWarnings,
     refresh,
     loadSession,
     unloadSession,
+    loadWindowPower,
+    clearWindowPower,
+    loadWindowWarnings,
     select,
     renameDevice,
     deleteSession,
@@ -518,13 +648,23 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   }
 }
 
-function hydrate(stored: StoredSession): LoadedSession {
+interface DecodedStreams {
+  readonly pack: PackSample[]
+  readonly solar: SolarSample[]
+  /** Chunks this build cannot read, skipped and counted rather than guessed at. */
+  readonly unreadableChunks: number
+}
+
+/**
+ * Chunks to samples. Chunks arrive in seq order and rows inside one are ascending, so the
+ * concatenation is already the timeline. Shared by the session loader and the window-power loader
+ * so both decode a stored session by exactly one rule.
+ */
+function decodeStored(stored: StoredSession): DecodedStreams {
   const pack: PackSample[] = []
   const solar: SolarSample[] = []
   let unreadableChunks = 0
 
-  // Chunks arrive in seq order and rows inside one are ascending, so the concatenation is already
-  // the timeline. A layout this build cannot read is skipped and counted, never guessed at.
   for (const chunk of stored.pack) {
     if (!isReadableLayout(chunk.layout)) unreadableChunks += 1
     else appendAll(pack, decodePackChunk(chunk))
@@ -533,6 +673,12 @@ function hydrate(stored: StoredSession): LoadedSession {
     if (!isReadableLayout(chunk.layout)) unreadableChunks += 1
     else appendAll(solar, decodeSolarChunk(chunk))
   }
+
+  return { pack, solar, unreadableChunks }
+}
+
+function hydrate(stored: StoredSession): LoadedSession {
+  const { pack, solar, unreadableChunks } = decodeStored(stored)
 
   const device = stored.packDevice ?? stored.solarDevice
   return {

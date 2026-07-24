@@ -24,31 +24,39 @@ const warningsHref = hashOf({ name: 'warnings' })
 .log-tabs {
   display: inline-flex;
   margin: 1rem var(--pad) 0;
-  border: 1px solid var(--gridline);
-  border-radius: var(--radius);
-  overflow: hidden;
+  padding: 3px;
+  gap: 2px;
+  background: var(--surface);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-pill);
 }
 
 .log-tabs a {
   display: inline-flex;
   align-items: center;
   min-height: var(--tap);
-  padding: 0 1rem;
+  padding: 0 1.1rem;
+  border-radius: var(--r-pill);
   font-family: var(--font-label);
   font-size: 0.75rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--ink-secondary);
   text-decoration: none;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
 }
 
-.log-tabs a + a {
-  border-left: 1px solid var(--gridline);
+.log-tabs a:hover {
+  color: var(--ink);
 }
 
 .log-tabs a[aria-current='page'] {
   background: var(--raised);
   color: var(--ink);
+  box-shadow: var(--shadow-1);
 }
 
 .count {

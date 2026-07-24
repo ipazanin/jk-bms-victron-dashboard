@@ -126,7 +126,7 @@ const PASSES = [
     ready: '[data-testid="shunt-ammeter"]',
     check(scope, report) {
       if (!report.hasHouseLoad) {
-        fail(scope, 'the remembered session did not render the house-load row')
+        fail(scope, 'the remembered session did not render the boat-load row')
       }
       if (!report.soc) fail(scope, 'no state-of-charge figure rendered')
       if (!/not live data/i.test(report.text)) fail(scope, 'the remembered banner did not render')
@@ -166,7 +166,7 @@ const PASSES = [
     hash: '#/stats',
     ready: '[data-testid="stats-view"]',
     check(scope, report) {
-      if (!/daily energy/i.test(report.text)) fail(scope, 'the daily energy panel did not render')
+      if (!/energy/i.test(report.text)) fail(scope, 'the energy panel did not render')
       if (!/device logbook/i.test(report.text)) fail(scope, 'the logbook panel did not render')
       if (!/boot/i.test(report.text)) fail(scope, 'the seeded logbook events did not render')
     },
@@ -235,6 +235,7 @@ for (const viewport of VIEWPORTS) {
 }
 
 await measureSteadiness()
+await measureDrawer()
 
 await browser.close()
 
@@ -296,6 +297,61 @@ async function measureSteadiness() {
       `cls=${measured.layoutShift.toFixed(4)}  heights=${measured.heights.length}  ` +
       `labelX=${measured.labelX.length}`,
   )
+
+  await context.close()
+}
+
+// ── the mobile drawer run ─────────────────────────────────────────────────────
+
+/**
+ * The off-canvas sidebar is the one state the viewport sweep above never enters — every pass leaves
+ * the drawer shut. It is also modal, which is a set of promises a screenshot cannot see: the page
+ * behind it must not scroll sideways, the workspace behind the scrim must be inert to the keyboard,
+ * and the drawer itself must not be. So it is opened here the way a thumb opens it — the header's
+ * menu button — and then held to those promises.
+ */
+async function measureDrawer() {
+  const scope = 'phone drawer'
+  const context = await browser.createBrowserContext()
+  const page = await context.newPage()
+  const errors = watchForErrors(page)
+
+  await page.setViewport({ width: 390, height: 844 })
+  await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }])
+
+  await page.goto(BASE, { waitUntil: 'networkidle0' })
+  await seedOrigin(page, { remembered: true, archive: true, hash: '#/log' })
+  await page.reload({ waitUntil: 'networkidle0' })
+
+  const opened = await page
+    .waitForSelector('#sidebar-toggle', { timeout: 10_000 })
+    .then((button) => button.click())
+    .then(() => page.waitForSelector('[data-testid="app-sidebar"].is-open', { timeout: 2_000 }))
+    .then(() => true)
+    .catch(() => false)
+
+  if (!opened) {
+    fail(scope, 'the mobile drawer did not open on the header menu button')
+  } else {
+    const report = await readPage(page)
+    if (report.scrollWidth > report.clientWidth + 1) {
+      fail(scope, `horizontal overflow with the drawer open: ${report.scrollWidth} > ${report.clientWidth}`)
+    }
+    // Modal or not: the workspace behind the scrim must be inert, the drawer itself must not.
+    const containment = await page.evaluate(() => ({
+      workspaceInert: document.querySelector('main.workspace')?.hasAttribute('inert') ?? false,
+      drawerInert: document.querySelector('[data-testid="app-sidebar"]')?.hasAttribute('inert') ?? false,
+    }))
+    if (!containment.workspaceInert) {
+      fail(scope, 'the workspace stayed reachable behind the open drawer (not inert)')
+    }
+    if (containment.drawerInert) fail(scope, 'the open drawer is itself inert')
+    await page.screenshot({ path: join(SCREENSHOT_DIR, 'phone-drawer.png') })
+  }
+
+  if (errors.length) fail(scope, `console errors: ${errors.slice(0, 3).join(' | ')}`)
+
+  console.log(`${scope.padEnd(24)}  ${opened ? 'opened' : 'FAILED'}  errors=${errors.length}`)
 
   await context.close()
 }
@@ -523,7 +579,7 @@ function readPage(page) {
       text,
       hasAmmeter: document.querySelector('[data-testid="shunt-ammeter"]') !== null,
       hasChassis: document.querySelector('[data-testid="shunt-chassis"]') !== null,
-      hasHouseLoad: /HOUSE/i.test(text),
+      hasHouseLoad: /BOAT/i.test(text),
       // A figure that rounds to zero must carry no direction. A real −0.3 A is not that, and
       // matching it would fail the check on the very reading the sign rule exists to print.
       hasNegativeZero: /−0(?:\.0+)?(?![.\d])/.test(text),

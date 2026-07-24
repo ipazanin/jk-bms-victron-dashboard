@@ -201,6 +201,15 @@ export class MemoryHistoryStore implements HistoryStore {
     return rows.map((warning) => structuredClone(warning))
   }
 
+  async warningsInWindow(window: TimeWindow): Promise<readonly WarningRecord[]> {
+    // Bounded to [from, to] and ascending by `at`, as the adapter's byTime cursor over the same
+    // bound returns them — uncapped, so a wide range's tally is the whole window.
+    return [...this.warnings.values()]
+      .filter((warning) => warning.at >= window.from && warning.at <= window.to)
+      .sort((left, right) => left.at - right.at || compareWarningKeyAsc(left, right))
+      .map((warning) => structuredClone(warning))
+  }
+
   // ── reading ────────────────────────────────────────────────────────────────
 
   async listSessions(limit?: number): Promise<readonly SessionListing[]> {
@@ -495,6 +504,12 @@ function keyOf(chunk: ChunkKey): string {
 function compareWarningKeyDesc(left: WarningRecord, right: WarningRecord): number {
   if (left.sessionId !== right.sessionId) return left.sessionId > right.sessionId ? -1 : 1
   return right.seq - left.seq
+}
+
+/** Ascending [sessionId, seq], matching how a forward cursor on the byTime index breaks equal-`at`. */
+function compareWarningKeyAsc(left: WarningRecord, right: WarningRecord): number {
+  if (left.sessionId !== right.sessionId) return left.sessionId > right.sessionId ? 1 : -1
+  return left.seq - right.seq
 }
 
 /** Rows the archive counter has been told about. An unsealed tail has told it nothing yet. */

@@ -550,6 +550,27 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
         expect(await store.listWarnings(2)).toHaveLength(2)
       })
 
+      it('reads only the warnings inside a window, ascending, uncapped by the log limit', async () => {
+        // The Stats range tally reads this rather than the capped list, so a wide range counts the
+        // whole window. Both bounds are inclusive; anything outside is left out.
+        await store.openSession(sessionRecord({ id: 'session-a' }))
+        for (const [seq, offset] of [0, 5_000, 10_000, 20_000].entries()) {
+          await store.appendWarning(
+            warningRecord({ sessionId: 'session-a', seq, at: SAMPLE_EPOCH + offset }),
+          )
+        }
+
+        const inside = await store.warningsInWindow({
+          from: SAMPLE_EPOCH + 5_000,
+          to: SAMPLE_EPOCH + 10_000,
+        })
+
+        expect(inside.map((warning) => warning.at)).toEqual([
+          SAMPLE_EPOCH + 5_000,
+          SAMPLE_EPOCH + 10_000,
+        ])
+      })
+
       it('takes a session’s warnings with it when the session is deleted', async () => {
         await openWithRows(4)
         await store.appendWarning(warningRecord({ seq: 0 }))

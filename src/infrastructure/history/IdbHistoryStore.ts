@@ -244,6 +244,20 @@ export class IdbHistoryStore implements HistoryStore {
     })
   }
 
+  async warningsInWindow(window: TimeWindow): Promise<readonly WarningRecord[]> {
+    if (!this.connected) return []
+    return runTransaction(this.database, [WARNINGS], 'readonly', async (transaction) => {
+      const records: WarningRecord[] = []
+      // Bounded to [from, to] on the time index, so the read costs the window rather than the whole
+      // log and is never capped: a month's tally counts every warning it holds. Ascending.
+      const range = IDBKeyRange.bound(window.from, window.to)
+      await cursorEach(transaction.objectStore(WARNINGS).index(BY_TIME).openCursor(range), (cursor) => {
+        records.push(cursor.value as WarningRecord)
+      })
+      return records
+    })
+  }
+
   async listSessions(limit: number = MAX_SESSIONS): Promise<readonly SessionListing[]> {
     if (!this.connected) return []
     return runTransaction(this.database, [SESSIONS, DEVICES], 'readonly', async (transaction) => {
