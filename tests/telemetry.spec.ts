@@ -201,23 +201,27 @@ describe('what reaches the archive is raw', () => {
     })
   }
 
-  it('records only the four raw trend columns', () => {
+  it('records only the five raw trend columns', () => {
     drive(CURRENTS)
 
+    // Pack watts are deliberately absent: the strip multiplies the current by the voltage at read
+    // time, so no column here holds anything but a figure a radio reported.
     expect(Object.keys(telemetry.history[0]).sort()).toEqual([
       'at',
       'housePower',
       'packCurrent',
+      'packVoltage',
       'pvPower',
     ])
   })
 
-  it('carries every pack current through at full float precision', () => {
+  it('carries every pack current and voltage through at full float precision', () => {
     const snapshots = drive(CURRENTS)
 
     expect(telemetry.history).toHaveLength(snapshots.length)
     telemetry.history.forEach((point, index) => {
       expect(point.packCurrent).toBe(snapshots[index].current)
+      expect(point.packVoltage).toBe(snapshots[index].packVoltage)
     })
   })
 

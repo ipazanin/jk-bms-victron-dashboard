@@ -84,6 +84,43 @@ export function reconcile(battery: BatterySnapshot, solar: SolarReading): BusRec
 }
 
 /**
+ * Volts. A LiFePO4 cell rests near here across most of its usable range, which is why a pack's
+ * nominal voltage is quoted as this times its cell count — 12.8 V for the 4S bank on this boat.
+ */
+const LIFEPO4_NOMINAL_CELL_VOLTAGE = 3.2
+
+export interface StoredEnergy {
+  readonly wattHours: number
+  /** The voltage the charge was valued at, so the figure's basis can be printed beside it. */
+  readonly nominalVoltage: number
+}
+
+/**
+ * The energy left in the pack, valued at nominal voltage rather than the voltage on the bus.
+ *
+ * Live pack voltage sags under load and springs back when the load drops. Multiplying by it would
+ * take a few hundred watt-hours off the figure the instant a windlass runs and hand them back the
+ * moment it stops — energy appearing and vanishing where no charge moved. Nominal voltage is a
+ * constant, so the figure moves only when the charge behind it moves, which is the question being
+ * asked of it.
+ *
+ * The charge comes from the BMS's own coulomb count rather than from state of charge, which
+ * quantises at one percent — 3 Ah on a 315 Ah bank, or some 40 Wh of invented resolution.
+ *
+ * Null when the cell count is unknown from either source, because a pack whose series count cannot
+ * be established has no nominal voltage to value its charge at.
+ */
+export function storedEnergy(battery: BatterySnapshot, cellCount: number | null): StoredEnergy | null {
+  // The settings frame carries the configured count; the cell frame carries one voltage per
+  // enabled cell and arrives first, so it stands in until the settings land.
+  const cells = cellCount ?? battery.cellVoltages.length
+  if (cells <= 0) return null
+
+  const nominalVoltage = cells * LIFEPO4_NOMINAL_CELL_VOLTAGE
+  return { wattHours: battery.remainingCapacity * nominalVoltage, nominalVoltage }
+}
+
+/**
  * Hours until the pack reaches its nominal capacity at `current`, or null when that current is
  * not charging. The rate is a parameter rather than `battery.current` because the snapshot's own
  * current is an instant, and an instant cannot answer a question measured in hours.

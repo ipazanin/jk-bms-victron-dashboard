@@ -2,9 +2,9 @@
 /**
  * Three small multiples over one shared time axis.
  *
- * Pack current, PV power and house power have different units and different scales, so they never
- * share a y-axis. Each strip gets its own baseline: pack current is centre-zero because it is
- * signed; the two power strips run from zero because they are magnitudes.
+ * Pack, PV and house power all read in watts — one screen, one unit — but on unrelated scales, so
+ * they never share a y-axis. Each strip gets its own baseline: pack power is centre-zero because it
+ * is signed, and the other two run from zero because they are magnitudes.
  *
  * Every strip states its band. A chart normalised to whatever the window happens to hold draws a
  * ±0.2 A ripple and a ±40 A swing identically, and re-maps the whole trace vertically the moment
@@ -17,12 +17,12 @@
  */
 import { computed, onScopeDispose, ref, watch } from 'vue'
 
-import { amps, clockTime, watts } from '../application/format'
+import { clockTime, watts, wattsSigned } from '../application/format'
 import type { TrendPoint } from '../application/telemetry'
 import { bandPath, linearScale, maxMagnitudeOf, positionOn, tracePath } from '../domain/history/geometry'
 import type { BandPoint, LinearScale, TracePoint } from '../domain/history/geometry'
 import { MAX_SAMPLE_GAP_MS } from '../domain/history/join'
-import { CURRENT_LADDER, POWER_LADDER, nextStop } from '../domain/scaleLadder'
+import { POWER_LADDER, nextStop } from '../domain/scaleLadder'
 
 const props = defineProps<{ history: TrendPoint[] }>()
 
@@ -33,6 +33,16 @@ const GUTTER = 46
 const INSET = 1
 /** Only ever the first frame's width: the observer answers before anything is painted twice. */
 const FALLBACK_WIDTH = 640
+
+/**
+ * Signed pack power, multiplied out of the two raw columns at read time rather than kept as a third.
+ * The BMS reports power as an unsigned magnitude, and the sign is the whole point of a centre-zero
+ * strip. `statsRange.powerOf` derives a stored sample the same way, so the live strip and the
+ * archive's timeline cannot disagree about the same instant.
+ */
+function packPowerOf(point: TrendPoint): number {
+  return point.packCurrent * point.packVoltage
+}
 
 /**
  * One viewBox unit is one CSS pixel, which is why the viewBox is measured rather than fixed. Under
@@ -89,13 +99,13 @@ function* column(pick: (point: TrendPoint) => number | null): Generator<number |
  * smaller stop. An emptied history reaches the ladder as a reach of zero and releases to the
  * bottom stop by the same rule, so there is no separate reset to keep in step with this one.
  */
-const packBand = ref(CURRENT_LADDER.stops[0])
+const packBand = ref(POWER_LADDER.stops[0])
 const pvBand = ref(POWER_LADDER.stops[0])
 const houseBand = ref(POWER_LADDER.stops[0])
 
 watch(
-  () => maxMagnitudeOf(column((point) => point.packCurrent)),
-  (reach) => (packBand.value = nextStop(CURRENT_LADDER, packBand.value, reach)),
+  () => maxMagnitudeOf(column(packPowerOf)),
+  (reach) => (packBand.value = nextStop(POWER_LADDER, packBand.value, reach)),
   { immediate: true },
 )
 watch(
@@ -131,7 +141,7 @@ function* traced(pick: (point: TrendPoint) => number | null): Generator<TracePoi
 }
 
 const packPath = computed(() =>
-  tracePath(traced((point) => point.packCurrent), timeScale.value, packValue.value),
+  tracePath(traced(packPowerOf), timeScale.value, packValue.value),
 )
 const pvPath = computed(() =>
   tracePath(traced((point) => point.pvPower), timeScale.value, pvValue.value),
@@ -158,7 +168,7 @@ function* area(pick: (point: TrendPoint) => number | null): Generator<BandPoint>
 }
 
 const packArea = computed(() =>
-  bandPath(area((point) => point.packCurrent), timeScale.value, packValue.value),
+  bandPath(area(packPowerOf), timeScale.value, packValue.value),
 )
 const pvArea = computed(() =>
   bandPath(area((point) => point.pvPower), timeScale.value, pvValue.value),
@@ -200,8 +210,8 @@ const cursor = computed(() => {
   return {
     x: positionOn(timeScale.value, point.at),
     at: stamp(point.at),
-    packCurrent: point.packCurrent,
-    pack: amps(point.packCurrent),
+    packPower: packPowerOf(point),
+    pack: wattsSigned(packPowerOf(point)),
     pvPower: point.pvPower,
     pv: point.pvPower === null ? '—' : watts(point.pvPower),
     housePower: point.housePower,
@@ -250,7 +260,7 @@ const latest = computed(() => props.history[props.history.length - 1] ?? null)
 
 const nowPack = computed(() => {
   const point = latest.value
-  return point === null ? '—' : amps(point.packCurrent)
+  return point === null ? '—' : wattsSigned(packPowerOf(point))
 })
 const nowPv = computed(() => {
   const point = latest.value
@@ -276,12 +286,12 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
     <template v-else>
       <div class="strips" @pointerleave="cursorIndex = null">
         <div class="strip">
-          <span class="key"><i class="swatch pack" />Pack A</span>
+          <span class="key"><i class="swatch pack" />Pack W</span>
           <svg
             ref="plot"
             :viewBox="`0 0 ${plotWidth} ${STRIP_HEIGHT}`"
             role="img"
-            :aria-label="`Pack current, ${spanLabel.toLowerCase()}, band plus or minus ${packBand} amps`"
+            :aria-label="`Pack power, ${spanLabel.toLowerCase()}, band plus or minus ${packBand} watts`"
             @pointermove="moveCursor"
           >
             <defs>
@@ -292,7 +302,7 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
             </defs>
             <path :d="packArea" class="area pack" fill="url(#trend-fill-pack)" />
 
-            <text :x="GUTTER - 6" :y="INSET + 8" text-anchor="end" class="band">±{{ packBand }} A</text>
+            <text :x="GUTTER - 6" :y="INSET + 8" text-anchor="end" class="band">±{{ packBand }} W</text>
             <text :x="GUTTER - 6" :y="packZeroY" text-anchor="end" class="band">0</text>
 
             <line :x1="GUTTER" :y1="packZeroY" :x2="plotWidth" :y2="packZeroY" class="zero" />
@@ -310,7 +320,7 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
               <line :x1="cursor.x" y1="0" :x2="cursor.x" :y2="STRIP_HEIGHT" class="crosshair" />
               <circle
                 :cx="cursor.x"
-                :cy="positionOn(packValue, cursor.packCurrent)"
+                :cy="positionOn(packValue, cursor.packPower)"
                 r="2.5"
                 class="dot pack"
               />
@@ -429,11 +439,12 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
         <table class="twin">
           <caption class="muted">
             The newest {{ tableRows.length }} of {{ history.length }} samples. Nothing here is
-            averaged or thinned.
+            averaged or thinned. Pack amps are the raw column the watts beside them are derived from.
           </caption>
           <thead>
             <tr>
               <th scope="col">Time</th>
+              <th scope="col">Pack W</th>
               <th scope="col">Pack A</th>
               <th scope="col">PV W</th>
               <th scope="col">Boat W</th>
@@ -441,10 +452,11 @@ const tableRows = computed(() => props.history.slice(-40).reverse())
           </thead>
           <tbody>
             <tr v-if="tableRows.length === 0">
-              <td colspan="4">— no samples —</td>
+              <td colspan="5">— no samples —</td>
             </tr>
             <tr v-for="row in tableRows" :key="row.at">
               <td>{{ stamp(row.at) }}</td>
+              <td>{{ Math.round(packPowerOf(row)) }}</td>
               <td>{{ row.packCurrent.toFixed(2) }}</td>
               <td>{{ row.pvPower === null ? '—' : Math.round(row.pvPower) }}</td>
               <td>{{ row.housePower === null ? '—' : Math.round(row.housePower) }}</td>

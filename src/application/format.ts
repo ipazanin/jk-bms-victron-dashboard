@@ -21,6 +21,17 @@ export function watts(value: number): string {
   return `${Math.round(Math.abs(value))} W`
 }
 
+/**
+ * Signed power, with the sign decided AFTER rounding to whole watts — the same honesty `amps`
+ * applies to current, so a reading that rounds to zero is printed without a direction it does
+ * not have. Every pack figure on the dashboard is signed; solar and boat are magnitudes.
+ */
+export function wattsSigned(value: number): string {
+  const rounded = Math.round(value)
+  const sign = rounded > 0 ? '+' : rounded < 0 ? '−' : ''
+  return `${sign}${Math.abs(rounded)} W`
+}
+
 export function millivolts(value: number): string {
   return `${Math.round(value * 1000)} mV`
 }
@@ -39,6 +50,20 @@ export function ampHours(value: number, digits = 1): string {
 
 export function kilowattHours(value: number): string {
   return `${value.toFixed(2)} kWh`
+}
+
+/**
+ * Energy left in the pack, at two significant figures.
+ *
+ * It is an estimate — a coulomb count valued at a nominal voltage — and good to a few percent of
+ * the bank at best. Printing '2 614 Wh' would claim three digits the estimate cannot carry, so the
+ * figure is deliberately coarse: tens of watt-hours under a kilowatt-hour, tenths of one above it.
+ */
+export function storedWattHours(value: number): string {
+  // Rounded first, then read: 996 Wh would otherwise print as a four-digit '1000 Wh'.
+  const tens = Math.round(value / 10) * 10
+  if (tens >= 1000) return `${(value / 1000).toFixed(1)} kWh`
+  return `${tens} Wh`
 }
 
 export function duration(seconds: number): string {

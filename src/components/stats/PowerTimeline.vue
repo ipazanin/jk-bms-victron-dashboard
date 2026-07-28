@@ -16,7 +16,7 @@
  */
 import { computed, onScopeDispose, ref, watch } from 'vue'
 
-import { clockTime, watts } from '../../application/format'
+import { clockTime, watts, wattsSigned } from '../../application/format'
 import type { PowerTracks } from '../../application/history/statsRange'
 import {
   bandPath,
@@ -198,7 +198,7 @@ const cursor = computed(() => {
     packW,
     pvW,
     houseW,
-    pack: packW === null ? '—' : signedWatts(packW),
+    pack: packW === null ? '—' : wattsSigned(packW),
     pv: pvW === null ? '—' : watts(pvW),
     house: houseW === null ? '—' : watts(houseW),
   }
@@ -274,18 +274,7 @@ function onFocus(): void {
   }
 }
 
-/**
- * Signed watts with the sign decided AFTER rounding, so a reading that rounds to zero carries no
- * direction — the negative-zero guard the whole dashboard applies to signed figures.
- */
-function signedWatts(value: number): string {
-  const rounded = Math.round(value)
-  const normalised = rounded === 0 ? 0 : rounded
-  const sign = normalised > 0 ? '+' : normalised < 0 ? '−' : ''
-  return `${sign}${Math.abs(normalised)} W`
-}
-
-/** The same guard for a bare signed integer in the table, where the header already carries the unit. */
+/** The negative-zero guard for a bare signed integer in the table, where the header carries the unit. */
 function signedCell(value: number | null): string {
   if (value === null) return '—'
   const rounded = Math.round(value)

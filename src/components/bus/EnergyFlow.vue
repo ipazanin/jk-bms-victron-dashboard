@@ -18,8 +18,9 @@
  */
 import { computed, ref, watch } from 'vue'
 
-import { amps, ampsAbsolute, volts, watts } from '../../application/format'
+import { amps, ampsAbsolute, storedWattHours, volts, watts, wattsSigned } from '../../application/format'
 import { useMediaQuery } from '../../application/useMediaQuery'
+import type { StoredEnergy } from '../../domain/dcBus'
 import type { Reach } from '../../domain/reach'
 import { CURRENT_LADDER, nextStop } from '../../domain/scaleLadder'
 
@@ -31,6 +32,8 @@ const props = defineProps<{
   houseCurrent: number | null
   housePower: number | null
   houseLoadPlausible: boolean | null
+  /** Null while the pack's series count is unknown, which is the only case with no figure to give. */
+  packStored: StoredEnergy | null
   packReach: Reach | null
   solarReach: Reach | null
 }>()
@@ -149,8 +152,10 @@ const PHONE_GEO: Geometry = {
     },
     pack: {
       d: 'M254,300 L211,300',
+      // Under the pack node rather than over the pipe: the gap between the node and the hub is 43
+      // units and the word is twice that, so anywhere on the pipe the nodes paint over it.
       readX: 232,
-      readY: 286,
+      readY: 368,
       readAnchor: 'middle',
       headForward: '211,300 223,293 223,307',
       headReverse: '254,300 242,293 242,307',
@@ -266,8 +271,23 @@ const packHead = computed(() =>
 const solarPrimary = computed(() => (props.pvPower !== null ? watts(props.pvPower) : '—'))
 const solarSub = computed(() => amps(props.solarCurrent ?? 0))
 
-const packPrimary = computed(() => amps(props.packCurrent))
-const packSub = computed(() => `${volts(props.packVoltage, 2)} · ${packFlow.value}`)
+/**
+ * Watts, like solar and boat beside it, so one screen reads in one unit. Current times voltage
+ * rather than the BMS's own power field, which is an unsigned magnitude — the sign has to survive,
+ * and this is how the archive derives a stored sample's power too.
+ */
+const packPower = computed(() => props.packCurrent * props.packVoltage)
+const packPrimary = computed(() => wattsSigned(packPower.value))
+const packSub = computed(() => `${amps(props.packCurrent)} · ${volts(props.packVoltage, 2)}`)
+
+const packStoredFigure = computed(() =>
+  props.packStored === null ? '—' : storedWattHours(props.packStored.wattHours),
+)
+const packStoredBasis = computed(() =>
+  props.packStored === null
+    ? 'the pack has not reported its series count'
+    : `charge valued at ${volts(props.packStored.nominalVoltage, 1)} nominal, so a switching load cannot move it`,
+)
 
 const housePrimary = computed(() => (props.housePower !== null ? watts(props.housePower) : '—'))
 const houseSub = computed(() => (props.houseCurrent !== null ? ampsAbsolute(props.houseCurrent) : '—'))
@@ -290,11 +310,13 @@ const houseRead = computed(() => {
   if (houseMagnitude.value <= REST) return `${magnitude} · 0 W`
   return props.housePower !== null ? `${magnitude} · ${watts(props.housePower)}` : magnitude
 })
-const packRead = computed(() =>
-  packFlow.value === 'at rest'
-    ? amps(props.packCurrent)
-    : `${amps(props.packCurrent)} · ${watts(props.packCurrent * props.packVoltage)}`,
-)
+/**
+ * The word for the direction, where the other two edges print a figure. The pack node carries both
+ * the watts and the amps, so a figure here would only be the same reading twice; the direction is
+ * the one thing it has no room for, and the one thing a reader with the dashes frozen would
+ * otherwise have to take from the arrowhead alone.
+ */
+const packRead = computed(() => packFlow.value)
 
 // The aria sentence carries direction in words, so the arrowhead is never the only direction channel.
 function cap(sentence: string): string {
@@ -314,7 +336,7 @@ const solarPhrase = computed(() =>
 const packPhrase = computed(() =>
   packFlow.value === 'at rest'
     ? 'pack at rest'
-    : `pack ${packFlow.value} ${ampsAbsolute(props.packCurrent)}`,
+    : `pack ${packFlow.value} ${watts(packPower.value)}, ${ampsAbsolute(props.packCurrent)}`,
 )
 
 const housePhrase = computed(() =>
@@ -328,7 +350,9 @@ const housePhrase = computed(() =>
 )
 
 const summary = computed(
-  () => `${cap(solarPhrase.value)}, ${packPhrase.value}, ${housePhrase.value}.`,
+  () =>
+    `${cap(solarPhrase.value)}, ${packPhrase.value}, ${housePhrase.value}` +
+    (props.packStored === null ? '.' : `. ${packStoredFigure.value} stored.`),
 )
 </script>
 
@@ -485,6 +509,14 @@ const summary = computed(
         </text>
       </g>
     </svg>
+
+    <!-- The one figure on this card that is a level rather than a flow, so it sits outside the
+         diagram rather than competing with the three rates inside it. -->
+    <p class="stored">
+      <span class="plate">Stored</span>
+      <span class="figure">{{ packStoredFigure }}</span>
+      <span class="muted basis">{{ packStoredBasis }}</span>
+    </p>
   </section>
 </template>
 
@@ -647,6 +679,34 @@ const summary = computed(
 .glyph {
   font-size: 15px;
   fill: var(--ink-muted);
+}
+
+/* One row at every width and in every state, so nothing this line says can change the height of
+   the card the diagram sits in. */
+.stored {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin: 0.5rem 0 0;
+}
+
+.stored .plate,
+.stored .figure {
+  white-space: nowrap;
+}
+
+.stored .figure {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--pack-ink);
+}
+
+/* The basis is a footnote to the figure, so it is the part that gives way when the card is narrow. */
+.stored .basis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .solar-ink {

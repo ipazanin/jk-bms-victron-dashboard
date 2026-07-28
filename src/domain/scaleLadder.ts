@@ -43,7 +43,11 @@ export const CELL_DEVIATION_LADDER: ScaleLadder = {
   releaseFraction: 0.4,
 }
 
-/** Watts, for the two power trend strips. */
+/**
+ * Watts, for all three power trend strips. The pack reads it centre-zero and the other two from
+ * zero, but they share the stops so the three bands are comparable round numbers rather than three
+ * separately chosen scales.
+ */
 export const POWER_LADDER: ScaleLadder = {
   stops: [50, 100, 200, 500, 1000, 2000],
   headroom: 1.15,

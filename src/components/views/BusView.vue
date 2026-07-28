@@ -11,6 +11,7 @@ import SocCluster from '../SocCluster.vue'
 import SolarRow from '../SolarRow.vue'
 import TempTrio from '../TempTrio.vue'
 import TrendStrips from '../TrendStrips.vue'
+import { storedEnergy } from '../../domain/dcBus'
 import { deviceLabel, packDefaultLabel, packDeviceKeyFor } from '../../domain/history/identity'
 import { useHistoryBrowser } from '../../application/history/historyBrowser'
 import { hashOf } from '../../application/route'
@@ -47,6 +48,12 @@ const connectHref = hashOf({ name: 'connect' })
 const logHref = hashOf({ name: 'log' })
 
 const sessionCount = computed(() => log.archive.value.sessions)
+
+/** The configured series count wins; the domain falls back to the cell frame's own when it is absent. */
+const packStored = computed(() => {
+  const snapshot = battery.value
+  return snapshot === null ? null : storedEnergy(snapshot, settings.value?.cellCount ?? null)
+})
 
 /**
  * The live pack under whatever name the Log knows it by. Telemetry holds the device info the radio
@@ -111,6 +118,7 @@ const chassisCentre = computed(() => chassis.value.width / 2)
         :house-current="bus?.houseCurrent ?? null"
         :house-power="bus?.housePower ?? null"
         :house-load-plausible="bus?.houseLoadPlausible ?? null"
+        :pack-stored="packStored"
         :pack-reach="packReach"
         :solar-reach="solarReach"
       />

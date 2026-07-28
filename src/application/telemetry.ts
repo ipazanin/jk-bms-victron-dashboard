@@ -68,6 +68,11 @@ export type { Fault, FaultLevel } from './severity'
 export interface TrendPoint {
   readonly at: number
   readonly packCurrent: number
+  /**
+   * Carried raw so the strip can multiply the two into pack watts at read time. Storing the product
+   * instead would put a derived figure in a column that must only ever hold what a radio reported.
+   */
+  readonly packVoltage: number
   readonly pvPower: number | null
   readonly housePower: number | null
 }
@@ -344,6 +349,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     history.push({
       at,
       packCurrent: snapshot.current,
+      packVoltage: snapshot.packVoltage,
       pvPower: solar.value?.pvPower ?? null,
       // A house load that another source has poisoned is recorded as a gap, not a fabricated
       // trace, so TrendStrips shows the break rather than a line dipping below zero.

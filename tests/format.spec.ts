@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { amps, relativeAge } from '../src/application/format'
+import { amps, relativeAge, storedWattHours, wattsSigned } from '../src/application/format'
 
 const SECOND = 1000
 const MINUTE = 60 * SECOND
@@ -28,6 +28,44 @@ describe('amps', () => {
   it('keeps the sign once the magnitude rounds away from zero', () => {
     expect(amps(-0.06)).toBe('−0.1 A')
     expect(amps(0.06)).toBe('+0.1 A')
+  })
+})
+
+describe('wattsSigned', () => {
+  it('signs a genuine reading', () => {
+    expect(wattsSigned(151)).toBe('+151 W')
+    expect(wattsSigned(-1190.4)).toBe('−1190 W')
+  })
+
+  it('decides the sign after rounding, so a rounded-to-zero reading is unsigned', () => {
+    expect(wattsSigned(-0.4)).toBe('0 W')
+    expect(wattsSigned(0.4)).toBe('0 W')
+    expect(wattsSigned(0)).toBe('0 W')
+    expect(wattsSigned(-0)).toBe('0 W')
+  })
+
+  it('keeps the sign once the magnitude rounds away from zero', () => {
+    expect(wattsSigned(-0.6)).toBe('−1 W')
+    expect(wattsSigned(0.6)).toBe('+1 W')
+  })
+})
+
+describe('storedWattHours', () => {
+  it('reads a full bank in tenths of a kilowatt-hour', () => {
+    // A 4S 315 Ah bank at 12.8 V nominal is 4 032 Wh; two significant figures is all it earns.
+    expect(storedWattHours(4032)).toBe('4.0 kWh')
+    expect(storedWattHours(2614)).toBe('2.6 kWh')
+  })
+
+  it('reads what is left of a flat bank in tens of watt-hours', () => {
+    expect(storedWattHours(844)).toBe('840 Wh')
+    expect(storedWattHours(6)).toBe('10 Wh')
+    expect(storedWattHours(0)).toBe('0 Wh')
+  })
+
+  it('crosses to kilowatt-hours before the watt-hour form grows a fourth digit', () => {
+    expect(storedWattHours(994)).toBe('990 Wh')
+    expect(storedWattHours(996)).toBe('1.0 kWh')
   })
 })
 

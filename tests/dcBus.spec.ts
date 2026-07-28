@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { hoursToEmpty, hoursToFull, reconcile } from '../src/domain/dcBus'
+import { hoursToEmpty, hoursToFull, reconcile, storedEnergy } from '../src/domain/dcBus'
 import type { BatterySnapshot } from '../src/domain/bms/types'
 import type { SolarReading } from '../src/domain/solar/types'
 
@@ -89,6 +89,43 @@ describe('reconcile — the virtual shunt', () => {
   it('refuses to invent a reading when the controller reports no current', () => {
     expect(reconcile(battery(), solar({ batteryCurrent: null }))).toBeNull()
     expect(reconcile(battery(), solar({ batteryVoltage: null }))).toBeNull()
+  })
+})
+
+describe('stored energy', () => {
+  it('values the charge at nominal cell voltage, not at the voltage on the bus', () => {
+    const stored = storedEnergy(battery(), 4)!
+
+    expect(stored.nominalVoltage).toBeCloseTo(12.8, 6)
+    expect(stored.wattHours).toBeCloseTo(309.1 * 12.8, 6)
+  })
+
+  it('holds the figure still while a load drags the pack voltage down', () => {
+    // The windlass takes the bus from 13.573 V to 12.6 V and the charge does not move. A figure
+    // taken from the live voltage would shed 300 Wh here and hand them back when the load drops.
+    const resting = storedEnergy(battery(), 4)!
+    const loaded = storedEnergy(battery({ packVoltage: 12.6, current: -90 }), 4)!
+
+    expect(loaded.wattHours).toBe(resting.wattHours)
+  })
+
+  it('reads the series count off the cell frame until the settings frame arrives', () => {
+    const fromCells = storedEnergy(battery(), null)!
+
+    expect(fromCells.nominalVoltage).toBeCloseTo(12.8, 6)
+    expect(fromCells.wattHours).toBeCloseTo(309.1 * 12.8, 6)
+  })
+
+  it('withholds the figure when no source knows how many cells are in series', () => {
+    expect(storedEnergy(battery({ cellVoltages: [] }), null)).toBeNull()
+    expect(storedEnergy(battery({ cellVoltages: [] }), 0)).toBeNull()
+  })
+
+  it('takes the charge from the coulomb count rather than from the quantised percentage', () => {
+    // 98 % of 315 Ah is 308.7 Ah; the counter says 309.1 Ah, and the counter is what is used.
+    const stored = storedEnergy(battery({ stateOfCharge: 98, remainingCapacity: 309.1 }), 4)!
+
+    expect(stored.wattHours).toBeCloseTo(309.1 * 12.8, 6)
   })
 })
 
