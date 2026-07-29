@@ -47,7 +47,7 @@ import {
   saveRememberedSession,
 } from './rememberedSession'
 import type { RememberedStatus } from './rememberedSession'
-import { worstOf } from './severity'
+import { MOSFET_CRITICAL, MOSFET_SERIOUS, MOSFET_WARNING, worstOf } from './severity'
 import type { Fault, FaultLevel } from './severity'
 import { loadLastDevice, saveLastDevice } from './lastDevice'
 import type { LastDevice } from './lastDevice'
@@ -94,14 +94,18 @@ const SAMPLE_INTERVAL_MS = 1000
 /** Volts of cell spread, and only a default: the BMS's own balance trigger wins when it reports one. */
 const SPREAD_WARNING = 0.01
 const SPREAD_SERIOUS = 0.05
-const MOSFET_WARNING = 55
-const MOSFET_SERIOUS = 70
-const MOSFET_CRITICAL = 80
 const CELL_TEMPERATURE_WARNING = 45
 const LOW_STATE_OF_CHARGE = 20
 
 /** At most one write every fifteen samples; snapshots arrive roughly once a second. */
 const WRITE_THROTTLE_MS = 15_000
+
+/**
+ * What the drop handler paints when the link goes away, and the one banner a failing attempt leaves
+ * standing. A failure compares the banner in hand against it, so this has to be the single source of
+ * the text rather than a copy of it.
+ */
+const PACK_LOST_BANNER = 'Lost the BMS. Move closer to the boat’s panel and reconnect.'
 
 export function createTelemetry(deps: TelemetryDeps) {
   const now = deps.now
@@ -394,7 +398,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     },
     onDisconnect: (reason) => {
       bmsState.value = 'idle'
-      bmsError.value = 'Lost the BMS. Move closer to the boat’s panel and reconnect.'
+      bmsError.value = PACK_LOST_BANNER
       // One word for both vocabularies: it ends the session when nothing else is up, and only the
       // pack stream when the scan is.
       const ended = reason === 'stalled' ? 'stalled' : 'link-lost'
@@ -598,6 +602,18 @@ export function createTelemetry(deps: TelemetryDeps) {
     source.value = 'none'
   }
 
+  /**
+   * Explains a failed connect or reconnect, unless the drop handler has already reported the pack
+   * going away inside the attempt. That names the real event, where the rejection this carries is
+   * only its symptom: a request that was in flight fails with text blaming whatever refuses a
+   * connection, which is wrong about a pack that has simply left range. Any other banner — a frame
+   * that would not decode, say — says nothing about why the attempt failed and is replaced.
+   */
+  function explainFailedAttempt(error: Error): void {
+    if (bmsError.value === PACK_LOST_BANNER) return
+    bmsError.value = describeConnectError(error)
+  }
+
   async function connectBms(showAllDevices = false): Promise<void> {
     // A second connect over a live one abandons the first device with its drop listener still
     // bound to it, and nothing afterwards holds a reference able to remove it.
@@ -613,7 +629,7 @@ export function createTelemetry(deps: TelemetryDeps) {
       rememberConnectedDevice()
     } catch (error) {
       bmsState.value = 'idle'
-      bmsError.value = describeConnectError(error as Error)
+      explainFailedAttempt(error as Error)
       // A cancelled or failed connect must not strand the user on the blank landing: restore the
       // remembered view if nothing came live to replace it.
       if (source.value === 'none' && !battery.value) restoreRemembered()
@@ -645,7 +661,7 @@ export function createTelemetry(deps: TelemetryDeps) {
       rememberConnectedDevice()
     } catch (error) {
       bmsState.value = 'idle'
-      if (!silent) bmsError.value = describeConnectError(error as Error)
+      if (!silent) explainFailedAttempt(error as Error)
       if (source.value === 'none' && !battery.value) restoreRemembered()
     }
   }

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { createTelemetry } from '../src/application/telemetry'
 import type { Telemetry, TelemetryDeps } from '../src/application/telemetry'
+import { MOSFET_CRITICAL, MOSFET_SERIOUS, MOSFET_WARNING } from '../src/application/severity'
 import type { BatterySnapshot } from '../src/domain/bms/types'
 import { STEP_EXCLUSION_A } from '../src/domain/cellBalance'
 import { battery as capturedBattery, solarReading } from './support/samples'
@@ -200,22 +201,22 @@ describe('cell imbalance under a cycling load', () => {
 
 describe('MOSFET temperature thresholds', () => {
   it('stays silent just below the warning temperature', () => {
-    bms.emitSnapshot(battery({ mosfetTemperature: 54.9 }))
+    bms.emitSnapshot(battery({ mosfetTemperature: MOSFET_WARNING - 0.1 }))
     expect(titles()).not.toContain('MOSFET warm')
   })
 
   it('warns at the warning temperature', () => {
-    bms.emitSnapshot(battery({ mosfetTemperature: 55 }))
+    bms.emitSnapshot(battery({ mosfetTemperature: MOSFET_WARNING }))
     expect(levelOf('MOSFET warm')).toBe('warning')
   })
 
   it('is serious at the serious temperature', () => {
-    bms.emitSnapshot(battery({ mosfetTemperature: 70 }))
+    bms.emitSnapshot(battery({ mosfetTemperature: MOSFET_SERIOUS }))
     expect(levelOf('MOSFET hot')).toBe('serious')
   })
 
   it('is critical at the critical temperature', () => {
-    bms.emitSnapshot(battery({ mosfetTemperature: 80 }))
+    bms.emitSnapshot(battery({ mosfetTemperature: MOSFET_CRITICAL }))
     expect(levelOf('MOSFET over temperature')).toBe('critical')
   })
 })

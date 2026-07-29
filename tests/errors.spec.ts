@@ -14,6 +14,10 @@ describe('describeConnectError', () => {
     expect(describeConnectError(new Error('User canceled the requestDevice() chooser.'))).toBeNull()
   })
 
+  it('says nothing when the attempt was abandoned mid-handshake', () => {
+    expect(describeConnectError(domException('AbortError', 'Reconnect superseded'))).toBeNull()
+  })
+
   it('names the single-connection trap when no device is offered', () => {
     const message = describeConnectError(domException('NotFoundError'))!
     expect(message).toMatch(/JK app/)

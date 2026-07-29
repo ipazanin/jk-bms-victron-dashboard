@@ -4,12 +4,20 @@
  * invisible in every one of them.
  */
 
-/** Returns null when the user simply closed the chooser: that is not an error. */
+/**
+ * Returns null when there is nothing worth telling the user: they closed the chooser, or the attempt
+ * was abandoned rather than refused — superseded by a teardown, by a newer attempt, or by the link
+ * going away underneath the handshake. An abandoned attempt is our own bookkeeping and the user can
+ * act on none of it. A reconnect that runs out its deadline is a different animal: it rejects with a
+ * plain Error and falls to the default arm, so its message is what the banner shows.
+ */
 export function describeConnectError(error: Error): string | null {
   const name = (error as DOMException).name
   if (/cancell?ed/i.test(error.message)) return null
 
   switch (name) {
+    case 'AbortError':
+      return null
     case 'NotFoundError':
       return (
         'No BMS offered. It may be out of range, or the JK app on your phone is holding the ' +

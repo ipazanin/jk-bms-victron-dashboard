@@ -3,7 +3,14 @@ import { computed } from 'vue'
 
 import StatusChip from './StatusChip.vue'
 import { celsius } from '../application/format'
-import { levelForThresholds, worstOf, type FaultLevel } from '../application/severity'
+import {
+  MOSFET_CRITICAL,
+  MOSFET_SERIOUS,
+  MOSFET_WARNING,
+  levelForThresholds,
+  worstOf,
+  type FaultLevel,
+} from '../application/severity'
 import type { BatterySnapshot } from '../domain/bms/types'
 
 const props = defineProps<{ battery: BatterySnapshot }>()
@@ -15,9 +22,21 @@ const AXIS_MAX = 90
 const GLYPHS: Record<FaultLevel, string> = { good: '', warning: '!', serious: '▲', critical: '✕' }
 
 const gauges = computed(() => [
-  { label: 'MOSFET', value: props.battery.mosfetTemperature, level: levelForThresholds(props.battery.mosfetTemperature, 55, 70, 80) },
-  { label: 'Cell 1', value: props.battery.temperatureSensor1, level: levelForThresholds(props.battery.temperatureSensor1, 45, 55, 65) },
-  { label: 'Cell 2', value: props.battery.temperatureSensor2, level: levelForThresholds(props.battery.temperatureSensor2, 45, 55, 65) },
+  {
+    label: 'MOSFET',
+    value: props.battery.mosfetTemperature,
+    level: levelForThresholds(props.battery.mosfetTemperature, MOSFET_WARNING, MOSFET_SERIOUS, MOSFET_CRITICAL),
+  },
+  {
+    label: 'Cell 1',
+    value: props.battery.temperatureSensor1,
+    level: levelForThresholds(props.battery.temperatureSensor1, 45, 55, 65),
+  },
+  {
+    label: 'Cell 2',
+    value: props.battery.temperatureSensor2,
+    level: levelForThresholds(props.battery.temperatureSensor2, 45, 55, 65),
+  },
 ])
 
 function fraction(value: number): number {
@@ -26,10 +45,10 @@ function fraction(value: number): number {
 
 const hottest = computed(() => gauges.value.reduce((worst, gauge) => (gauge.value > worst.value ? gauge : worst)))
 
-// The sensors have different thresholds (MOSFET 55/70/80, cells 45/55/65), so the hottest
-// reading is not always the highest-severity one — a 72 °C serious MOSFET must not mask a
-// 66 °C critical cell. The header badge carries the worst level across all three; the figure
-// beside it stays the hottest reading.
+// The MOSFET and the cells grade on different bands, so the hottest reading is not always the
+// highest-severity one — a serious MOSFET must not mask a cell that is cooler but further past
+// its own limits. The header badge carries the worst level across all three; the figure beside
+// it stays the hottest reading.
 const worstLevel = computed<FaultLevel>(() => worstOf(gauges.value.map((gauge) => gauge.level)))
 </script>
 

@@ -13,6 +13,16 @@ import type { SolarReading } from '../../src/domain/solar/types'
 import type { BmsLink, DisconnectReason, JkBmsHandlers } from '../../src/infrastructure/ble/JkBmsClient'
 import type { SolarScan, VictronHandlers } from '../../src/infrastructure/ble/VictronScanner'
 
+/**
+ * What a radio says over its own link from inside an attempt that then fails. The real client
+ * reports a drop, or a frame it could not read, through the handlers while the handshake is still
+ * running, and the rejection follows; a spec pairs the two so both land in the one attempt.
+ */
+interface InterruptedAttempt {
+  readonly report: () => void
+  readonly rejection: Error
+}
+
 export interface FakeBmsLink {
   /** Hand this to `createTelemetry` as `createBmsLink`. */
   create(handlers: JkBmsHandlers): BmsLink
@@ -26,6 +36,14 @@ export interface FakeBmsLink {
   failNextConnectWith(error: Error): void
   /** How an out-of-range or permission-gone pack reaches the app: reconnect() rejects. */
   failNextReconnectWith(error: Error): void
+  /**
+   * Arms the next connect() to run `report` — a drop, a decode failure, anything the handlers
+   * carry — and only then reject with `rejection`. Both land inside the one attempt, in that
+   * order, which is what a spec about the resulting banner needs.
+   */
+  reportDuringNextConnect(report: () => void, rejection: Error): void
+  /** The same one-shot on the chooser-free path. */
+  reportDuringNextReconnect(report: () => void, rejection: Error): void
   /** The last id reconnect() was asked for, so a spec can assert the persisted id was used. */
   readonly lastReconnectId: string | null
 }
@@ -37,6 +55,8 @@ export function fakeBmsLink(
   let connected = false
   let nextConnectError: Error | null = null
   let nextReconnectError: Error | null = null
+  let interruptedConnect: InterruptedAttempt | null = null
+  let interruptedReconnect: InterruptedAttempt | null = null
   let lastReconnectId: string | null = null
 
   const link: BmsLink = {
@@ -46,6 +66,12 @@ export function fakeBmsLink(
       return connected
     },
     async connect() {
+      const interrupted = interruptedConnect
+      interruptedConnect = null
+      if (interrupted !== null) {
+        interrupted.report()
+        throw interrupted.rejection
+      }
       const failure = nextConnectError
       nextConnectError = null
       if (failure !== null) throw failure
@@ -53,6 +79,12 @@ export function fakeBmsLink(
     },
     async reconnect(deviceId: string) {
       lastReconnectId = deviceId
+      const interrupted = interruptedReconnect
+      interruptedReconnect = null
+      if (interrupted !== null) {
+        interrupted.report()
+        throw interrupted.rejection
+      }
       const failure = nextReconnectError
       nextReconnectError = null
       if (failure !== null) throw failure
@@ -87,6 +119,12 @@ export function fakeBmsLink(
     },
     failNextReconnectWith: (error) => {
       nextReconnectError = error
+    },
+    reportDuringNextConnect: (report, rejection) => {
+      interruptedConnect = { report, rejection }
+    },
+    reportDuringNextReconnect: (report, rejection) => {
+      interruptedReconnect = { report, rejection }
     },
   }
 }

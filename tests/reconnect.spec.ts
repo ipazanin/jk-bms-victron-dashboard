@@ -126,6 +126,64 @@ describe('reconnecting without the chooser', () => {
   })
 })
 
+describe('the banner after an attempt that failed mid-handshake', () => {
+  // Chrome rejects a request that was in flight when the link went away with a NetworkError, whose
+  // guidance — close the JK app on your phone, the pack accepts one connection at a time — is true
+  // of a refused connection and wrong about a pack that has simply left range.
+  function linkGone(): DOMException {
+    return new DOMException('GATT Server is disconnected.', 'NetworkError')
+  }
+
+  it('keeps the drop banner when the pack goes away inside a chooser connect', async () => {
+    const { telemetry, bms } = spawn()
+    bms.reportDuringNextConnect(() => bms.emitDisconnect(), linkGone())
+
+    await telemetry.connectBms()
+
+    expect(telemetry.bmsState.value).toBe('idle')
+    expect(telemetry.bmsError.value).toMatch(/Lost the BMS/)
+  })
+
+  it('answers a failed connect with its own guidance, not the frame the pack could not be read from', async () => {
+    const { telemetry, bms } = spawn()
+    // A device-info frame that runs short makes the decoder read past its end, and the client
+    // reports that over onError while the handshake is still running. It describes one bad frame,
+    // not why the connection then failed, so the connect guidance has to win the slot.
+    bms.reportDuringNextConnect(
+      () => bms.emitError(new RangeError('Offset is outside the bounds of the DataView')),
+      linkGone(),
+    )
+
+    await telemetry.connectBms()
+
+    expect(telemetry.bmsError.value).toMatch(/JK app/)
+    expect(telemetry.bmsError.value).not.toMatch(/DataView/)
+  })
+
+  it('keeps the drop banner when a superseded reconnect unwinds', async () => {
+    saveLastDevice('jk-abc', 'JK_B2A8S20P', clock)
+    const { telemetry, bms } = spawn()
+    // What the handshake throws at its next checkpoint once its own drop handler has superseded it.
+    bms.reportDuringNextReconnect(() => bms.emitDisconnect(), new DOMException('Reconnect superseded', 'AbortError'))
+
+    await telemetry.reconnectBms()
+
+    expect(telemetry.bmsState.value).toBe('idle')
+    expect(telemetry.bmsError.value).toMatch(/Lost the BMS/)
+  })
+
+  it('keeps the drop banner when a write in flight rejects as the pack goes away', async () => {
+    saveLastDevice('jk-abc', 'JK_B2A8S20P', clock)
+    const { telemetry, bms } = spawn()
+    bms.reportDuringNextReconnect(() => bms.emitDisconnect(), linkGone())
+
+    await telemetry.reconnectBms()
+
+    expect(telemetry.bmsState.value).toBe('idle')
+    expect(telemetry.bmsError.value).toMatch(/Lost the BMS/)
+  })
+})
+
 describe('holding the remembered view through the attempt', () => {
   it('replaces the remembered numbers only once the link is live', async () => {
     saveRememberedSession(rememberedSession({ capturedAt: clock }))

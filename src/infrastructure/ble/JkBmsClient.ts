@@ -335,6 +335,10 @@ export class JkBmsClient implements BmsLink {
 
   private readonly handleDisconnect = (): void => {
     this.stopStallTimer()
+    // Supersede any attach still in flight. The link it is handshaking over has just gone, and
+    // without this the remaining requests write to a null characteristic and return quietly — the
+    // handshake would then "succeed" and start a stall timer over a dead radio.
+    this.attachToken += 1
     this.characteristic = null
     this.assembler.reset()
     if (this.device) {

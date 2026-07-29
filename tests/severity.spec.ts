@@ -1,6 +1,23 @@
 import { describe, expect, it } from 'vitest'
 
-import { levelForThresholds, worstOf } from '../src/application/severity'
+import {
+  MOSFET_CRITICAL,
+  MOSFET_SERIOUS,
+  MOSFET_WARNING,
+  levelForThresholds,
+  worstOf,
+} from '../src/application/severity'
+
+describe('the MOSFET bands', () => {
+  // Pins the numbers the annunciator and the temperature gauge both grade against, so a band that
+  // moves is a deliberate edit here and not a silent regrade of the whole boat. The annunciator's
+  // own boundary cases in faults.spec.ts still spell these numbers out as literals, so a band that
+  // moves has to move there too — otherwise that file stops testing a boundary and starts testing
+  // the middle of a band, and says nothing about the new one.
+  it('warn at 55 °C, turn serious at 70 and critical at 80', () => {
+    expect([MOSFET_WARNING, MOSFET_SERIOUS, MOSFET_CRITICAL]).toEqual([55, 70, 80])
+  })
+})
 
 describe('levelForThresholds', () => {
   it('grades a rising measurement against ascending thresholds', () => {
@@ -33,9 +50,9 @@ describe('worstOf', () => {
   })
 
   it('a serious MOSFET does not mask a critical cell', () => {
-    // MOSFET 72 °C on 55/70/80 is serious; a cell at 66 °C on 45/55/65 is critical. The badge
-    // must read the worst of the two, not the hottest reading — which here is the MOSFET.
-    const mosfet = levelForThresholds(72, 55, 70, 80)
+    // The MOSFET here is the hotter of the two, and the cooler cell is the worse one: cells run on
+    // tighter bands, so 66 °C is past their last one. The badge must read the worst, not the hottest.
+    const mosfet = levelForThresholds(72, MOSFET_WARNING, MOSFET_SERIOUS, MOSFET_CRITICAL)
     const cell = levelForThresholds(66, 45, 55, 65)
     expect(mosfet).toBe('serious')
     expect(cell).toBe('critical')

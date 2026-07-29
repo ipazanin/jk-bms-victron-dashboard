@@ -31,6 +31,15 @@ export function worstOf(levels: Iterable<FaultLevel>): FaultLevel {
 }
 
 /**
+ * Where the MOSFET stops being comfortable, in °C. The annunciator and the temperature gauge grade
+ * the same reading and must reach the same verdict about it: a green gauge beside a warning banner
+ * is a contradiction the user has no way to resolve, so both read the bands from here.
+ */
+export const MOSFET_WARNING = 55
+export const MOSFET_SERIOUS = 70
+export const MOSFET_CRITICAL = 80
+
+/**
  * Grades a rising measurement against ascending thresholds. A reading at or above a threshold
  * takes that level; below the warning threshold it is 'good'. The bands must be ordered
  * warning ≤ serious ≤ critical.
