@@ -1,0 +1,69 @@
+{
+  "source": "VictronConnect history export, SmartSolar MPPT 100/50 (product 0xA057), 2026-06-04 to 2026-07-04",
+  "note": "Four rows copied verbatim from the export, chosen for the cases worth pinning: today, the lowest-yield day in the file, the highest-yield day, and the day whose time in bulk most exceeds its time in float. Consumed energy, maximum battery current, the error database byte and the day sequence number have no export column; the spec supplies those and says so where it does. No payload here came off a radio.",
+  "days": [
+    {
+      "case": "today",
+      "daysAgo": 0,
+      "date": "7/4/26",
+      "yieldWh": 710,
+      "maxPvPowerW": 333,
+      "maxPvVoltageV": 21.79,
+      "minBatteryVoltageV": 12.97,
+      "maxBatteryVoltageV": 14.21,
+      "minutesInBulk": 389,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 412,
+      "errors": [0, 0, 0, 0]
+    },
+    {
+      "case": "lowest yield in the export",
+      "daysAgo": 10,
+      "date": "6/24/26",
+      "yieldWh": 70,
+      "maxPvPowerW": 76,
+      "maxPvVoltageV": 21.8,
+      "minBatteryVoltageV": 13.45,
+      "maxBatteryVoltageV": 14.21,
+      "minutesInBulk": 93,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 708,
+      "errors": [0, 0, 0, 0]
+    },
+    {
+      "case": "highest yield in the export",
+      "daysAgo": 12,
+      "date": "6/22/26",
+      "yieldWh": 1630,
+      "maxPvPowerW": 329,
+      "maxPvVoltageV": 21.47,
+      "minBatteryVoltageV": 12.65,
+      "maxBatteryVoltageV": 14.29,
+      "minutesInBulk": 489,
+      "minutesInAbsorption": 132,
+      "minutesInFloat": 317,
+      "errors": [0, 0, 0, 0]
+    },
+    {
+      "case": "time in bulk furthest above time in float",
+      "daysAgo": 13,
+      "date": "6/21/26",
+      "yieldWh": 1000,
+      "maxPvPowerW": 295,
+      "maxPvVoltageV": 21.46,
+      "minBatteryVoltageV": 12.76,
+      "maxBatteryVoltageV": 14.21,
+      "minutesInBulk": 500,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 314,
+      "errors": [0, 0, 0, 0]
+    }
+  ],
+  "totals": {
+    "note": "The extremes across all 31 exported rows, and the number of days the export covers. The controller's lifetime record can only exceed these, so they fix scale and offsets here rather than claiming what the device holds. Neither total-yield counter appears in this export; the spec supplies both.",
+    "daysAvailable": 31,
+    "maxPvVoltageV": 22.21,
+    "maxBatteryVoltageV": 14.29,
+    "minBatteryVoltageV": 12.65
+  }
+}

@@ -3,9 +3,11 @@
 import { describe, expect, it } from 'vitest'
 
 import fixtures from './fixtures.json'
+import { hexToBytes } from './support/bytes'
 import { decodeCellInfo, decodeDeviceInfo, decodeSettings } from '../src/domain/bms/decode'
 import {
   CMD_CELL_INFO,
+  CMD_DETAIL_LOG,
   CMD_DEVICE_INFO,
   FRAME_CELL_INFO,
   FRAME_DEVICE_INFO,
@@ -18,16 +20,10 @@ import {
   isChecksumValid,
 } from '../src/domain/bms/protocol'
 
-function bytes(hex: string): Uint8Array {
-  const out = new Uint8Array(hex.length / 2)
-  for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
-  return out
-}
-
-const cellInfo = bytes(fixtures.bmsCellInfoHex)
-const cellInfoDischarge = bytes(fixtures.bmsCellInfoDischargeHex)
-const deviceInfo = bytes(fixtures.bmsDeviceInfoHex)
-const settings = bytes(fixtures.bmsSettingsHex)
+const cellInfo = hexToBytes(fixtures.bmsCellInfoHex)
+const cellInfoDischarge = hexToBytes(fixtures.bmsCellInfoDischargeHex)
+const deviceInfo = hexToBytes(fixtures.bmsDeviceInfoHex)
+const settings = hexToBytes(fixtures.bmsSettingsHex)
 
 describe('command construction', () => {
   it('produces the exact device-info frame the BMS accepts', () => {
@@ -42,10 +38,24 @@ describe('command construction', () => {
     )
   })
 
+  it('produces the exact detail-log frame the BMS accepts', () => {
+    expect(Buffer.from(buildCommand(CMD_DETAIL_LOG)).toString('hex')).toBe(
+      'aa5590eba7000000000000000000000000000021',
+    )
+  })
+
   it('refuses to build any command that is not a read', () => {
     // 0x01 is the settings-write opcode. It must be impossible to emit.
     expect(() => buildCommand(0x01)).toThrow(/non-read command/)
     expect(() => buildCommand(0x00)).toThrow()
+  })
+
+  it('refuses the destructive opcodes that neighbour the read set', () => {
+    // 0xA3 erases every stored record and sits one bit from the detail-log opcode 0xA7.
+    expect(() => buildCommand(0xa3)).toThrow(/non-read command/)
+    // 0x9D restores factory settings, 0x6C writes the real-time clock.
+    expect(() => buildCommand(0x9d)).toThrow(/non-read command/)
+    expect(() => buildCommand(0x6c)).toThrow(/non-read command/)
   })
 })
 

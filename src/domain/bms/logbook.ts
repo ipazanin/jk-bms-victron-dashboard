@@ -2,10 +2,10 @@
  * The JK-BMS event logbook (command 0xA1, frame type 0x05).
  *
  * The device keeps a short ring of timestamped events — power cycles, protection trips, mode
- * changes — going back to when it was first powered on. This is the only history the BMS itself
- * holds: there is no per-day energy series in the protocol, so daily figures are folded from the
- * app's own recordings instead. See the capture notes for the frame layout, confirmed against a
- * real 19.10 unit and against the esphome-jk-bms decoder.
+ * changes — going back to when it was first powered on. An entry is a code and a timestamp and
+ * nothing else; the pack's other store, the detail log in `detailLog.ts`, holds full snapshots and
+ * draws its event codes from the same vocabulary. See the capture notes for the frame layout,
+ * confirmed against a real 19.10 unit and against the esphome-jk-bms decoder.
  *
  *   [4]     frame type 0x05
  *   [5]     frame counter

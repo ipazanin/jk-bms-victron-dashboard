@@ -16,7 +16,19 @@ export const CMD_DEVICE_INFO = 0x97
 export const CMD_CELL_INFO = 0x96
 /** The event logbook: device-side history of protections, power cycles and mode changes. */
 export const CMD_LOGBOOK = 0xa1
-const READ_COMMANDS: ReadonlySet<number> = new Set([CMD_DEVICE_INFO, CMD_CELL_INFO, CMD_LOGBOOK])
+/**
+ * The stored detail log: the device's own ring of sampled pack snapshots.
+ *
+ * Its neighbours in the opcode space are destructive — 0xA3 erases all stored data, 0x9D restores
+ * factory settings, 0x6C sets the RTC — and none of them belong in READ_COMMANDS.
+ */
+export const CMD_DETAIL_LOG = 0xa7
+const READ_COMMANDS: ReadonlySet<number> = new Set([
+  CMD_DEVICE_INFO,
+  CMD_CELL_INFO,
+  CMD_LOGBOOK,
+  CMD_DETAIL_LOG,
+])
 
 const COMMAND_HEADER = [0xaa, 0x55, 0x90, 0xeb] as const
 export const RESPONSE_HEADER = [0x55, 0xaa, 0xeb, 0x90] as const
@@ -28,6 +40,7 @@ export const FRAME_SETTINGS = 0x01
 export const FRAME_CELL_INFO = 0x02
 export const FRAME_DEVICE_INFO = 0x03
 export const FRAME_LOGBOOK = 0x05
+export const FRAME_DETAIL_LOG = 0x06
 
 /** The cell-voltage and cell-resistance blocks each hold 32 slots, populated or not. */
 export const MAX_CELLS = 32
