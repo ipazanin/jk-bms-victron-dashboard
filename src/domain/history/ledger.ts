@@ -20,10 +20,12 @@
  * instrument and counted by the ledger; both rules are right about their own question.
  *
  * The fold is a monoid — `mergeLedgers` is associative with `EMPTY_LEDGER` as its identity — which
- * is the only reason the ledger cached on a session row can be trusted: the recorder's running
- * total, one interval at a time, and a whole-session rescan produce the same account.
+ * is the only reason the ledger cached on a session row can be trusted: over the same rows, the
+ * recorder's running total, one interval at a time, and a whole-session rescan produce the same
+ * account.
  */
 
+import { higherOf, lowerOf } from './geometry'
 import { MAX_SAMPLE_GAP_MS, pairSamples, solarCurrentOf } from './join'
 import type { PairedSample } from './join'
 import type {
@@ -74,11 +76,11 @@ export function mergeLedgers(earlier: SessionLedger, later: SessionLedger): Sess
     packAhWholeSession: earlier.packAhWholeSession + later.packAhWholeSession,
     stateOfChargeFirst: earlier.stateOfChargeFirst ?? later.stateOfChargeFirst,
     stateOfChargeLast: later.stateOfChargeLast ?? earlier.stateOfChargeLast,
-    stateOfChargeMin: lower(earlier.stateOfChargeMin, later.stateOfChargeMin),
+    stateOfChargeMin: lowerOf(earlier.stateOfChargeMin, later.stateOfChargeMin),
     remainingCapacityFirstAh:
       earlier.remainingCapacityFirstAh ?? later.remainingCapacityFirstAh,
     remainingCapacityLastAh: later.remainingCapacityLastAh ?? earlier.remainingCapacityLastAh,
-    pvPowerPeakW: higher(earlier.pvPowerPeakW, later.pvPowerPeakW),
+    pvPowerPeakW: higherOf(earlier.pvPowerPeakW, later.pvPowerPeakW),
   }
 }
 
@@ -195,22 +197,71 @@ export function appendCoverage(
   return [...runs, { from, to, kind }]
 }
 
-/** The whole-session scan the incremental fold must agree with. */
-export function foldAccount(samples: readonly PairedSample[]): SessionAccount {
-  let ledger = EMPTY_LEDGER
-  let coverage: readonly CoverageRun[] = []
+/**
+ * An account part way through being folded: the two halves themselves, plus what one more sample
+ * needs in order to carry on from them. A recorder keeps one across a whole session and a rescan
+ * builds one in a single pass, so the arithmetic behind a cached figure and behind a recomputed one
+ * is one implementation rather than two.
+ *
+ * That is as far as it goes: the two walks are not guaranteed the same rows. Where both radios
+ * report inside one millisecond the recorder folds two rows at that instant, and the interval
+ * reaching it is integrated against the first of them — whose other half is whatever the pairing
+ * bound let it hold — whereas `pairSamples` hands a recomputation one row carrying both readings.
+ * How often two free-running radios land in the same millisecond is a property of their drift
+ * against each other, not something this module can bound, so the two figures may disagree over
+ * however many one-second intervals it happens on.
+ */
+export interface AccountFold extends SessionAccount {
+  readonly lastPaired: PairedSample | null
+}
 
-  for (let index = 0; index < samples.length; index += 1) {
-    const sample = samples[index]
-    if (index > 0) {
-      const previous = samples[index - 1]
-      ledger = mergeLedgers(ledger, ledgerOfInterval(previous, sample))
-      coverage = appendCoverage(coverage, previous.at, sample.at, classifyInterval(previous, sample))
-    }
-    ledger = mergeLedgers(ledger, ledgerOfSample(sample))
+/** The identity of the fold: nothing has been handed to it yet. */
+export const EMPTY_FOLD: AccountFold = {
+  ledger: EMPTY_LEDGER,
+  coverage: [],
+  lastPaired: null,
+}
+
+/**
+ * Folds one instant of the merged timeline into the running account.
+ *
+ * Two rows stamped in the same millisecond are one instant: the span between them integrates to
+ * nothing and opens no coverage run, so what the second one adds is its own bounding readings. A
+ * live recorder meets that whenever both radios report inside the same tick; a rescan never does,
+ * because `pairSamples` has already drained such rows into one.
+ */
+export function pushSample(account: AccountFold, sample: PairedSample): AccountFold {
+  const previous = account.lastPaired
+
+  // With no last row there is no span to integrate and none to classify, so both halves carry
+  // forward untouched: a fold seeded from a stored account keeps that account's figures and its
+  // tape rather than starting them over. The seam is what it cannot recover — the span between the
+  // row that account ended on and this sample is integrated by nothing and covered by no run,
+  // because the row it would have been measured against is not part of the fold.
+  const upToSample =
+    previous === null ? account.ledger : mergeLedgers(account.ledger, ledgerOfInterval(previous, sample))
+  const coverage =
+    previous === null
+      ? account.coverage
+      : appendCoverage(account.coverage, previous.at, sample.at, classifyInterval(previous, sample))
+
+  return {
+    ledger: mergeLedgers(upToSample, ledgerOfSample(sample)),
+    coverage,
+    lastPaired: sample,
   }
+}
 
-  return { ledger, coverage }
+/**
+ * Drives the fold over a whole run of rows and keeps only the two halves: a walk that has reached
+ * the end of its rows has no next sample to carry on from.
+ */
+export function foldAccount(samples: readonly PairedSample[]): SessionAccount {
+  const folded = samples.reduce((account, sample) => {
+    return pushSample(account, sample)
+  }, EMPTY_FOLD)
+
+  return { ledger: folded.ledger, coverage: folded.coverage }
 }
 
 /**
@@ -240,16 +291,4 @@ function hoursOf(elapsedMs: number): number {
 
 function ampHoursOver(amps: number, elapsedMs: number): number {
   return amps * hoursOf(elapsedMs)
-}
-
-function lower(left: number | null, right: number | null): number | null {
-  if (left === null) return right
-  if (right === null) return left
-  return Math.min(left, right)
-}
-
-function higher(left: number | null, right: number | null): number | null {
-  if (left === null) return right
-  if (right === null) return left
-  return Math.max(left, right)
 }

@@ -61,6 +61,20 @@ export function maxMagnitudeOf(values: Iterable<number | null>): number {
   return reach
 }
 
+/** The smaller of two readings, where null is "nothing was read" rather than a value to compare. */
+export function lowerOf(left: number | null, right: number | null): number | null {
+  if (left === null) return right
+  if (right === null) return left
+  return Math.min(left, right)
+}
+
+/** The larger of two readings, on the same terms. */
+export function higherOf(left: number | null, right: number | null): number | null {
+  if (left === null) return right
+  if (right === null) return left
+  return Math.max(left, right)
+}
+
 /**
  * Maps a value in `[from, to]` onto `[start, end]`. An inverted range is ordinary rather than an
  * error: an SVG y axis grows downwards, so it passes `end` below `start`.

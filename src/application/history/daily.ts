@@ -1,16 +1,18 @@
 /**
  * Daily energy, folded from the app's own recordings.
  *
- * The JK-BMS keeps no per-day energy history of its own — only the event logbook and lifetime
- * counters — so a daily view can only be built from what this browser recorded. Each session's
- * ledger is already the exact integral of its samples, cached on the row, so bucketing by local day
- * and summing costs one pass over the list and reads no chunk.
+ * The provenance matters. The pack keeps a ring of hourly samples of its own, but those describe the
+ * battery alone, whereas a session ledger integrates pack and solar together and is the only source
+ * that can carry solar and house figures. Each ledger is already the exact integral of its session's
+ * samples, cached on the row, so bucketing by local day and summing costs one pass over the list and
+ * reads no chunk.
  *
  * A session that crosses local midnight is attributed whole to the day it began. Splitting it at the
  * boundary would mean re-integrating its chunks, and the ledger the recorder folded cannot be split
  * — only combined. The day a watch started is the honest, cheap answer, and the row says its span.
  */
 
+import { higherOf, lowerOf } from '../../domain/history/geometry'
 import type { SessionRecord } from '../../domain/history/types'
 import { sessionDurationMs } from './historyBrowser'
 
@@ -84,16 +86,4 @@ export function dailyTotals(records: readonly SessionRecord[], now: number): Dai
   }
 
   return [...byDay.values()].sort((left, right) => right.day - left.day)
-}
-
-function lowerOf(current: number | null, next: number | null): number | null {
-  if (next === null) return current
-  if (current === null) return next
-  return Math.min(current, next)
-}
-
-function higherOf(current: number | null, next: number | null): number | null {
-  if (next === null) return current
-  if (current === null) return next
-  return Math.max(current, next)
 }

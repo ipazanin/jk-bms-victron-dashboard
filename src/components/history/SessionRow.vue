@@ -18,6 +18,7 @@
  */
 import { computed } from 'vue'
 
+import { ampHoursSigned, clockTime } from '../../application/format'
 import type { SessionListing } from '../../application/history/port'
 import { hashOf } from '../../application/route'
 import { clockBandFor, coverageSegments, linearScale } from '../../domain/history/geometry'
@@ -113,11 +114,6 @@ function dayWords(at: number): string {
   })
 }
 
-function clock(at: number): string {
-  const when = new Date(at)
-  return `${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}`
-}
-
 /** `12h24m`, `26m` — the tightest form, for the column that has the least room. */
 function compactSpan(elapsedMs: number): string {
   const minutes = Math.round(elapsedMs / MS_PER_MINUTE)
@@ -144,13 +140,6 @@ function stopwatch(elapsedMs: number): string {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`
 }
 
-/** The sign is decided after rounding, so a figure that rounds to zero carries no direction. */
-function signedAh(value: number, digits = 1): string {
-  const rounded = Number(value.toFixed(digits))
-  const sign = rounded > 0 ? '+' : rounded < 0 ? '−' : ''
-  return `${sign}${Math.abs(rounded).toFixed(digits)} Ah`
-}
-
 function stateOfChargeWords(row: SessionRecord): string {
   const first = row.ledger.stateOfChargeFirst
   const last = row.ledger.stateOfChargeLast
@@ -163,7 +152,7 @@ function stateOfChargeWords(row: SessionRecord): string {
   <a class="row" :href="hashOf({ name: 'session', id: record.id })">
     <span class="cell watch">
       <span class="day">{{ dayWords(record.startedAt) }}</span>
-      <span class="clock">{{ clock(record.startedAt) }}→{{ clock(endedAt) }}</span>
+      <span class="clock">{{ clockTime(record.startedAt) }}→{{ clockTime(endedAt) }}</span>
     </span>
 
     <span class="cell figure length">
@@ -174,18 +163,18 @@ function stateOfChargeWords(row: SessionRecord): string {
 
     <span class="cell figure">
       <span class="cell-label">Solar in</span>
-      <span class="solar-ink">{{ solarSeen ? signedAh(record.ledger.solarAh) : '—' }}</span>
+      <span class="solar-ink">{{ solarSeen ? ampHoursSigned(record.ledger.solarAh) : '—' }}</span>
     </span>
 
     <span class="cell figure">
       <span class="cell-label">Boat out</span>
-      <span class="house-ink">{{ solarSeen ? signedAh(houseOutAh) : '—' }}</span>
+      <span class="house-ink">{{ solarSeen ? ampHoursSigned(houseOutAh) : '—' }}</span>
     </span>
 
     <span class="cell figure pack">
       <span class="cell-label">Pack</span>
       <span>{{ stateOfChargeWords(record) }}</span>
-      <span class="pack-ink">{{ signedAh(record.ledger.packAhWholeSession) }}</span>
+      <span class="pack-ink">{{ ampHoursSigned(record.ledger.packAhWholeSession) }}</span>
     </span>
 
     <span class="chevron" aria-hidden="true">›</span>

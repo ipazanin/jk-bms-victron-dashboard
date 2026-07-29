@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
-import { amps, relativeAge, storedWattHours, wattsSigned } from '../src/application/format'
+import {
+  ampHoursSigned,
+  amps,
+  clockTimeWithSeconds,
+  groupedCount,
+  relativeAge,
+  storedWattHours,
+  wattsSigned,
+} from '../src/application/format'
 
 const SECOND = 1000
 const MINUTE = 60 * SECOND
@@ -47,6 +55,41 @@ describe('wattsSigned', () => {
   it('keeps the sign once the magnitude rounds away from zero', () => {
     expect(wattsSigned(-0.6)).toBe('−1 W')
     expect(wattsSigned(0.6)).toBe('+1 W')
+  })
+})
+
+describe('ampHoursSigned', () => {
+  it('signs a genuine reading', () => {
+    expect(ampHoursSigned(12.34)).toBe('+12.3 Ah')
+    expect(ampHoursSigned(-8)).toBe('−8.0 Ah')
+  })
+
+  it('decides the sign after rounding, so a rounded-to-zero reading is unsigned', () => {
+    expect(ampHoursSigned(-0.04)).toBe('0.0 Ah')
+    expect(ampHoursSigned(0.04)).toBe('0.0 Ah')
+    expect(ampHoursSigned(0)).toBe('0.0 Ah')
+  })
+
+  it('rounds to the digits requested, as the energy bars call it with none', () => {
+    expect(ampHoursSigned(12.6, 0)).toBe('+13 Ah')
+    expect(ampHoursSigned(-0.4, 0)).toBe('0 Ah')
+  })
+})
+
+describe('clockTimeWithSeconds', () => {
+  it('appends zero-padded seconds to the minute clock', () => {
+    const at = new Date(2024, 0, 1, 9, 5, 3).getTime()
+    expect(clockTimeWithSeconds(at)).toBe('09:05:03')
+  })
+})
+
+describe('groupedCount', () => {
+  it('carries no separator under four digits', () => {
+    expect(groupedCount(999)).toBe('999')
+  })
+
+  it('separates a four-digit count with a non-breaking space', () => {
+    expect(groupedCount(1234)).toBe('1 234')
   })
 })
 

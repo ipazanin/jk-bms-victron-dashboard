@@ -12,6 +12,7 @@
  */
 import { computed } from 'vue'
 
+import { clockTimeWithSeconds } from '../../application/format'
 import type { SessionEntry } from '../../domain/history/types'
 
 const props = defineProps<{
@@ -58,13 +59,6 @@ function glyphFor(entry: SessionEntry): string {
       return '·'
   }
 }
-
-function clockSeconds(at: number): string {
-  const when = new Date(at)
-  return [when.getHours(), when.getMinutes()]
-    .map((part) => String(part).padStart(2, '0'))
-    .join(':')
-}
 </script>
 
 <template>
@@ -83,7 +77,7 @@ function clockSeconds(at: number): string {
           :aria-current="row.current ? 'true' : undefined"
           @click="emit('scrub', row.entry.at)"
         >
-          <span class="readout at">{{ clockSeconds(row.entry.at) }}</span>
+          <span class="readout at">{{ clockTimeWithSeconds(row.entry.at) }}</span>
           <span class="glyph" :class="row.entry.level" aria-hidden="true">{{ row.glyph }}</span>
           <span class="text">{{ row.entry.text }}</span>
         </button>
@@ -117,7 +111,7 @@ function clockSeconds(at: number): string {
 
 .row {
   display: grid;
-  grid-template-columns: 4rem 1.25rem 1fr;
+  grid-template-columns: 4.75rem 1.25rem 1fr;
   align-items: baseline;
   gap: 0.75rem;
   width: 100%;

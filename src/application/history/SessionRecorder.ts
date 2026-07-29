@@ -39,14 +39,8 @@ import {
 } from '../../domain/history/identity'
 import { MAX_PAIRING_AGE_MS } from '../../domain/history/join'
 import type { PairedSample } from '../../domain/history/join'
-import {
-  EMPTY_LEDGER,
-  appendCoverage,
-  classifyInterval,
-  ledgerOfInterval,
-  ledgerOfSample,
-  mergeLedgers,
-} from '../../domain/history/ledger'
+import { EMPTY_FOLD, pushSample } from '../../domain/history/ledger'
+import type { AccountFold } from '../../domain/history/ledger'
 import {
   CHUNK_CAPACITY,
   MAX_SESSION_WARNINGS,
@@ -54,7 +48,6 @@ import {
   SAMPLE_INTERVAL_MS,
 } from '../../domain/history/types'
 import type {
-  CoverageRun,
   DeviceKey,
   DeviceRecord,
   HistoryChunk,
@@ -62,7 +55,6 @@ import type {
   SessionEndReason,
   SessionEntry,
   SessionId,
-  SessionLedger,
   SessionRecord,
   SolarSample,
   WarningRecord,
@@ -189,11 +181,7 @@ interface OpenSession {
   /** The last row of each stream that actually reached a chunk — what a re-read would pair with. */
   heldPack: PackSample | null
   heldSolar: SolarSample | null
-  lastPaired: PairedSample | null
-  /** The running total up to but excluding the last row, so a same-instant row can replace it. */
-  ledgerBeforeLastRow: SessionLedger
-  ledger: SessionLedger
-  coverage: readonly CoverageRun[]
+  account: AccountFold
   entries: SessionEntry[]
   entriesCapped: boolean
   faultStanding: boolean
@@ -581,10 +569,7 @@ export class SessionRecorder {
       lastSolarRowMonotonic: Number.NEGATIVE_INFINITY,
       heldPack: null,
       heldSolar: null,
-      lastPaired: null,
-      ledgerBeforeLastRow: EMPTY_LEDGER,
-      ledger: EMPTY_LEDGER,
-      coverage: [],
+      account: EMPTY_FOLD,
       entries: [{ at, kind: 'begin', level: 'neutral', text: 'Session begins' }],
       entriesCapped: false,
       faultStanding: false,
@@ -709,12 +694,17 @@ export class SessionRecorder {
   }
 
   /**
-   * Folds one instant of the merged timeline into the running account.
+   * Builds the row for one instant of the merged timeline, hands it to the fold, and keeps
+   * `deepest`.
    *
-   * This has to walk the same rows a later recomputation over the stored chunks would walk, or the
-   * cached ledger stops being a cache and becomes a second opinion. Two rows stamped in the same
-   * millisecond are one instant to the join, so the second replaces the first here rather than
-   * accumulating beside it.
+   * The row has to be the row a recomputation over the stored chunks would pair for this instant,
+   * or the cached ledger stops being a cache and becomes a second opinion. That is why both halves
+   * come from `pairedWithin` at the bound the read side hands `pairSamples`, rather than from
+   * whatever each radio last said.
+   *
+   * `deepest` is the instant the session reached its lowest state of charge. The ledger carries that
+   * depth but not when it was touched, so no recomputation recovers the mark and the recorder keeps
+   * it as it goes.
    */
   private foldRow(session: OpenSession, at: number): void {
     const row: PairedSample = {
@@ -722,25 +712,7 @@ export class SessionRecorder {
       pack: pairedWithin(session.heldPack, at),
       solar: pairedWithin(session.heldSolar, at),
     }
-    const previous = session.lastPaired
-
-    if (previous !== null && previous.at === at) {
-      session.ledger = mergeLedgers(session.ledgerBeforeLastRow, ledgerOfSample(row))
-    } else {
-      const upToRow =
-        previous === null ? EMPTY_LEDGER : mergeLedgers(session.ledger, ledgerOfInterval(previous, row))
-      if (previous !== null) {
-        session.coverage = appendCoverage(
-          session.coverage,
-          previous.at,
-          at,
-          classifyInterval(previous, row),
-        )
-      }
-      session.ledgerBeforeLastRow = upToRow
-      session.ledger = mergeLedgers(upToRow, ledgerOfSample(row))
-    }
-    session.lastPaired = row
+    session.account = pushSample(session.account, row)
 
     const pack = row.pack
     if (pack !== null && (session.deepest === null || pack.stateOfCharge < session.deepest.stateOfCharge)) {
@@ -901,8 +873,8 @@ export class SessionRecorder {
       packChunks: session.packChunks,
       solarChunks: session.solarChunks,
       droppedChunks: session.droppedChunks,
-      coverage: session.coverage,
-      ledger: session.ledger,
+      coverage: session.account.coverage,
+      ledger: session.account.ledger,
       entries: session.entries,
       packDeviceKey: session.packDeviceKey,
       solarDeviceKey: session.solarDeviceKey,

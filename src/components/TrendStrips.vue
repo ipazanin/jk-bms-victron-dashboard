@@ -15,10 +15,11 @@
  * A tick that passed with no sample is drawn as a hole. A straight line across a three-minute BLE
  * stall asserts a reading nobody took, which is the one thing a trend must not do.
  */
-import { computed, onScopeDispose, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { clockTime, watts, wattsSigned } from '../application/format'
 import type { TrendPoint } from '../application/telemetry'
+import { useMeasuredWidth } from '../application/useMeasuredWidth'
 import { bandPath, linearScale, maxMagnitudeOf, positionOn, tracePath } from '../domain/history/geometry'
 import type { BandPoint, LinearScale, TracePoint } from '../domain/history/geometry'
 import { MAX_SAMPLE_GAP_MS } from '../domain/history/join'
@@ -31,8 +32,6 @@ const STRIP_HEIGHT = 46
 const GUTTER = 46
 /** A hairline of padding at both edges, so a trace at full band is drawn rather than half-clipped. */
 const INSET = 1
-/** Only ever the first frame's width: the observer answers before anything is painted twice. */
-const FALLBACK_WIDTH = 640
 
 /**
  * Signed pack power, multiplied out of the two raw columns at read time rather than kept as a third.
@@ -50,22 +49,7 @@ function packPowerOf(point: TrendPoint): number {
  * so a slope carried no meaning across breakpoints and the stroke width stretched with the box.
  */
 const plot = ref<Element | null>(null)
-const plotWidth = ref(FALLBACK_WIDTH)
-let observer: ResizeObserver | null = null
-
-watch(plot, (element) => {
-  observer?.disconnect()
-  observer = null
-  if (element === null || typeof ResizeObserver === 'undefined') return
-
-  observer = new ResizeObserver((entries) => {
-    const measured = entries[0]?.contentRect.width ?? 0
-    if (measured > 0) plotWidth.value = Math.round(measured)
-  })
-  observer.observe(element)
-})
-
-onScopeDispose(() => observer?.disconnect())
+const plotWidth = useMeasuredWidth(plot)
 
 const hasSolar = computed(() => props.history.some((point) => point.pvPower !== null))
 const hasHouse = computed(() => props.history.some((point) => point.housePower !== null))

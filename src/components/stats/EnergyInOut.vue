@@ -11,10 +11,11 @@
  * Out is exact; in is solar amp-hours valued at the pack's voltage, so the caption says "estimated"
  * whenever the estimate is on rather than letting a derived figure pass for a measured one.
  */
-import { computed, onScopeDispose, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 
 import type { BucketUnit, EnergyBucket } from '../../application/history/statsRange'
 import { hashOf } from '../../application/route'
+import { useMeasuredWidth } from '../../application/useMeasuredWidth'
 import { extentOf, linearScale, maxMagnitudeOf, positionOn, signedAxis } from '../../domain/history/geometry'
 
 const props = defineProps<{
@@ -34,7 +35,6 @@ const BAR_MAX = 22
 const SURFACE_GAP = 2
 const PAIR_GAP = 2
 const CORNER = 4
-const FALLBACK_WIDTH = 640
 /** Two bars per slot need more room than one, so the month scrolls sooner than the single-series bars. */
 const COLUMN_MIN_PX = 26
 const KWH_THRESHOLD_WH = 1000
@@ -43,22 +43,7 @@ const DAY_MS = 86_400_000
 const logHref = hashOf({ name: 'log' })
 
 const plot = ref<Element | null>(null)
-const plotWidth = ref(FALLBACK_WIDTH)
-let observer: ResizeObserver | null = null
-
-watch(plot, (element) => {
-  observer?.disconnect()
-  observer = null
-  if (element === null || typeof ResizeObserver === 'undefined') return
-
-  observer = new ResizeObserver((entries) => {
-    const measured = entries[0]?.contentRect.width ?? 0
-    if (measured > 0) plotWidth.value = Math.round(measured)
-  })
-  observer.observe(element)
-})
-
-onScopeDispose(() => observer?.disconnect())
+const plotWidth = useMeasuredWidth(plot)
 
 const count = computed(() => props.buckets.length)
 const recordedCount = computed(() => props.buckets.filter((bucket) => bucket.recorded).length)

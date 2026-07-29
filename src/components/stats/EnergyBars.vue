@@ -12,11 +12,12 @@
  * with no session is absent rather than a fabricated zero column, so a column is always a day that
  * really happened and adjacent columns need not be calendar-adjacent.
  */
-import { computed, onScopeDispose, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 
-import { ampHours, hours, kilowattHours } from '../../application/format'
+import { ampHours, ampHoursSigned, hours, kilowattHours } from '../../application/format'
 import type { DailyTotal } from '../../application/history/daily'
 import { hashOf } from '../../application/route'
+import { useMeasuredWidth } from '../../application/useMeasuredWidth'
 import {
   centredAxis,
   extentOf,
@@ -38,7 +39,6 @@ const GUTTER = 46
 const INSET = 1
 const PANEL_H = 64
 const XLABEL_H = 20
-const FALLBACK_WIDTH = 640
 /** Cap the bar; the leftover in the slot is the 2px surface gap, never filled. */
 const BAR_MAX = 24
 const SURFACE_GAP = 2
@@ -53,22 +53,7 @@ const KWH_THRESHOLD_WH = 1000
 const logHref = hashOf({ name: 'log' })
 
 const plot = ref<Element | null>(null)
-const plotWidth = ref(FALLBACK_WIDTH)
-let observer: ResizeObserver | null = null
-
-watch(plot, (element) => {
-  observer?.disconnect()
-  observer = null
-  if (element === null || typeof ResizeObserver === 'undefined') return
-
-  observer = new ResizeObserver((entries) => {
-    const measured = entries[0]?.contentRect.width ?? 0
-    if (measured > 0) plotWidth.value = Math.round(measured)
-  })
-  observer.observe(element)
-})
-
-onScopeDispose(() => observer?.disconnect())
+const plotWidth = useMeasuredWidth(plot)
 
 const dayCount = computed(() => props.days.length)
 
@@ -167,13 +152,13 @@ const panels = computed<PanelView[]>(() => {
 
   const buildCaps = (
     scale: LinearScale,
-    value: (day: DailyTotal) => number,
-    format: (value: number) => string,
+    pick: (day: DailyTotal) => number,
+    format: (raw: number) => string,
     peakIndex: number,
   ): Cap[] => {
     const baselineY = positionOn(scale, 0)
     return slots.map((slot) => {
-      const raw = value(days[slot.index])
+      const raw = pick(days[slot.index])
       const tipY = positionOn(scale, raw)
       const path = columnPath(slot.cx, baselineY, tipY, barWidth)
       const wanted = labelAll || slot.index === peakIndex
@@ -196,8 +181,8 @@ const panels = computed<PanelView[]>(() => {
       baselineY: positionOn(solarScale, 0),
       topTick: { y: 9, text: ampHours(solarAxis.high, 0) },
       zeroTick: { y: positionOn(solarScale, 0), text: '0' },
-      botTick: tickBelow(solarAxis, (value) => ampHours(value, 0)),
-      caps: buildCaps(solarScale, (day) => day.solarAh, (value) => ampHours(value, 0), solarPeak),
+      botTick: tickBelow(solarAxis, (solarAh) => ampHours(solarAh, 0)),
+      caps: buildCaps(solarScale, (day) => day.solarAh, (solarAh) => ampHours(solarAh, 0), solarPeak),
     },
     {
       key: 'house',
@@ -216,10 +201,10 @@ const panels = computed<PanelView[]>(() => {
       unit: 'Ah',
       aria: `Net through the pack per day, ${rangeWord.value}, signed amp-hours; charge up, discharge down`,
       baselineY: positionOn(packScale, 0),
-      topTick: { y: 9, text: signedAh(packAxis.high) },
+      topTick: { y: 9, text: ampHoursSigned(packAxis.high, 0) },
       zeroTick: { y: positionOn(packScale, 0), text: '0' },
-      botTick: { y: PANEL_H - 3, text: signedAh(packAxis.low) },
-      caps: buildCaps(packScale, (day) => day.packAh, signedAh, packPeak),
+      botTick: { y: PANEL_H - 3, text: ampHoursSigned(packAxis.low, 0) },
+      caps: buildCaps(packScale, (day) => day.packAh, (packAh) => ampHoursSigned(packAh, 0), packPeak),
     },
   ]
 })
@@ -241,7 +226,7 @@ const active = computed(() => {
     when: tooltipDayFmt.format(day.day),
     solar: ampHours(day.solarAh, 0),
     house: houseLabel(day.houseWh),
-    pack: signedAh(day.packAh),
+    pack: ampHoursSigned(day.packAh, 0),
   }
 })
 
@@ -310,7 +295,7 @@ const tableRows = computed(() =>
     sessions: day.sessions,
     solar: ampHours(day.solarAh, 0),
     house: houseLabel(day.houseWh),
-    pack: signedAh(day.packAh),
+    pack: ampHoursSigned(day.packAh, 0),
     deepest: day.deepestSoc === null ? '—' : `${day.deepestSoc}%`,
   })),
 )
@@ -337,14 +322,6 @@ function houseLabel(wh: number): string {
   }
   const rounded = Math.round(wh)
   return `${rounded === 0 ? 0 : rounded} Wh`
-}
-
-/** Signed amp-hours with the sign decided after rounding, so a day that folds to zero carries no
- *  direction and is never drawn as '−0 Ah'. */
-function signedAh(value: number, digits = 0): string {
-  const rounded = Number(value.toFixed(digits))
-  const sign = rounded > 0 ? '+' : rounded < 0 ? '−' : ''
-  return `${sign}${Math.abs(rounded).toFixed(digits)} Ah`
 }
 
 // ── geometry helpers ────────────────────────────────────────────────────────
@@ -378,7 +355,7 @@ function labelYFor(tipY: number, baselineY: number): number {
   return Math.min(PANEL_H - 3, Math.max(8, above))
 }
 
-function tickBelow(axis: { low: number }, format: (value: number) => string): Tick | null {
+function tickBelow(axis: { low: number }, format: (raw: number) => string): Tick | null {
   return axis.low < 0 ? { y: PANEL_H - 3, text: format(axis.low) } : null
 }
 

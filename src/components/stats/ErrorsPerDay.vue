@@ -11,9 +11,10 @@
  * decode a blank grid for the good news; instead the card says it plainly, in the good-status green
  * that is legitimate here because it is a labelled state, not a data series.
  */
-import { computed, onScopeDispose, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 
 import type { DailyErrors, RangeKind } from '../../application/history/statsRange'
+import { useMeasuredWidth } from '../../application/useMeasuredWidth'
 import { extentOf, linearScale, positionOn, signedAxis } from '../../domain/history/geometry'
 import type { WarningLevel } from '../../domain/history/types'
 
@@ -37,8 +38,6 @@ const CAP_RADIUS = 4
 const SEGMENT_INSET = 1
 /** Keeps every month column at least this wide inside its own scroll box. */
 const COLUMN_MIN_PX = 14
-/** Only ever the first frame's width: the observer answers before anything is painted twice. */
-const FALLBACK_WIDTH = 640
 
 /** bottom → top. The array order IS the stack order and is never re-sorted by count. */
 const LEVELS: readonly { readonly level: WarningLevel; readonly label: string }[] = [
@@ -55,22 +54,7 @@ const LEGEND = [...LEVELS].reverse()
  * scrolls inside its own box and the page body never moves.
  */
 const plot = ref<Element | null>(null)
-const plotWidth = ref(FALLBACK_WIDTH)
-let observer: ResizeObserver | null = null
-
-watch(plot, (element) => {
-  observer?.disconnect()
-  observer = null
-  if (element === null || typeof ResizeObserver === 'undefined') return
-
-  observer = new ResizeObserver((entries) => {
-    const measured = entries[0]?.contentRect.width ?? 0
-    if (measured > 0) plotWidth.value = Math.round(measured)
-  })
-  observer.observe(element)
-})
-
-onScopeDispose(() => observer?.disconnect())
+const plotWidth = useMeasuredWidth(plot)
 
 const dayCount = computed(() => props.days.length)
 const rangeTotal = computed(() => props.days.reduce((sum, day) => sum + day.total, 0))

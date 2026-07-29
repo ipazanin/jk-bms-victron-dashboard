@@ -20,6 +20,7 @@
  */
 import { computed, ref, useId } from 'vue'
 
+import { amps, clockTime, clockTimeWithSeconds, groupedCount } from '../../application/format'
 import { useMediaQuery } from '../../application/useMediaQuery'
 import { deriveHouse } from '../../domain/dcBus'
 import {
@@ -253,7 +254,7 @@ const clampSentence = computed(
 
 const summary = computed(() => {
   const parts = [
-    `Pack and solar current across ${spacedSpan(props.window.to - props.window.from)}, from ${clock(props.window.from)} to ${clock(props.window.to)}.`,
+    `Pack and solar current across ${spacedSpan(props.window.to - props.window.from)}, from ${clockTime(props.window.from)} to ${clockTime(props.window.to)}.`,
     `The axis reaches ${axis.value.high} amps either side of zero.`,
   ]
   if (withheldPresent.value) parts.push('Some of the session was charged from another source.')
@@ -319,15 +320,6 @@ function onStep(direction: -1 | 1): void {
   emit('scrub', next)
 }
 
-function clock(at: number): string {
-  const when = new Date(at)
-  return `${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}`
-}
-
-function clockSeconds(at: number): string {
-  return `${clock(at)}:${String(new Date(at).getSeconds()).padStart(2, '0')}`
-}
-
 /** `3 h 12 m`, `41 min`, `3 min 40 s` — the form that sits inside a sentence. */
 function spacedSpan(elapsedMs: number): string {
   if (elapsedMs < MS_PER_MINUTE) return `${Math.round(elapsedMs / 1000)} s`
@@ -341,18 +333,6 @@ function spacedSpan(elapsedMs: number): string {
   const minutes = Math.round((elapsedMs % MS_PER_HOUR) / MS_PER_MINUTE)
   if (days > 0) return `${days} d ${hours} h`
   return `${hours} h ${minutes} m`
-}
-
-/** Non-breaking spaces, so a sample count never wraps across the gap between its own digits. */
-function grouped(value: number): string {
-  return String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
-}
-
-/** The sign is decided after rounding, so a reading that rounds to zero carries no direction. */
-function signedAmps(current: number): string {
-  const rounded = Number(current.toFixed(1))
-  const sign = rounded > 0 ? '+' : rounded < 0 ? '−' : ''
-  return `${sign}${Math.abs(rounded).toFixed(1)} A`
 }
 </script>
 
@@ -451,7 +431,7 @@ function signedAmps(current: number): string {
               text-anchor="middle"
               class="tick-label"
             >
-              {{ clock(tick) }}
+              {{ clockTime(tick) }}
             </text>
           </g>
         </g>
@@ -476,11 +456,11 @@ function signedAmps(current: number): string {
         class="tooltip readout"
         :style="{ left: `${((cursorX ?? 0) / box.width) * 100}%` }"
       >
-        <p class="tip-time">{{ clockSeconds(tooltip.at) }}</p>
+        <p class="tip-time">{{ clockTimeWithSeconds(tooltip.at) }}</p>
         <p v-if="tooltip.silentFor">no samples — the BMS went quiet for {{ tooltip.silentFor }}</p>
         <template v-else>
-          <p><span class="tip-key">pack</span>{{ tooltip.pack === null ? '—' : signedAmps(tooltip.pack) }}</p>
-          <p><span class="tip-key">solar</span>{{ tooltip.solar === null ? '—' : signedAmps(tooltip.solar) }}</p>
+          <p><span class="tip-key">pack</span>{{ tooltip.pack === null ? '—' : amps(tooltip.pack) }}</p>
+          <p><span class="tip-key">solar</span>{{ tooltip.solar === null ? '—' : amps(tooltip.solar) }}</p>
           <p v-if="tooltip.house === null"><span class="tip-key">boat</span>—</p>
           <p v-else-if="!tooltip.house.plausible">
             <span class="tip-key">boat</span>— another source charging
@@ -505,7 +485,7 @@ function signedAmps(current: number): string {
     <p v-if="withheldPresent" class="copy">another source charging — boat load unavailable</p>
 
     <p class="copy caption">
-      Drawn from {{ grouped(timeline.length) }} samples, thinned to fit — the highest and lowest of
+      Drawn from {{ groupedCount(timeline.length) }} samples, thinned to fit — the highest and lowest of
       each bucket are kept, so spikes survive.
     </p>
 

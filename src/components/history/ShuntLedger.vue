@@ -20,6 +20,7 @@
  */
 import { computed, useId } from 'vue'
 
+import { ampHoursSigned } from '../../application/format'
 import { useMediaQuery } from '../../application/useMediaQuery'
 import {
   ledgerGeometry,
@@ -147,13 +148,6 @@ function flowWords(ampHours: number): string {
   return 'ended level'
 }
 
-/** The sign is decided after rounding, so a figure that rounds to zero carries no direction. */
-function signedAh(value: number, digits = 1): string {
-  const rounded = Number(value.toFixed(digits))
-  const sign = rounded > 0 ? '+' : rounded < 0 ? '−' : ''
-  return `${sign}${Math.abs(rounded).toFixed(digits)} Ah`
-}
-
 function tickX(tick: number): number {
   return positionOn(geometry.value.scale, tick)
 }
@@ -215,7 +209,7 @@ function tickX(tick: number): number {
         />
         <text :x="8" :y="box.packY + 5" class="row-label">PACK</text>
         <text :x="valueX" :y="box.packY + 5" text-anchor="end" class="value pack-ink">
-          {{ signedAh(shown.packAh) }}
+          {{ ampHoursSigned(shown.packAh) }}
         </text>
 
         <template v-if="solarSeen">
@@ -229,7 +223,7 @@ function tickX(tick: number): number {
           />
           <text :x="8" :y="box.solarY + 5" class="row-label">SOLAR</text>
           <text :x="valueX" :y="box.solarY + 5" text-anchor="end" class="value solar-ink">
-            {{ signedAh(ledger.solarAh) }}
+            {{ ampHoursSigned(ledger.solarAh) }}
           </text>
 
           <!-- Caps and rule, not a bar: the house figure is the distance between the two tips. -->

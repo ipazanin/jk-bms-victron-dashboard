@@ -11,6 +11,7 @@
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 
+import { groupedCount } from '../application/format'
 import type { RecorderState } from '../application/history/SessionRecorder'
 
 const props = defineProps<{
@@ -62,17 +63,12 @@ function stopwatch(elapsedMs: number): string {
   const seconds = total % SECONDS_PER_MINUTE
   return [hours, minutes, seconds].map((part) => String(part).padStart(2, '0')).join(':')
 }
-
-/** Non-breaking spaces, so a sample count never wraps across the gap between its own digits. */
-function grouped(value: number): string {
-  return String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
-}
 </script>
 
 <template>
   <p v-if="recording" class="plate-line readout">
     <span aria-hidden="true" class="mark">■</span>
-    <span>RECORDING · {{ elapsed }} · {{ grouped(samples) }} samples</span>
+    <span>RECORDING · {{ elapsed }} · {{ groupedCount(samples) }} samples</span>
   </p>
   <p v-else-if="!usable" class="plate-line copy">
     NOT RECORDING — this browser will not keep a log.

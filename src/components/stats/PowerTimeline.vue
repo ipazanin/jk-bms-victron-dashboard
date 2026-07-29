@@ -14,10 +14,11 @@
  * outright. A null breaks the trace and the fill rather than bridging it, and the gap is drawn on the
  * zero line as a dashed hole — a straight line across a stall would assert a reading nobody took.
  */
-import { computed, onScopeDispose, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { clockTime, watts, wattsSigned } from '../../application/format'
 import type { PowerTracks } from '../../application/history/statsRange'
+import { useMeasuredWidth } from '../../application/useMeasuredWidth'
 import {
   bandPath,
   centredAxis,
@@ -43,8 +44,6 @@ const STRIP_HEIGHT = 46
 const GUTTER = 46
 /** A hairline of padding at both edges, so a trace at full band is drawn rather than half-clipped. */
 const INSET = 1
-/** Only ever the first frame's width: the observer answers before anything is painted twice. */
-const FALLBACK_WIDTH = 640
 /** The newest columns the table prints in full, untouched. */
 const TABLE_ROWS = 40
 
@@ -54,22 +53,7 @@ const TABLE_ROWS = 40
  * `vector-effect: non-scaling-stroke` so 2px stays 2px whatever the box.
  */
 const plot = ref<Element | null>(null)
-const plotWidth = ref(FALLBACK_WIDTH)
-let observer: ResizeObserver | null = null
-
-watch(plot, (element) => {
-  observer?.disconnect()
-  observer = null
-  if (element === null || typeof ResizeObserver === 'undefined') return
-
-  observer = new ResizeObserver((entries) => {
-    const measured = entries[0]?.contentRect.width ?? 0
-    if (measured > 0) plotWidth.value = Math.round(measured)
-  })
-  observer.observe(element)
-})
-
-onScopeDispose(() => observer?.disconnect())
+const plotWidth = useMeasuredWidth(plot)
 
 /** Nothing plausible landed, or nothing has been read yet — the strips are hidden either way. */
 const ready = computed(() => props.tracks !== null && !props.tracks.empty)

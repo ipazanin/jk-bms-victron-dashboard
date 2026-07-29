@@ -17,6 +17,7 @@
  */
 import { computed, ref } from 'vue'
 
+import { clockTime } from '../../application/format'
 import { useMediaQuery } from '../../application/useMediaQuery'
 import { coverageSegments, linearScale } from '../../domain/history/geometry'
 import type { CoverageClass, CoverageRun, TimeWindow } from '../../domain/history/types'
@@ -192,11 +193,6 @@ function nudge(direction: -1 | 1): void {
   emit('select', { from, to: from + width })
 }
 
-function clock(at: number): string {
-  const when = new Date(at)
-  return `${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}`
-}
-
 /** `9h51m`, `41m` — the tightest form, for a legend that has to fit five entries on a phone. */
 function compactSpan(elapsedMs: number): string {
   const minutes = Math.round(elapsedMs / MS_PER_MINUTE)
@@ -219,8 +215,8 @@ function spacedSpan(elapsedMs: number): string {
     <header class="head">
       <h2 class="plate">Coverage</h2>
       <p class="readout ends">
-        <span>{{ clock(window.from) }}</span>
-        <span>{{ clock(window.to) }}</span>
+        <span>{{ clockTime(window.from) }}</span>
+        <span>{{ clockTime(window.to) }}</span>
       </p>
     </header>
 

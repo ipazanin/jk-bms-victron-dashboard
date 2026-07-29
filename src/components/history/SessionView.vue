@@ -20,6 +20,7 @@ import SessionRibbon from './SessionRibbon.vue'
 import ShuntLedger from './ShuntLedger.vue'
 import ShuntAmmeter from '../ShuntAmmeter.vue'
 import StatusChip from '../StatusChip.vue'
+import { ampHoursSigned, clockTime, clockTimeWithSeconds, groupedCount } from '../../application/format'
 import { useHistoryBrowser } from '../../application/history/historyBrowser'
 import { hashOf, navigate, route } from '../../application/route'
 import { useMediaQuery } from '../../application/useMediaQuery'
@@ -126,7 +127,7 @@ const brushedMs = computed(() => {
 const ledgerHeading = computed(() => {
   const window = selection.value
   if (window === null) return 'Session ledger'
-  return `Ledger · ${clock(window.from)} → ${clock(window.to)}`
+  return `Ledger · ${clockTime(window.from)} → ${clockTime(window.to)}`
 })
 
 /** How long the pack took more than the panels gave. Null when it never did, which is the only
@@ -224,13 +225,13 @@ const tableCaption = computed(() => {
   if (rows === 0) return '— no samples —'
   const first = tableStart.value + 1
   const last = Math.min(rows, tableStart.value + TABLE_PAGE_ROWS)
-  return `Rows ${grouped(first)}–${grouped(last)} of ${grouped(rows)}, oldest first`
+  return `Rows ${groupedCount(first)}–${groupedCount(last)} of ${groupedCount(rows)}, oldest first`
 })
 
 const exportNote = computed(() => {
   const size = exportSize.value
   if (size === null) return ''
-  return `Every sample exactly as the radios reported it. ${grouped(size.rows)} rows, about ${(size.bytes / BYTES_PER_MB).toFixed(1)} MB.`
+  return `Every sample exactly as the radios reported it. ${groupedCount(size.rows)} rows, about ${(size.bytes / BYTES_PER_MB).toFixed(1)} MB.`
 })
 
 function onScrub(at: number | null): void {
@@ -315,15 +316,6 @@ function dayWords(at: number): string {
   })
 }
 
-function clock(at: number): string {
-  const when = new Date(at)
-  return `${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}`
-}
-
-function clockSeconds(at: number): string {
-  return `${clock(at)}:${String(new Date(at).getSeconds()).padStart(2, '0')}`
-}
-
 /** `12 h 24 m`, `41 min`, `8 m` — the form that sits inside a sentence. */
 function spacedSpan(elapsedMs: number): string {
   if (elapsedMs < MS_PER_MINUTE) return `${Math.round(elapsedMs / MS_PER_SECOND)} s`
@@ -342,18 +334,6 @@ function tightSpan(elapsedMs: number): string {
   if (hours === 0) return `${minutes}m`
   return `${hours}h ${String(minutes % 60).padStart(2, '0')}m`
 }
-
-/** The sign is decided after rounding, so a figure that rounds to zero carries no direction. */
-function signedAh(value: number, digits = 1): string {
-  const rounded = Number(value.toFixed(digits))
-  const sign = rounded > 0 ? '+' : rounded < 0 ? '−' : ''
-  return `${sign}${Math.abs(rounded).toFixed(digits)} Ah`
-}
-
-/** Non-breaking spaces, so a row count never wraps across the gap between its own digits. */
-function grouped(value: number): string {
-  return String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
-}
 </script>
 
 <template>
@@ -364,11 +344,11 @@ function grouped(value: number): string {
       <template v-if="loaded && record && sessionWindow">
         <h2 class="title">
           {{ loaded.label }} · {{ dayWords(record.startedAt) }} ·
-          {{ clock(sessionWindow.from) }} → {{ clock(sessionWindow.to) }} ·
+          {{ clockTime(sessionWindow.from) }} → {{ clockTime(sessionWindow.to) }} ·
           {{ tightSpan(sessionMs) }}
         </h2>
         <p class="readout facts">
-          {{ grouped(totalSamples) }} samples at 1 Hz ·
+          {{ groupedCount(totalSamples) }} samples at 1 Hz ·
           {{ silences.count }} {{ silences.count === 1 ? 'gap' : 'gaps' }} totalling
           {{ spacedSpan(silences.total) }}<template v-if="identityLine"> · {{ identityLine }}</template>
         </p>
@@ -400,7 +380,7 @@ function grouped(value: number): string {
 
       <div v-if="confirmingDelete && record" class="confirm">
         <p class="copy">
-          Delete this session? {{ spacedSpan(sessionMs) }}, {{ grouped(totalSamples) }} samples.
+          Delete this session? {{ spacedSpan(sessionMs) }}, {{ groupedCount(totalSamples) }} samples.
           This cannot be undone.
         </p>
         <button type="button" class="action danger" @click="remove()">Delete</button>
@@ -446,9 +426,9 @@ function grouped(value: number): string {
           <span class="plate">Charge cross-check</span>
           <span class="muted">over the whole {{ spacedSpan(sessionMs) }}, not the counted window</span>
           <span class="readout numbers">
-            integrated {{ signedAh(crossCheck.integrated) }} · BMS counted
+            integrated {{ ampHoursSigned(crossCheck.integrated) }} · BMS counted
             {{ crossCheck.first.toFixed(1) }} → {{ crossCheck.last.toFixed(1) }} Ah =
-            {{ signedAh(crossCheck.counted) }} · Δ {{ Math.abs(crossCheck.delta).toFixed(1) }} Ah
+            {{ ampHoursSigned(crossCheck.counted) }} · Δ {{ Math.abs(crossCheck.delta).toFixed(1) }} Ah
           </span>
           <StatusChip
             :level="crossCheck.agree ? 'good' : 'warning'"
@@ -487,7 +467,7 @@ function grouped(value: number): string {
         <header class="band-head">
           <h3 class="plate">
             <template v-if="activeAt === null">At —</template>
-            <template v-else>At {{ clockSeconds(activeAt) }}</template>
+            <template v-else>At {{ clockTimeWithSeconds(activeAt) }}</template>
           </h3>
           <p v-if="cursorAt === null && activeAt !== null" class="muted">
             the deepest point of the session. Move across the ribbon to pick a moment.
@@ -542,7 +522,7 @@ function grouped(value: number): string {
               </thead>
               <tbody>
                 <tr v-for="row in tableRows" :key="row.at">
-                  <td>{{ clockSeconds(row.at) }}</td>
+                  <td>{{ clockTimeWithSeconds(row.at) }}</td>
                   <td>{{ row.packA }}</td>
                   <td>{{ row.solarA }}</td>
                   <td>{{ row.houseA }}</td>

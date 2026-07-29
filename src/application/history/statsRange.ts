@@ -13,7 +13,7 @@
  * drawn as a break rather than a line pretending a reading was taken.
  */
 
-import { maxMagnitudeOf } from '../../domain/history/geometry'
+import { higherOf, lowerOf, maxMagnitudeOf } from '../../domain/history/geometry'
 import type { PairedSample } from '../../domain/history/join'
 import { MAX_PAIRING_AGE_MS, MAX_SAMPLE_GAP_MS, pairSamples, solarCurrentOf } from '../../domain/history/join'
 import type {
@@ -616,16 +616,4 @@ function overlapsAnyGap(start: number, end: number, gaps: readonly TimeWindow[])
 
 function everyNull(values: readonly (number | null)[]): boolean {
   return values.every((value) => value === null)
-}
-
-function lowerOf(current: number | null, next: number | null): number | null {
-  if (next === null) return current
-  if (current === null) return next
-  return Math.min(current, next)
-}
-
-function higherOf(current: number | null, next: number | null): number | null {
-  if (next === null) return current
-  if (current === null) return next
-  return Math.max(current, next)
 }

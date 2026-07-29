@@ -3,15 +3,19 @@ import { describe, expect, it } from 'vitest'
 import { MAX_PAIRING_AGE_MS, MAX_SAMPLE_GAP_MS, pairSamples } from '../src/domain/history/join'
 import type { PairedSample } from '../src/domain/history/join'
 import {
+  EMPTY_FOLD,
   EMPTY_LEDGER,
   appendCoverage,
   classifyInterval,
   foldAccount,
   ledgerOfInterval,
+  ledgerOfSample,
   mergeLedgers,
+  pushSample,
   recomputeAccount,
   recomputeLedger,
 } from '../src/domain/history/ledger'
+import type { AccountFold, SessionAccount } from '../src/domain/history/ledger'
 import { decodePackChunk, decodeSolarChunk } from '../src/domain/history/columns'
 import type { CoverageRun, PackSample, SessionLedger, SolarSample } from '../src/domain/history/types'
 import storedSession from './fixtures/storedSession.json'
@@ -316,6 +320,29 @@ describe('the fold and the rescan', () => {
     return { pack, solar }
   }
 
+  /**
+   * The same account stated a second way: a plain walk over the rows, composing the per-row and
+   * per-interval pieces by hand. It exists so the fold has something to be checked against that is
+   * not itself — `foldAccount` is a reduce over `pushSample`, so comparing those two compares the
+   * fold to a copy of itself and would pass however wrong both were.
+   */
+  function accountByWalking(rows: readonly PairedSample[]): SessionAccount {
+    let account = EMPTY_LEDGER
+    let coverage: readonly CoverageRun[] = []
+
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index]
+      if (index > 0) {
+        const previous = rows[index - 1]
+        account = mergeLedgers(account, ledgerOfInterval(previous, row))
+        coverage = appendCoverage(coverage, previous.at, row.at, classifyInterval(previous, row))
+      }
+      account = mergeLedgers(account, ledgerOfSample(row))
+    }
+
+    return { ledger: account, coverage }
+  }
+
   it('survives the wire scales, so the stored account is the recorded one', () => {
     const { pack, solar } = watch()
     const live = foldAccount(pairSamples(pack, solar, MAX_PAIRING_AGE_MS)).ledger
@@ -362,6 +389,96 @@ describe('the fold and the rescan', () => {
   it('has nothing to say about a session with no samples', () => {
     expect(foldAccount([])).toEqual({ ledger: EMPTY_LEDGER, coverage: [] })
     expect(recomputeLedger([], [], MAX_PAIRING_AGE_MS)).toEqual(EMPTY_LEDGER)
+  })
+
+  it('reaches the same account one sample at a time as a plainly written walk does', () => {
+    // The recorder never sees the whole session: it pushes each row as the radios report it. This
+    // is the entry point it uses, checked against an account composed independently of it.
+    const { pack, solar } = watch()
+    const rows = pairSamples(pack, solar, MAX_PAIRING_AGE_MS)
+
+    const stepwise = rows.reduce((account, row) => {
+      return pushSample(account, row)
+    }, EMPTY_FOLD)
+
+    expect({ ledger: stepwise.ledger, coverage: stepwise.coverage }).toEqual(accountByWalking(rows))
+  })
+
+  it('takes a lone row as readings to bound with, and no span to integrate', () => {
+    // The first row of a session has nothing behind it, so it opens the account without moving any
+    // charge into it. A fold that integrated from one row would invent a span the radios never
+    // reported over.
+    const only = instant(SAMPLE_EPOCH, { currentA: -8, stateOfCharge: 71 }, { pvPowerW: 151 })
+
+    const opened = pushSample(EMPTY_FOLD, only)
+
+    expect(opened.ledger.countedMs).toBe(0)
+    expect(opened.ledger.foreignMs).toBe(0)
+    expect(opened.ledger.packAh).toBe(0)
+    expect(opened.ledger.packAhWholeSession).toBe(0)
+    expect(opened.ledger.stateOfChargeFirst).toBe(71)
+    expect(opened.ledger.stateOfChargeMin).toBe(71)
+    expect(opened.ledger.pvPowerPeakW).toBe(151)
+    expect(opened.coverage).toEqual([])
+    expect(opened.lastPaired).toBe(only)
+  })
+
+  it('carries a seeded account forward rather than starting its ledger over', () => {
+    // A fold with no last row has no interval to integrate and no span to classify, so a stored
+    // account's figures and its tape both survive being seeded in — the ledger is carried, not
+    // reset. The seam itself is not recovered: the second between the stored run's end and this row
+    // is charge and time the account never sees, because the row it would be measured against was
+    // not stored with it. The tape says as much, in that no run is opened across the seam, so
+    // nothing on it claims to cover a span the figures never integrated.
+    const stored: AccountFold = {
+      ledger: ledger({ countedMs: 4_000, packAh: -3, solarAh: 8, stateOfChargeFirst: 90, stateOfChargeMin: 88 }),
+      coverage: [{ from: SAMPLE_EPOCH - 4_000, to: SAMPLE_EPOCH, kind: 'both' }],
+      lastPaired: null,
+    }
+
+    const continued = pushSample(
+      stored,
+      instant(SAMPLE_EPOCH + 1_000, { currentA: -8, stateOfCharge: 71 }, { pvPowerW: 151 }),
+    )
+
+    expect(continued.ledger.countedMs).toBe(4_000)
+    expect(continued.ledger.packAh).toBe(-3)
+    expect(continued.ledger.solarAh).toBe(8)
+    expect(continued.ledger.stateOfChargeFirst).toBe(90)
+    expect(continued.ledger.stateOfChargeMin).toBe(71)
+    expect(continued.coverage).toEqual(stored.coverage)
+  })
+
+  it('takes two rows stamped at the same instant as two readings and no span between them', () => {
+    // What the recorder meets when both radios report inside one tick: the pack row lands paired
+    // with the advertisement still held from a second earlier at 168 W, then the fresh
+    // advertisement lands in the same millisecond at 151 W. No time passed between the two rows, so
+    // there is nothing to integrate and no span for a coverage run to describe — and both rows'
+    // readings stay in the account rather than the later one replacing the earlier. That is safe
+    // because `ledgerOfSample` carries no time and no integral: a second reading at one instant can
+    // only widen the bounds, never move charge twice. The join drains such rows into one before a
+    // rescan gets here, so only the incremental path ever sees two.
+    const at = SAMPLE_EPOCH
+    const heldPack = packSample({ at, currentA: -8, stateOfCharge: 71 })
+    const packLands: PairedSample = {
+      at,
+      pack: heldPack,
+      solar: solarSample({ at: at - 1_000, pvPowerW: 168 }),
+    }
+    const solarLands: PairedSample = { at, pack: heldPack, solar: solarSample({ at, pvPowerW: 151 }) }
+
+    const folded = pushSample(pushSample(EMPTY_FOLD, packLands), solarLands)
+
+    expect(folded.ledger.countedMs).toBe(0)
+    expect(folded.ledger.foreignMs).toBe(0)
+    expect(folded.ledger.packAh).toBe(0)
+    expect(folded.ledger.packAhWholeSession).toBe(0)
+    expect(folded.coverage).toEqual([])
+    // The peak the first row carried survives the second; the second row is what the next interval
+    // integrates from, so a stale held half cannot outlive the reading that replaced it.
+    expect(folded.ledger.pvPowerPeakW).toBe(168)
+    expect(folded.ledger.stateOfChargeMin).toBe(71)
+    expect(folded.lastPaired).toBe(solarLands)
   })
 })
 
