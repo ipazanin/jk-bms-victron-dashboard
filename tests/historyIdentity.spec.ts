@@ -15,15 +15,8 @@ import {
 } from '../src/domain/history/identity'
 import { readAdvertisementModelId } from '../src/domain/solar/advertisement'
 import fixtures from './fixtures.json'
+import { hexToBytes } from './support/bytes'
 import { deviceRecord } from './support/samples'
-
-function bytes(hex: string): Uint8Array {
-  const out = new Uint8Array(hex.length / 2)
-  for (let index = 0; index < out.length; index += 1) {
-    out[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16)
-  }
-  return out
-}
 
 /**
  * The pack is named from the real captured device-info frame, whose serial `DEMO00000000001` is a
@@ -32,7 +25,7 @@ function bytes(hex: string): Uint8Array {
  * pack reads the way it does.
  */
 describe('naming the pack', () => {
-  const captured = decodeDeviceInfo(bytes(fixtures.bmsDeviceInfoHex))
+  const captured = decodeDeviceInfo(hexToBytes(fixtures.bmsDeviceInfoHex))
 
   it('keys on the serial, which is the only stable join key the hardware gives', () => {
     expect(packDeviceKeyFor(captured, 'JK-B2A8S20P')).toBe('jk:DEMO00000000001')
@@ -104,7 +97,7 @@ describe('naming the controller', () => {
   it('labels the controller with the model id the advertisement carries in plain sight', () => {
     // Printed rather than translated: Victron does not publish the mapping, and a guessed product
     // name would be the one part of the label a reader trusts.
-    const modelId = readAdvertisementModelId(bytes(fixtures.victron.payloadHex))
+    const modelId = readAdvertisementModelId(hexToBytes(fixtures.victron.payloadHex))
 
     expect(modelId).toBe(0xa057)
     expect(solarDefaultLabel(modelId)).toBe('SmartSolar · 0xa057')

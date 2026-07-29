@@ -4,21 +4,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import fixtures from './fixtures.json'
+import { hexToBytes } from './support/bytes'
+import { holdDecrypt } from './support/pendingDecrypt'
+import { toArrayBuffer } from '../src/domain/bytes'
 import { VictronScanner } from '../src/infrastructure/ble/VictronScanner'
 import { VICTRON_COMPANY_ID } from '../src/domain/solar/types'
 
 // jsdom exposes no navigator.bluetooth, so we stub it with a real EventTarget whose
 // requestLEScan resolves to a live scan. WebCrypto is genuinely available under jsdom, so
 // decodeSolarAdvertisement runs for real against a captured payload — the async decrypt is
-// exactly the window the stop()/generation race exploits.
+// exactly the window the stop()/generation race exploits, which is why the race's own spec holds
+// that decrypt open rather than letting it settle whenever it likes.
 
-function bytes(hex: string): Uint8Array {
-  const out = new Uint8Array(hex.length / 2)
-  for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
-  return out
-}
-
-const payload = bytes(fixtures.victron.payloadHex)
+const payload = hexToBytes(fixtures.victron.payloadHex)
 const KEY = fixtures.victron.advertisementKey
 
 type ScanTarget = EventTarget & { requestLEScan: (options: unknown) => Promise<BluetoothLEScan> }
@@ -40,45 +38,67 @@ function advertisement(): Event {
   return event
 }
 
-async function flushDecrypt(): Promise<void> {
-  for (let i = 0; i < 10; i += 1) await Promise.resolve()
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  for (let i = 0; i < 10; i += 1) await Promise.resolve()
-}
-
 beforeEach(() => {
   installRadio()
 })
 
 afterEach(() => {
   vi.useRealTimers()
+  vi.restoreAllMocks()
   delete (navigator as { bluetooth?: unknown }).bluetooth
 })
 
 describe('VictronScanner decode lifecycle', () => {
   it('reports a decoded reading from the device holding the key', async () => {
     const readings: number[] = []
-    const scanner = new VictronScanner({ onReading: (reading) => readings.push(reading.pvPower ?? -1) })
+    const errors: Error[] = []
+    let foreignDeviceCount = 0
+    const decryptSpy = vi.spyOn(crypto.subtle, 'decrypt')
+    const scanner = new VictronScanner({
+      onReading: (reading) => readings.push(reading.pvPower ?? -1),
+      onForeignDevice: () => {
+        foreignDeviceCount += 1
+      },
+      onError: (error) => errors.push(error),
+    })
     await scanner.start(KEY)
 
     scanTarget.dispatchEvent(advertisement())
-    await flushDecrypt()
 
-    expect(readings).toHaveLength(1)
-    expect(readings[0]).toBe(fixtures.victron.expected.pvPower)
+    await vi.waitFor(() => expect(readings).toEqual([fixtures.victron.expected.pvPower]))
+    // waitFor resolves on the first poll that sees a reading, which is a waypoint. stop() turns it
+    // into an end state: the listener comes off and the processor drops any decode whose generation
+    // has moved on, so no second reading or foreign device can land for this advertisement.
+    scanner.stop()
+
+    // One advertisement in, one decrypt attempted. The payload reaches the decrypt synchronously,
+    // so a listener left on twice fails here whether or not its second decode has resolved yet.
+    expect(decryptSpy).toHaveBeenCalledTimes(1)
+    expect(readings).toEqual([fixtures.victron.expected.pvPower])
+    expect(foreignDeviceCount).toBe(0)
+    expect(errors).toEqual([])
   })
 
   it('drops a decode that completes after stop(), so a stale reading cannot resurrect live', async () => {
     const readings: unknown[] = []
-    const scanner = new VictronScanner({ onReading: (reading) => readings.push(reading) })
+    const errors: Error[] = []
+    const decrypt = holdDecrypt(toArrayBuffer(hexToBytes(fixtures.victron.plaintextHex)))
+    const scanner = new VictronScanner({
+      onReading: (reading) => readings.push(reading),
+      onError: (error) => errors.push(error),
+    })
     await scanner.start(KEY)
 
     scanTarget.dispatchEvent(advertisement())
     // Stop before the in-flight decrypt resolves — the generation it captured is now stale.
     scanner.stop()
-    await flushDecrypt()
+    await decrypt.complete()
 
-    expect(readings).toHaveLength(0)
+    // The payload reached the decrypt, so an empty reading list is the generation guard dropping a
+    // finished decode rather than a decode that never got that far; no error stands in for it either.
+    expect(decrypt.spy).toHaveBeenCalledTimes(1)
+    expect(readings).toEqual([])
+    expect(errors).toEqual([])
   })
 })
 

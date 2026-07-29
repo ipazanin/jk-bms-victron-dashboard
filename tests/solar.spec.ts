@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import fixtures from './fixtures.json'
+import { hexToBytes } from './support/bytes'
 import {
   decodeSolarAdvertisement,
   decryptRecord,
@@ -11,13 +12,7 @@ import {
   parseSolarRecord,
 } from '../src/domain/solar/advertisement'
 
-function bytes(hex: string): Uint8Array {
-  const out = new Uint8Array(hex.length / 2)
-  for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
-  return out
-}
-
-const payload = bytes(fixtures.victron.payloadHex)
+const payload = hexToBytes(fixtures.victron.payloadHex)
 const key = parseAdvertisementKey(fixtures.victron.advertisementKey)
 const expected = fixtures.victron.expected
 
