@@ -19,7 +19,13 @@ Usage:
   python capture.py scan                 # list nearby BLE devices, find the BMS + the Victron
   python capture.py bms [--address UUID] [--seconds 45]
   python capture.py solar [--seconds 60]
+  python capture.py combined [--seconds 180]        # both radios, paired instants
   python capture.py all                  # scan, then bms, then solar
+
+  python capture.py combined --detail-log 3         # also ask the pack for its stored ring
+
+The detail log is opt-in and combined-only. Take a run without it first: its logbook event count is
+the baseline that shows the request destroyed nothing.
 """
 
 import argparse
@@ -40,13 +46,22 @@ VICTRON_COMPANY_ID = 0x02E1
 CMD_DEVICE_INFO = 0x97
 CMD_CELL_INFO = 0x96
 CMD_LOGBOOK = 0xA1
+#: The stored detail log — the pack's own ring of sampled snapshots. Sent only under --detail-log,
+#: because its neighbours in the opcode space destroy data: 0xA3 erases everything the pack has
+#: stored and 0x9D restores factory settings. This opcode is documentation-derived and has never
+#: been answered by a real pack, so it stays opt-in until one has.
+CMD_DETAIL_LOG = 0xA7
+
+#: Mirrors READ_COMMANDS in src/domain/bms/protocol.ts. A command outside this set cannot be built,
+#: so no typo in a call site can reach a destructive opcode.
+READ_COMMANDS = frozenset({CMD_DEVICE_INFO, CMD_CELL_INFO, CMD_LOGBOOK, CMD_DETAIL_LOG})
 
 COMMAND_HEADER = bytes([0xAA, 0x55, 0x90, 0xEB])
 RESPONSE_HEADER = bytes([0x55, 0xAA, 0xEB, 0x90])
 FRAME_LENGTH = 300
 COMMAND_LENGTH = 20
 
-FRAME_NAMES = {0x01: "settings", 0x02: "cell-info", 0x03: "device-info", 0x05: "logbook"}
+FRAME_NAMES = {0x01: "settings", 0x02: "cell-info", 0x03: "device-info", 0x05: "logbook", 0x06: "detail-log"}
 
 OUT = Path(__file__).resolve().parent.parent / "captures"
 
@@ -57,6 +72,8 @@ def out_dir() -> Path:
 
 
 def build_command(command: int) -> bytes:
+    if command not in READ_COMMANDS:
+        raise ValueError(f"refusing to build non-read command 0x{command:02x}")
     frame = bytearray(COMMAND_LENGTH)
     frame[0:4] = COMMAND_HEADER
     frame[4] = command
@@ -292,9 +309,13 @@ async def capture_solar(seconds: float) -> None:
     print(f"captured {count} Victron advertisements -> {OUT / 'victron-adv.jsonl'}", file=sys.stderr)
 
 
-async def capture_combined(address: str | None, seconds: float) -> None:
+async def capture_combined(address: str | None, seconds: float, detail_log_requests: int = 0) -> None:
     """Both radios at once: a live GATT pack series and Victron advertisements, written incrementally
-    so a capture cut short when the boat's owner disconnects keeps everything that streamed."""
+    so a capture cut short when the boat's owner disconnects keeps everything that streamed.
+
+    `detail_log_requests` asks the pack for its stored detail log that many times. More than one
+    request is how the paging is settled: whether a bare 0xA7 dumps the whole ring, repeats the same
+    page, or expects a start index the command cannot currently carry."""
     out_dir()
     if address is None:
         jk, _ = await find_devices()
@@ -306,17 +327,32 @@ async def capture_combined(address: str | None, seconds: float) -> None:
 
     assembler = FrameAssembler()
     frames_log = (OUT / "bms-frames.jsonl").open("w")
+    raw_log = (OUT / "bms-raw-notifications.jsonl").open("w")
     solar_log = (OUT / "victron-adv.jsonl").open("w")
     latest: dict[int, bytes] = {}
     counts: dict[int, int] = {}
+    detail_frames: list[bytes] = []
     solar_count = 0
     start = time.time()
+    #: Raw notification bytes, not assembled frames. A burst the BLE module drops halfway and a command
+    #: the pack never answered both yield zero frames, and only the raw byte count tells them apart.
+    raw_bytes = 0
+    detail_window_from: float | None = None
 
     def on_notify(_handle, data: bytearray) -> None:
+        nonlocal raw_bytes
+        now = round(time.time() - start, 3)
+        raw_bytes += len(data)
+        raw_log.write(json.dumps({"t": now, "len": len(data), "hex": bytes(data).hex()}) + "\n")
+        raw_log.flush()
         for frame in assembler.feed(bytes(data)):
             ftype = frame[4]
             latest[ftype] = frame
             counts[ftype] = counts.get(ftype, 0) + 1
+            # Every detail-log frame is kept: the ring pages across many of them, and `latest` holds
+            # only the last of each type. The whole series is what the layout has to be read from.
+            if ftype == 0x06:
+                detail_frames.append(frame)
             frames_log.write(json.dumps({"t": round(time.time() - start, 3), "type": ftype, "hex": frame.hex()}) + "\n")
             frames_log.flush()
 
@@ -353,6 +389,20 @@ async def capture_combined(address: str | None, seconds: float) -> None:
         await asyncio.sleep(1.5)
         await send(CMD_CELL_INFO)
 
+        for attempt in range(detail_log_requests):
+            # The logbook lands first and is captured above, so the event count in this run's summary
+            # can be compared against the run before to show the detail-log request destroyed nothing.
+            await asyncio.sleep(5.0)
+            if detail_window_from is None:
+                detail_window_from = round(time.time() - start, 3)
+            before = raw_bytes
+            print(f"sending detail-log request {attempt + 1}/{detail_log_requests} (0x{CMD_DETAIL_LOG:02x})", file=sys.stderr)
+            await send(CMD_DETAIL_LOG)
+            # A previous attempt saw zero assembled frames here. Whether that was silence or a burst
+            # the module tore up is a question only the raw byte count answers, so report it per request.
+            await asyncio.sleep(25.0)
+            print(f"  raw bytes since that request: {raw_bytes - before}", file=sys.stderr)
+
         try:
             await asyncio.sleep(seconds)
         finally:
@@ -363,11 +413,13 @@ async def capture_combined(address: str | None, seconds: float) -> None:
                 pass
 
     frames_log.close()
+    raw_log.close()
     solar_log.close()
 
     summary = [
         f"paired capture {round(time.time() - start)}s",
         f"solar advertisements: {solar_count}",
+        f"raw notification bytes: {raw_bytes}",
         "frame counts: " + ", ".join(f"0x{t:02x} {FRAME_NAMES.get(t,'?')}={n}" for t, n in sorted(counts.items())),
     ]
     for ftype, frame in sorted(latest.items()):
@@ -376,6 +428,34 @@ async def capture_combined(address: str | None, seconds: float) -> None:
         summary.append(f"saved frames/{name}-0x{ftype:02x}.hex")
         if ftype == 0x05:
             summary.append(f"   logbook entries (best-effort): {len(decode_logbook(frame))}")
+
+    if detail_log_requests:
+        summary.append(f"detail-log requests sent: {detail_log_requests}")
+        summary.append(f"detail-log frames received: {len(detail_frames)}")
+        if detail_window_from is not None:
+            window = [json.loads(line) for line in (OUT / "bms-raw-notifications.jsonl").read_text().splitlines()]
+            after = [entry for entry in window if entry["t"] >= detail_window_from]
+            summary.append(
+                f"   raw notifications after the first request: {len(after)} "
+                f"totalling {sum(entry['len'] for entry in after)} bytes"
+            )
+            # Silence and a torn burst are the two ways this ends with no frames, and they need
+            # different fixes. Bytes arriving that never assembled is the tell for the second.
+            if after and not detail_frames:
+                summary.append("   bytes arrived but assembled no 0x06 frame — a dropped or malformed burst, not silence")
+            elif not after:
+                summary.append("   nothing arrived at all — the pack did not answer this opcode")
+        for position, frame in enumerate(detail_frames):
+            (OUT / "frames" / f"detail-log-{position:03d}.hex").write_text(frame.hex() + "\n")
+            # Byte 5 is a frame counter and bytes 6-7 a first-record index only in the vendor document.
+            # Printing all three raw is what lets the real paging be read off the run.
+            summary.append(
+                f"   frame {position:03d}: byte5=0x{frame[5]:02x} "
+                f"index={int.from_bytes(frame[6:8], 'little')} count={frame[8]}"
+            )
+        if not detail_frames:
+            summary.append("   nothing came back — the pack did not answer 0xA7 on this firmware")
+
     report = "\n".join(summary)
     print("\n" + report)
     (OUT / "bms-summary.txt").write_text(report + "\n")
@@ -386,7 +466,20 @@ async def main() -> None:
     parser.add_argument("mode", choices=["scan", "bms", "solar", "combined", "all"], nargs="?", default="all")
     parser.add_argument("--address", default=None, help="BMS CoreBluetooth address/UUID to skip discovery")
     parser.add_argument("--seconds", type=float, default=None, help="capture window")
+    parser.add_argument(
+        "--detail-log",
+        type=int,
+        nargs="?",
+        const=1,
+        default=0,
+        metavar="N",
+        help="combined mode only: ask the pack for its stored detail log N times (default 1). "
+        "Opt-in because the opcode is documentation-derived and its neighbours erase stored data.",
+    )
     args = parser.parse_args()
+
+    if args.detail_log and args.mode != "combined":
+        parser.error("--detail-log needs combined mode: it alone flushes every frame as it lands")
 
     if args.mode == "scan":
         await find_devices()
@@ -395,7 +488,7 @@ async def main() -> None:
     elif args.mode == "solar":
         await capture_solar(args.seconds or 60.0)
     elif args.mode == "combined":
-        await capture_combined(args.address, args.seconds or 180.0)
+        await capture_combined(args.address, args.seconds or 180.0, args.detail_log)
     else:
         await find_devices()
         await capture_bms(args.address, args.seconds or 45.0)
