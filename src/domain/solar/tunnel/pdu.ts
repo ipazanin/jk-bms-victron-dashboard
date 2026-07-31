@@ -37,7 +37,7 @@ import type { TunnelReading } from './TunnelReading'
  * different products; 0x03 is the one the SmartSolar register sweeps use. Replies report
  * whichever byte they carry rather than being checked against this.
  */
-export const TUNNEL_INTERFACE = 0x03
+const TUNNEL_INTERFACE = 0x03
 
 const OPCODE_OFFSET = 0
 const INTERFACE_OFFSET = 1
