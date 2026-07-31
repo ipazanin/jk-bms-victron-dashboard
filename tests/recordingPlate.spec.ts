@@ -74,6 +74,23 @@ describe('what the Bus view says about recording', () => {
     expect(text).not.toContain('samples')
   })
 
+  it('names a failed write rather than falling silent', () => {
+    // This plate is the only thing in the app that reads a recorder failure, so a branch missing
+    // here is not a gap in the copy — it is an archive that stopped accepting writes and said so
+    // nowhere. The session id and the sample count survive the failure and must not be read as
+    // recording.
+    const text = busViewShowing({
+      ...IDLE,
+      sessionId: 'session-3',
+      startedAt: Date.now() - 40_000,
+      packSamples: 38,
+      failure: 'quota-exhausted',
+    })
+
+    expect(text).toContain('NOT RECORDING — the log could not be written to.')
+    expect(text).not.toContain('samples')
+  })
+
   it('claims nothing at all when no session is open', () => {
     const text = busViewShowing(IDLE)
 
