@@ -5,6 +5,7 @@ import AnnunciatorStrip from '../AnnunciatorStrip.vue'
 import BreakerPanel from '../BreakerPanel.vue'
 import CellLadder from '../CellLadder.vue'
 import EnergyFlow from '../bus/EnergyFlow.vue'
+import RecordingPlate from '../RecordingPlate.vue'
 import RememberedBanner from '../RememberedBanner.vue'
 import ShuntAmmeter from '../ShuntAmmeter.vue'
 import SocCluster from '../SocCluster.vue'
@@ -40,6 +41,8 @@ const {
   history,
   rememberedAt,
   rememberedStatus,
+  recording,
+  archiveUsable,
 } = telemetry
 
 const log = useHistoryBrowser()
@@ -105,7 +108,9 @@ const chassisCentre = computed(() => chassis.value.width / 2)
     :faults="faults"
     :worst-fault="worstFault"
     :device-label="packLabel"
-  />
+  >
+    <RecordingPlate :state="recording" :usable="archiveUsable" />
+  </AnnunciatorStrip>
 
   <main>
     <template v-if="battery">

@@ -6,8 +6,11 @@
  * recording indicator borrowing the alarm palette would make every session look like an incident.
  *
  * It says nothing at all when the archive is usable and no session is open — there is no honest
- * claim to make about a link that has not started. The one sentence it does print in the negative
- * names the real cause, because "not recording" without a reason reads as a bug.
+ * claim to make about a link that has not started. The two sentences it does print in the negative
+ * name the real cause, because "not recording" without a reason reads as a bug.
+ *
+ * Another tab holding the recording lease is one of those causes and an ordinary one, so it is
+ * worded as the plain fact it is: the watch is being written down, just not here.
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 
@@ -44,8 +47,16 @@ onUnmounted(() => {
   if (timer !== undefined) clearInterval(timer)
 })
 
-/** A write that failed is not recording, whatever the session id still says. */
-const recording = computed(() => props.state.sessionId !== null && props.state.failure === null)
+/**
+ * A write that failed is not recording, whatever the session id still says — and neither is a
+ * session opened on an observation whose lease another tab still holds.
+ */
+const recording = computed(
+  () =>
+    props.state.sessionId !== null &&
+    props.state.failure === null &&
+    !props.state.recordingElsewhere,
+)
 
 const elapsed = computed(() => {
   const startedAt = props.state.startedAt
@@ -69,6 +80,9 @@ function stopwatch(elapsedMs: number): string {
   <p v-if="recording" class="plate-line readout">
     <span aria-hidden="true" class="mark">■</span>
     <span>RECORDING · {{ elapsed }} · {{ groupedCount(samples) }} samples</span>
+  </p>
+  <p v-else-if="state.recordingElsewhere" class="plate-line copy">
+    NOT RECORDING — another tab of this page is keeping the log.
   </p>
   <p v-else-if="!usable" class="plate-line copy">
     NOT RECORDING — this browser will not keep a log.

@@ -26,6 +26,15 @@
  * So a BMS that drops and comes back while the solar scan is still up produces one session with a
  * gap in its pack stream, not two sessions — and the solar rows recorded across that gap, which the
  * live sampler throws away for want of a battery snapshot, are kept.
+ *
+ * One more rule, and it is about tabs rather than about radios:
+ *
+ * > One recorder writes the archive at a time, and it holds a lease that says so.
+ *
+ * Two tabs of this page reconnect to the same pack without anyone asking them to, and two recorders
+ * against one database store two full copies of the same watch: every figure folded out of it reads
+ * double, and a day bucket claims more recorded time than the day holds. So a session opens only
+ * behind the lease, and the tab that does not get it says as much and keeps its instruments.
  */
 
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../domain/bms/types'
@@ -94,6 +103,18 @@ const MAX_COMMIT_ATTEMPTS = 2
  */
 export const MAX_SESSION_ENTRIES = 500
 
+/** The Web Lock one recorder holds while it is the one writing the archive. */
+const RECORDING_LEASE = 'shunt.recording'
+
+/**
+ * How long a refused recorder waits before asking for the lease again.
+ *
+ * The archive's own announcement normally gets there first and costs nothing. This is for the
+ * holder that announced nothing because it was killed: the browser released its lock with its
+ * context, and no message was ever sent to say so.
+ */
+export const LEASE_RETRY_INTERVAL_MS = 30_000
+
 /** Wall clock for stamps, monotonic for every gate and every row offset. Never the other way. */
 export interface RecorderClock {
   now(): number
@@ -121,6 +142,11 @@ export interface RecorderState {
    * instruments carry on untouched.
    */
   readonly failure: HistoryUnavailableReason | null
+  /**
+   * Another tab holds the recording lease. Not a failure and not a fault: the watch is being
+   * written down, by the tab that got to it first.
+   */
+  readonly recordingElsewhere: boolean
 }
 
 /** Why the pack half of a session stopped. Narrower than a session end: the session survives it. */
@@ -151,6 +177,13 @@ interface OpenSession {
   readonly id: SessionId
   readonly startedAt: number
   readonly continues: SessionId | null
+
+  /**
+   * The session is built optimistically, on the observation that opened it, and only becomes the
+   * recorder's own once the lease is granted. Nothing is written for it before that: the row it
+   * would attach to does not exist yet, and may never.
+   */
+  leased: boolean
 
   packDeviceKey: DeviceKey | null
   solarDeviceKey: DeviceKey | null
@@ -228,6 +261,14 @@ export class SessionRecorder {
   private lastObservationMonotonic = 0
   /** Set when the store rejected a write because this tab's row was closed underneath it. */
   private continuesSessionId: SessionId | null = null
+
+  /** Resolves the promise that holds the Web Lock. Null whenever this recorder holds no lease. */
+  private releaseHeldLease: (() => void) | null = null
+  /** Monotonic reading of the last refusal, so a killed holder is asked about again. */
+  private leaseRefusedMonotonic: number | null = null
+  /** The archive said something changed, which is the direct signal that the holder let go. */
+  private leaseReleaseAnnounced = false
+  private stopWatchingArchive: (() => void) | null = null
 
   constructor(options: SessionRecorderOptions) {
     this.resolveStore = options.store
@@ -314,7 +355,7 @@ export class SessionRecorder {
     session.packDeviceKey = key
     if (key !== null && !session.packDeviceCounted) {
       session.packDeviceCounted = true
-      this.rememberPackDevice(key, this.clock.now())
+      this.rememberPackDevice(session, key, this.clock.now())
     }
     this.publish()
   }
@@ -330,7 +371,7 @@ export class SessionRecorder {
     session.solarDeviceKey = key
     if (!session.solarDeviceCounted) {
       session.solarDeviceCounted = true
-      this.rememberSolarDevice(key, this.clock.now())
+      this.rememberSolarDevice(session, key, this.clock.now())
     }
   }
 
@@ -461,7 +502,15 @@ export class SessionRecorder {
    */
   finish(reason: SessionEndReason): void {
     const session = this.session
-    if (session === null) return
+    if (session === null) {
+      // A watch that ends with no session to close is one that was refused the lease. It is not
+      // waiting on the holder any more, so it stops saying anything about it — and the next watch
+      // asks for the lease on its first observation rather than serving out the retry interval.
+      this.leaseRefusedMonotonic = null
+      this.leaseReleaseAnnounced = false
+      this.publish()
+      return
+    }
 
     const endedAt = this.clock.now()
     this.sealPackChunk(session)
@@ -494,6 +543,11 @@ export class SessionRecorder {
     this.publish()
 
     this.enqueue(async () => {
+      // Let go before anything the store announces, because the announcement is what wakes a
+      // refused tab and one that woke to a lease this recorder still held would have no second
+      // signal to wake on. On the chain rather than in the synchronous part above, so that a claim
+      // still in flight when the watch ended is released by the step that follows it.
+      this.releaseRecordingLease()
       const store = this.usableStore()
       if (store === null) return
       if (session.packSamples + session.solarSamples < MIN_SESSION_SAMPLES) {
@@ -522,6 +576,9 @@ export class SessionRecorder {
     this.checkpoint()
     this.disposed = true
     this.stopClock()
+    this.stopWatchingArchive?.()
+    this.stopWatchingArchive = null
+    this.releaseRecordingLease()
     this.session = null
     this.publish()
   }
@@ -537,6 +594,7 @@ export class SessionRecorder {
   private ensureOpen(at: number): OpenSession | null {
     if (this.session !== null) return this.session
     if (this.disposed) return null
+    if (!this.mayClaimLease()) return null
     const store = this.usableStore()
     if (store === null) return null
 
@@ -544,6 +602,7 @@ export class SessionRecorder {
       id: this.newId(),
       startedAt: at,
       continues: this.continuesSessionId,
+      leased: false,
       packDeviceKey: this.packDeviceKey,
       solarDeviceKey: this.solarDeviceKey,
       packDeviceCounted: false,
@@ -593,14 +652,10 @@ export class SessionRecorder {
     this.continuesSessionId = null
     this.startClock()
 
-    if (session.packDeviceKey !== null) {
-      session.packDeviceCounted = true
-      this.rememberPackDevice(session.packDeviceKey, at)
-    }
-    if (session.solarDeviceKey !== null) {
-      session.solarDeviceCounted = true
-      this.rememberSolarDevice(session.solarDeviceKey, at)
-    }
+    // Counted here and written below: the flag closes the door on a device frame arriving in the
+    // meantime and counting the same session a second time.
+    if (session.packDeviceKey !== null) session.packDeviceCounted = true
+    if (session.solarDeviceKey !== null) session.solarDeviceCounted = true
 
     const record: SessionRecord = {
       ...this.patchOf(session),
@@ -616,10 +671,49 @@ export class SessionRecorder {
       continues: session.continues,
     }
     this.enqueue(async () => {
+      // The first await of the whole recording path, and it is here rather than in `ensureOpen`
+      // because `connectBms` touches the recorder on the line before `requestDevice`: a claim
+      // awaited there would spend the click's transient activation and lose the chooser.
+      if (!(await this.claimRecordingLease())) {
+        this.standDown(session)
+        return
+      }
+      session.leased = true
+      // Only now is the plate's claim true, which is why a session taken on a retry says nothing
+      // about recording until the lease is actually in hand.
+      this.leaseRefusedMonotonic = null
+      this.leaseReleaseAnnounced = false
+      this.publish()
       await store.openSession(record)
+      // Torn down while the claim was in flight. The row belongs on disk either way, for the
+      // stale-heartbeat sweep to close, but nothing here is recording and the lease must go back.
+      if (this.disposed) this.releaseRecordingLease()
     })
+
+    // Enqueued behind the claim, so a session that never took the lease leaves the device rows —
+    // and the session count they carry — exactly as it found them.
+    if (session.packDeviceKey !== null) this.rememberPackDevice(session, session.packDeviceKey, at)
+    if (session.solarDeviceKey !== null) this.rememberSolarDevice(session, session.solarDeviceKey, at)
+
     this.publish()
     return session
+  }
+
+  /**
+   * Another tab holds the lease, so this one records nothing.
+   *
+   * The optimistically opened session is dropped whole rather than closed: no row was ever written
+   * for it, and the rows it buffered are the same rows the holder is storing. Nothing is attempted
+   * again until there is a reason to think the lease is free.
+   */
+  private standDown(session: OpenSession): void {
+    if (this.session !== session) return
+    this.session = null
+    this.stopClock()
+    this.leaseRefusedMonotonic = this.clock.monotonic()
+    this.leaseReleaseAnnounced = false
+    this.watchForLeaseRelease()
+    this.publish()
   }
 
   /**
@@ -795,6 +889,9 @@ export class SessionRecorder {
 
   /** The sealed chunks in order, then whatever each tail holds now. */
   private async writePending(session: OpenSession): Promise<void> {
+    // Nothing reaches the archive before the lease is granted. The rows stay buffered and go out on
+    // the next flush; a session that is refused takes them with it, unwritten.
+    if (!session.leased) return
     const store = this.usableStore()
     if (store === null) return
 
@@ -892,9 +989,9 @@ export class SessionRecorder {
    * One upsert per device per session. `userLabel` is null because the recorder has never seen
    * one; the store keeps whatever the owner typed.
    */
-  private rememberPackDevice(key: DeviceKey, at: number): void {
+  private rememberPackDevice(session: OpenSession, key: DeviceKey, at: number): void {
     const info = this.deviceInfo
-    this.upsertDevice(key, (sessionCount) => ({
+    this.upsertDevice(session, key, (sessionCount) => ({
       key,
       kind: 'pack',
       defaultLabel: this.packLabel,
@@ -909,8 +1006,8 @@ export class SessionRecorder {
     }))
   }
 
-  private rememberSolarDevice(key: DeviceKey, at: number): void {
-    this.upsertDevice(key, (sessionCount) => ({
+  private rememberSolarDevice(session: OpenSession, key: DeviceKey, at: number): void {
+    this.upsertDevice(session, key, (sessionCount) => ({
       key,
       kind: 'solar',
       defaultLabel: this.solarLabel,
@@ -925,10 +1022,15 @@ export class SessionRecorder {
     }))
   }
 
-  private upsertDevice(key: DeviceKey, build: (sessionCount: number) => DeviceRecord): void {
+  private upsertDevice(
+    session: OpenSession,
+    key: DeviceKey,
+    build: (sessionCount: number) => DeviceRecord,
+  ): void {
     const store = this.usableStore()
     if (store === null) return
     this.enqueue(async () => {
+      if (!session.leased) return
       // The store never lowers a count it already holds, so the writer asserts the new total
       // rather than an increment. Reading it costs one scan of a handful of rows, once per
       // session, and it happens on the write chain rather than in a radio callback.
@@ -971,6 +1073,72 @@ export class SessionRecorder {
         text: 'Too many status changes to list — later ones are not recorded',
       },
     ]
+  }
+
+  // ── the recording lease ────────────────────────────────────────────────────
+
+  /**
+   * Whether it is worth asking for the lease again. True until a refusal, and true again once
+   * either the archive has announced something or the retry interval has run out.
+   */
+  private mayClaimLease(): boolean {
+    const refusedAt = this.leaseRefusedMonotonic
+    if (refusedAt === null) return true
+    if (this.leaseReleaseAnnounced) return true
+    return this.clock.monotonic() - refusedAt >= LEASE_RETRY_INTERVAL_MS
+  }
+
+  /**
+   * Takes the lease for the life of this session, or reports that another tab holds it.
+   *
+   * `ifAvailable` never queues. A recorder that waited for the lease would sit on an observation
+   * stream it is storing nothing of, and would then take over the instant the holder blinked. A
+   * browser with no Web Locks — several in-app WebViews — records as this page always has: a
+   * doubled archive is a bad archive, and no archive at all is worse than that.
+   */
+  private claimRecordingLease(): Promise<boolean> {
+    if (this.releaseHeldLease !== null) return Promise.resolve(true)
+    const locks = lockManager()
+    if (locks === null) return Promise.resolve(true)
+
+    return new Promise<boolean>((answer) => {
+      const settled = locks.request(RECORDING_LEASE, { ifAvailable: true }, (lock) => {
+        if (lock === null) {
+          answer(false)
+          return Promise.resolve()
+        }
+        // The lock is held for exactly as long as this promise stays pending, which is what makes
+        // `releaseHeldLease` the whole of the release path.
+        return new Promise<void>((release) => {
+          this.releaseHeldLease = release
+          answer(true)
+        })
+      })
+      // A lock manager that throws is a browser that will not lease; it must not be a browser that
+      // stops recording, and it must never reject into a radio callback.
+      void settled.catch(() => answer(false))
+    })
+  }
+
+  private releaseRecordingLease(): void {
+    const release = this.releaseHeldLease
+    if (release === null) return
+    this.releaseHeldLease = null
+    release()
+  }
+
+  /**
+   * The archive's own cross-tab channel is the release signal: the holder closes its session, the
+   * store announces it, and the next observation here takes the lease with nothing asked of the
+   * owner. Any other announcement costs one refused claim, which is cheaper than a poll.
+   */
+  private watchForLeaseRelease(): void {
+    if (this.stopWatchingArchive !== null) return
+    const store = this.usableStore()
+    if (store === null) return
+    this.stopWatchingArchive = store.watch(() => {
+      this.leaseReleaseAnnounced = true
+    })
   }
 
   // ── plumbing ───────────────────────────────────────────────────────────────
@@ -1018,6 +1186,7 @@ export class SessionRecorder {
       solarSamples: session?.solarSamples ?? 0,
       droppedChunks: session?.droppedChunks ?? 0,
       failure: this.failure,
+      recordingElsewhere: this.leaseRefusedMonotonic !== null,
     }
     if (sameState(this.published, next)) return
     this.published = next
@@ -1042,6 +1211,7 @@ function idleState(): RecorderState {
     solarSamples: 0,
     droppedChunks: 0,
     failure: null,
+    recordingElsewhere: false,
   }
 }
 
@@ -1052,8 +1222,19 @@ function sameState(left: RecorderState, right: RecorderState): boolean {
     left.packSamples === right.packSamples &&
     left.solarSamples === right.solarSamples &&
     left.droppedChunks === right.droppedChunks &&
-    left.failure === right.failure
+    left.failure === right.failure &&
+    left.recordingElsewhere === right.recordingElsewhere
   )
+}
+
+/**
+ * `navigator.locks`, or null where there is none. The DOM lib declares it non-optional and several
+ * in-app WebViews disagree, so the absence has to be checked for rather than narrowed to.
+ */
+function lockManager(): LockManager | null {
+  if (typeof navigator === 'undefined') return null
+  const locks: LockManager | undefined = navigator.locks
+  return locks ?? null
 }
 
 /** The same bound the read-side join applies, so the recorded rows and a re-read agree. */

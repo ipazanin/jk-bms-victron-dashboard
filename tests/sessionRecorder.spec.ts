@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   CHECKPOINT_INTERVAL_MS,
+  LEASE_RETRY_INTERVAL_MS,
   SESSION_IDLE_TIMEOUT_MS,
   SessionRecorder,
 } from '../src/application/history/SessionRecorder'
@@ -920,5 +921,180 @@ describe('warnings', () => {
     await harness.recorder.drain()
 
     expect(await harness.store.listWarnings()).toHaveLength(2)
+  })
+})
+
+describe('one archive, one recorder', () => {
+  // Two recorders against one store is exactly what two tabs of this page are. Both rejoin the same
+  // pack with nothing asked of the owner, and both would otherwise write the same watch down, which
+  // doubles every figure folded out of it and lets one day claim more recorded time than it holds.
+
+  /**
+   * The half of Web Locks the recorder uses: exclusive, `ifAvailable`, and held for exactly as long
+   * as the granted callback's promise stays pending. One manager stands for one browser, so every
+   * tab in a case contends over the same set.
+   */
+  function browserLocks(): LockManager {
+    const held = new Set<string>()
+    const request = (
+      name: string,
+      _options: LockOptions,
+      granted: (lock: Lock | null) => Promise<unknown>,
+    ): Promise<unknown> => {
+      if (held.has(name)) return Promise.resolve(granted(null))
+      held.add(name)
+      return granted({ name, mode: 'exclusive' }).finally(() => {
+        held.delete(name)
+      })
+    }
+    return { request } as unknown as LockManager
+  }
+
+  interface Tab {
+    readonly recorder: SessionRecorder
+    drivePack(count: number): void
+    advance(milliseconds: number): void
+    dispose(): void
+  }
+
+  /** One tab's recorder, with a clock and an id space of its own, over the shared archive. */
+  function tabOn(store: MemoryHistoryStore, name: string): Tab {
+    let wall = SAMPLE_EPOCH
+    let monotonic = 0
+    let ids = 0
+    const recorder = new SessionRecorder({
+      store: () => store,
+      clock: { now: () => wall, monotonic: () => monotonic },
+      newId: () => `${name}-${(ids += 1)}`,
+    })
+
+    return {
+      recorder,
+      drivePack(count) {
+        for (let index = 0; index < count; index += 1) {
+          recorder.notePack(battery())
+          wall += SAMPLE_INTERVAL_MS
+          monotonic += SAMPLE_INTERVAL_MS
+        }
+      },
+      advance(milliseconds) {
+        wall += milliseconds
+        monotonic += milliseconds
+      },
+      dispose: () => recorder.dispose(),
+    }
+  }
+
+  let store: MemoryHistoryStore
+  let first: Tab
+  let second: Tab
+
+  beforeEach(() => {
+    vi.stubGlobal('navigator', { locks: browserLocks() })
+    store = new MemoryHistoryStore()
+    first = tabOn(store, 'first')
+    second = tabOn(store, 'second')
+  })
+
+  afterEach(() => {
+    first.dispose()
+    second.dispose()
+    store.close()
+    vi.unstubAllGlobals()
+  })
+
+  it('records the watch once when a second tab is fed the same observations', async () => {
+    first.drivePack(6)
+    await first.recorder.drain()
+
+    second.drivePack(6)
+    await second.recorder.drain()
+
+    expect(await store.listSessions()).toHaveLength(1)
+    expect(second.recorder.state.sessionId).toBeNull()
+    expect(second.recorder.state.recordingElsewhere).toBe(true)
+    // Not a failure: nothing went wrong, and the plate must not borrow the alarm's vocabulary.
+    expect(second.recorder.state.failure).toBeNull()
+  })
+
+  it('leaves the device row and its session count to the tab that is recording', async () => {
+    first.recorder.identify(deviceInfo(), null)
+    first.drivePack(6)
+    await first.recorder.drain()
+
+    second.recorder.identify(deviceInfo(), null)
+    second.drivePack(6)
+    await second.recorder.drain()
+
+    const [device] = await store.listDevices()
+    expect(device.sessionCount).toBe(1)
+  })
+
+  it('takes over from the next observation once the holder closes and says so', async () => {
+    first.drivePack(MIN_SESSION_SAMPLES + 2)
+    await first.recorder.drain()
+    second.drivePack(4)
+    await second.recorder.drain()
+    expect(second.recorder.state.recordingElsewhere).toBe(true)
+
+    first.recorder.finish('user-disconnect')
+    await first.recorder.drain()
+    // What the other tab's close looks like from here: the archive changed, nothing says how.
+    store.announce()
+
+    second.drivePack(6)
+    await second.recorder.drain()
+
+    expect(second.recorder.state.sessionId).not.toBeNull()
+    expect(second.recorder.state.recordingElsewhere).toBe(false)
+    expect(await store.listSessions()).toHaveLength(2)
+  })
+
+  it('asks again on its own for a lease whose holder was killed without announcing anything', async () => {
+    first.drivePack(6)
+    await first.recorder.drain()
+    second.drivePack(4)
+    await second.recorder.drain()
+
+    // A tab that dies takes its lock with it and posts nothing, so there is no announcement to
+    // wake on and the interval is the only thing that gets the archive written again.
+    first.dispose()
+    await first.recorder.drain()
+
+    second.drivePack(2)
+    await second.recorder.drain()
+    expect(second.recorder.state.sessionId).toBeNull()
+
+    second.advance(LEASE_RETRY_INTERVAL_MS)
+    second.drivePack(2)
+    await second.recorder.drain()
+
+    expect(second.recorder.state.sessionId).not.toBeNull()
+    expect(second.recorder.state.recordingElsewhere).toBe(false)
+  })
+
+  it('stops naming the other tab once this one has stopped watching', async () => {
+    first.drivePack(6)
+    await first.recorder.drain()
+    second.drivePack(4)
+    await second.recorder.drain()
+    expect(second.recorder.state.recordingElsewhere).toBe(true)
+
+    // Both radios idle here, which is the one end a refused tab has: there is no session to close.
+    second.recorder.finish('user-disconnect')
+
+    expect(second.recorder.state.recordingElsewhere).toBe(false)
+  })
+
+  it('records in a browser that has no Web Locks at all, rather than refusing to', async () => {
+    // Several in-app WebViews. A doubled archive is a bad archive; no archive is worse than that.
+    vi.stubGlobal('navigator', {})
+
+    first.drivePack(6)
+    second.drivePack(6)
+    await first.recorder.drain()
+    await second.recorder.drain()
+
+    expect(await store.listSessions()).toHaveLength(2)
   })
 })

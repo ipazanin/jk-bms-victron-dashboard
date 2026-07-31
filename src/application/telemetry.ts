@@ -176,6 +176,16 @@ export function createTelemetry(deps: TelemetryDeps) {
   const recording = shallowRef<RecorderState>(recorder.state)
 
   /**
+   * False only once the probe has answered that this browser will keep no archive at all. A probe
+   * still in flight is not a refusal, so nothing on screen claims the log is off while it is
+   * merely unknown.
+   */
+  const archiveUsable = computed(() => {
+    const store = deps.historyStore()
+    return store === null || store.availability.usable
+  })
+
+  /**
    * The alarm list, rebuilt from scratch on every observation and then latched.
    *
    * It is a function and not a computed because latching, hysteresis and the off-delay are state:
@@ -845,6 +855,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     balance: observations.balance,
     projection: observations.projection,
     recording,
+    archiveUsable,
     connectBms,
     reconnectBms,
     disconnectBms,
@@ -865,12 +876,13 @@ export type Telemetry = ReturnType<typeof createTelemetry>
 /**
  * The archive arrives after first paint, so the shared telemetry is built without one and is
  * handed the store when the probe answers. It is read through a closure rather than assigned into
- * the recorder, so a store that never arrives is simply a store that is always null.
+ * the recorder, so a store that never arrives is simply a store that is always null. A ref rather
+ * than a plain binding because what the page says about the archive has to change when it lands.
  */
-let attachedStore: HistoryStore | null = null
+const attachedStore = shallowRef<HistoryStore | null>(null)
 
 export function attachHistoryStore(store: HistoryStore): void {
-  attachedStore = store
+  attachedStore.value = store
 }
 
 function browserDeps(): TelemetryDeps {
@@ -882,7 +894,7 @@ function browserDeps(): TelemetryDeps {
     createSolarScan: bridgeUrl
       ? (handlers) => new BridgeSolarScan(bridgeUrl, handlers)
       : (handlers) => new VictronScanner(handlers),
-    historyStore: () => attachedStore,
+    historyStore: () => attachedStore.value,
     now: () => Date.now(),
     // Not derived from the wall clock: the whole point of a monotonic reading is that a clock
     // step cannot move it.
