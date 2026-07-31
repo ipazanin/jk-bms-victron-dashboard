@@ -744,7 +744,18 @@ export function createTelemetry(deps: TelemetryDeps) {
   // localStorage write is the only one guaranteed to land — an IndexedDB transaction may not
   // commit before the page is killed. pagehide also fires on a bfcache freeze the page may be
   // restored from, so this is a checkpoint and never a session end.
-  const onPageHide = (): void => persistRememberedNow(true)
+  //
+  // The recorder is checkpointed here as well as on visibilitychange, for the one close path that
+  // fires neither: a tab hidden minutes ago and then closed is already hidden, so the visibility
+  // state never changes and that handler never runs. Its checkpoint ticker is throttled to about a
+  // wake a minute by then, so the unsealed tail can be a minute of samples rather than ten seconds.
+  // Double-firing is safe — the recorder collapses concurrent flushes, and the sample counter moves
+  // on the seal and never on the write. It buys a chance, not a guarantee: the write still needs
+  // event-loop turns the page may not get.
+  const onPageHide = (): void => {
+    persistRememberedNow(true)
+    recorder.checkpoint()
+  }
   const onVisibilityChange = (): void => {
     if (document.visibilityState === 'hidden') recorder.checkpoint()
   }
