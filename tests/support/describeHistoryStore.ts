@@ -17,13 +17,20 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { HistoryStore } from '../../src/application/history/port'
 import { MAX_RENDER_WINDOW_MS } from '../../src/application/history/port'
 import { MAX_SESSIONS } from '../../src/domain/history/budget'
-import { HEARTBEAT_STALE_MS, PACK_STREAM, SOLAR_STREAM } from '../../src/domain/history/types'
+import { isReadableLayout } from '../../src/domain/history/columns'
+import {
+  CHUNK_LAYOUT_VERSION,
+  HEARTBEAT_STALE_MS,
+  PACK_STREAM,
+  SOLAR_STREAM,
+} from '../../src/domain/history/types'
 import type { HistoryChunk, SessionId } from '../../src/domain/history/types'
 import {
   PACK_DEVICE_KEY,
   SAMPLE_EPOCH,
   SESSION_ID,
   deviceRecord,
+  inForeignLayout,
   packChunk,
   packSamples,
   sessionClosure,
@@ -369,6 +376,62 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
         )
 
         expect(seen).toEqual([0, 1])
+      })
+
+      it('hands over a chunk in a layout it cannot read, rather than dropping it', async () => {
+        // Dropping it here is what would report a session holding thousands of rows as one holding
+        // none: the row keeps its counts, and the caller above needs the chunk itself to say why
+        // nothing could be drawn from it.
+        await store.openSession(sessionRecord())
+        await store.commitChunk(
+          inForeignLayout(packChunk(packSamples(3))),
+          sessionPatch({ packSamples: 3, packChunks: 1 }),
+        )
+
+        const stored = await store.readSession(SESSION_ID)
+
+        expect(stored?.pack).toHaveLength(1)
+        expect(isReadableLayout(stored?.pack[0].layout ?? CHUNK_LAYOUT_VERSION)).toBe(false)
+        expect(stored?.record.packSamples).toBe(3)
+      })
+
+      it('hands it over whatever window was asked for, having no way to place it in time', async () => {
+        // Deciding a chunk falls outside a window means indexing its offsets, which is the same
+        // read the gate refuses. A readable chunk from the same session is windowed as ever.
+        await store.openSession(sessionRecord())
+        await store.commitChunk(
+          packChunk(packSamples(3), { seq: 0 }),
+          sessionPatch({ packSamples: 3, packChunks: 1 }),
+        )
+        await store.commitChunk(
+          inForeignLayout(packChunk(packSamples(3, { at: SAMPLE_EPOCH + 300_000 }), { seq: 1 })),
+          sessionPatch({ packSamples: 6, packChunks: 2 }),
+        )
+
+        const stored = await store.readSession(SESSION_ID, {
+          from: SAMPLE_EPOCH + HOUR_MS,
+          to: SAMPLE_EPOCH + 2 * HOUR_MS,
+        })
+
+        expect(stored?.pack.map((chunk) => chunk.seq)).toEqual([1])
+      })
+
+      it('leaves it out of the export stream, which has no row it could write from it', async () => {
+        await store.openSession(sessionRecord())
+        await store.commitChunk(
+          inForeignLayout(packChunk(packSamples(3))),
+          sessionPatch({ packSamples: 3, packChunks: 1 }),
+        )
+
+        const seen: HistoryChunk[] = []
+        await store.streamChunks(
+          SESSION_ID,
+          PACK_STREAM,
+          { from: 0, to: Number.MAX_SAFE_INTEGER },
+          (chunk) => seen.push(chunk),
+        )
+
+        expect(seen).toEqual([])
       })
 
       it('streams nothing for a window the session does not reach', async () => {

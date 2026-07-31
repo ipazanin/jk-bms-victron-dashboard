@@ -22,6 +22,9 @@
  * - `watch` never fires for this store's own writes. It stands in for a BroadcastChannel, which
  *   does not deliver to the context that posted; a fake that notified its own writer would let a
  *   refresh loop pass here and spin in the browser. `announce()` plays the part of the other tab.
+ * - A chunk in a layout this build cannot read is handed to `readSession` unwindowed and kept out
+ *   of `streamChunks`, exactly as the adapter does, so what the archive view counts as unreadable
+ *   is the same set either store would give it.
  *
  * Two behaviours are injectable, both for failures the port has to survive and a Map never
  * produces on its own: `failNextCommitWith` and `delayNextOpenBy`.
@@ -38,6 +41,7 @@ import type {
 } from '../../src/application/history/port'
 import { renderWindowFor } from '../../src/application/history/port'
 import { planPrune } from '../../src/domain/history/budget'
+import { isReadableLayout } from '../../src/domain/history/columns'
 import type { ChunkExtent, PruneCandidate, PrunePlan } from '../../src/domain/history/budget'
 import { deviceLabel } from '../../src/domain/history/identity'
 import { HEARTBEAT_STALE_MS, PACK_STREAM, SOLAR_STREAM } from '../../src/domain/history/types'
@@ -249,7 +253,7 @@ export class MemoryHistoryStore implements HistoryStore {
   ): Promise<void> {
     // Cloned one at a time and never collected, so peak memory here is one chunk, as it is in the
     // cursor this stands in for.
-    for (const chunk of this.storedChunksOf(id, stream, window)) visit(structuredClone(chunk))
+    for (const chunk of this.decodableChunksOf(id, stream, window)) visit(structuredClone(chunk))
   }
 
   // ── devices ────────────────────────────────────────────────────────────────
@@ -462,23 +466,40 @@ export class MemoryHistoryStore implements HistoryStore {
     return { prunedSessionIds: plan.evict, truncatedFrom: truncation.retainedFrom }
   }
 
+  /**
+   * What a session read hands over: the chunks the window touches, plus every chunk in a layout
+   * this build has no reader for. An unreadable chunk is never tested against the window — placing
+   * it in time means indexing its offsets, which is the read the gate exists to refuse — and
+   * dropping it here is what would report a session full of rows as one holding none.
+   */
   private chunksOf(id: SessionId, stream: StreamName, window: TimeWindow): HistoryChunk[] {
-    return this.storedChunksOf(id, stream, window).map((chunk) => structuredClone(chunk))
+    return this.streamOf(id, stream)
+      .filter((chunk) => !isReadableLayout(chunk.layout) || overlaps(chunk, window))
+      .map((chunk) => structuredClone(chunk))
   }
 
-  private storedChunksOf(id: SessionId, stream: StreamName, window: TimeWindow): HistoryChunk[] {
+  /** What the export may draw rows from, which is nothing an unreadable chunk holds. */
+  private decodableChunksOf(id: SessionId, stream: StreamName, window: TimeWindow): HistoryChunk[] {
+    return this.streamOf(id, stream).filter(
+      (chunk) => isReadableLayout(chunk.layout) && overlaps(chunk, window),
+    )
+  }
+
+  private streamOf(id: SessionId, stream: StreamName): HistoryChunk[] {
     return [...this.chunks.values()]
-      .filter((chunk) => chunk.sessionId === id && chunk.stream === stream && overlaps(chunk, window))
+      .filter((chunk) => chunk.sessionId === id && chunk.stream === stream)
       .sort((left, right) => left.seq - right.seq)
   }
 
-  /** What the session covers on the wall clock, from the rows it actually holds. */
+  /** What the session covers on the wall clock, from the rows it actually holds — which excludes
+   *  the chunks whose rows this build cannot place in time. */
   private spanOf(record: SessionRecord): TimeWindow {
     let from = record.startedAt
     let to = record.endedAt ?? record.startedAt
 
     for (const chunk of this.chunks.values()) {
       if (chunk.sessionId !== record.id || chunk.length === 0) continue
+      if (!isReadableLayout(chunk.layout)) continue
       from = Math.min(from, firstSampleAt(chunk))
       to = Math.max(to, lastSampleAt(chunk))
     }

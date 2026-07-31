@@ -23,10 +23,11 @@ import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../src/domain/
 import { PackChunkBuilder, SolarChunkBuilder } from '../../src/domain/history/columns'
 import { packDefaultLabel, packDeviceKeyFor, UNIDENTIFIED_PACK_KEY } from '../../src/domain/history/identity'
 import { EMPTY_LEDGER } from '../../src/domain/history/ledger'
-import { SAMPLE_INTERVAL_MS } from '../../src/domain/history/types'
+import { CHUNK_LAYOUT_VERSION, SAMPLE_INTERVAL_MS } from '../../src/domain/history/types'
 import type {
   DeviceKey,
   DeviceRecord,
+  HistoryChunk,
   PackChunk,
   PackSample,
   SessionId,
@@ -214,6 +215,17 @@ export function solarChunk(samples: readonly SolarSample[], options: ChunkOption
   })
   appendAll(samples, baseMonotonic, (sample, monotonic) => builder.append(sample, monotonic))
   return options.sealed === false ? builder.tail() : builder.seal()
+}
+
+/**
+ * The same chunk, stamped with a layout this build has no reader for.
+ *
+ * A builder can only stamp its own layout, so this is the one way to produce what a newer build
+ * left on disk. The gate refuses either direction, and the direction is arbitrary here: what every
+ * case below it turns on is that the chunk is intact and unreadable at once.
+ */
+export function inForeignLayout<TChunk extends HistoryChunk>(chunk: TChunk): TChunk {
+  return { ...chunk, layout: CHUNK_LAYOUT_VERSION + 1 }
 }
 
 // ── archive rows ─────────────────────────────────────────────────────────────
