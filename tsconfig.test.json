@@ -12,5 +12,5 @@
     "noFallthroughCasesInSwitch": true,
     "exactOptionalPropertyTypes": true
   },
-  "include": ["tests/**/*.ts"]
+  "include": ["tests/**/*.ts", "src/**/*.vue"]
 }
