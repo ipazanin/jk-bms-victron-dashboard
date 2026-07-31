@@ -29,7 +29,7 @@ describe('decodeLogbook', () => {
 
     expect(events).toEqual([
       { secondsSinceBoot: 0, code: 0x01, label: 'Boot' },
-      { secondsSinceBoot: 1023, code: 0x44, label: 'Discharge overcurrent protection III' },
+      { secondsSinceBoot: 1023, code: 0x44, label: 'Factory setting LFP' },
       { secondsSinceBoot: 7536, code: 0x2d, label: 'Turned off by button' },
     ])
   })
@@ -50,7 +50,19 @@ describe('decodeLogbook', () => {
 
   it('shows a raw hex label for a code it does not know', () => {
     expect(logbookLabel(0x7e)).toBe('Cell 27 overcharge protection')
-    expect(logbookLabel(0x03)).toBe('Event 0x03')
+    expect(logbookLabel(0x4a)).toBe('Event 0x4a')
+  })
+
+  it('names the codes whose neighbours mean something else entirely', () => {
+    expect(logbookLabel(0x03)).toBe('App charge off')
+    expect(logbookLabel(0x13)).toBe('Battery overcharge protection')
+    expect(logbookLabel(0x14)).toBe('Battery overcharge protection released')
+    expect(logbookLabel(0x1b)).toBe('Charge low-temperature protection')
+    expect(logbookLabel(0x1c)).toBe('Charge low-temperature protection released')
+    expect(logbookLabel(0x1d)).toBe('Cell undervoltage protection')
+    expect(logbookLabel(0x1e)).toBe('Cell undervoltage protection released')
+    expect(logbookLabel(0x41)).toBe('Discharge overcurrent protection III')
+    expect(logbookLabel(0x44)).toBe('Factory setting LFP')
   })
 
   it('honours the record count and skips the empty tail', () => {
@@ -85,6 +97,13 @@ describe('a real captured logbook frame', () => {
     for (let index = 1; index < events.length; index += 1) {
       expect(events[index].secondsSinceBoot).toBeGreaterThanOrEqual(events[index - 1].secondsSinceBoot)
     }
+  })
+
+  it('reads the two commissioning records in the first hours as chemistry settings, not trips', () => {
+    const factorySettings = decodeLogbook(frame).filter((event) => event.code === 0x44)
+
+    expect(factorySettings.map((event) => event.label)).toEqual(['Factory setting LFP', 'Factory setting LFP'])
+    expect(factorySettings.every((event) => event.secondsSinceBoot < 5400)).toBe(true)
   })
 
   it('counts one boot per power-on the device reported (4)', () => {

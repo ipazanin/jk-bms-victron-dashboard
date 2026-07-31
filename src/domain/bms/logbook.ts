@@ -29,23 +29,66 @@ export interface LogbookEvent {
 }
 
 /**
- * Labels from the esphome-jk-bms reference table, holding the codes a 19.10 unit emits. The table
- * is large and mostly protection events; the two cell ranges are generated, and any code without a
- * known label is shown as its raw hex rather than guessed at.
+ * The event vocabulary, transcribed code for code from the `LOGBOOK_CODES` array in
+ * esphome-jk-bms. That array is the only published mapping of these codes: JK documents a 16-bit
+ * alarm bitfield at register 0x8B, which is a different vocabulary and cannot be used to check an
+ * entry here. So a label is only ever copied across from that one table, never inferred from what
+ * its neighbours mean — codes that read as a pair (a trip and its release, a protection and the
+ * next severity level) are not always adjacent in the order JK assigned them.
+ *
+ * Every code the reference defines is listed, contiguously, so that a missing or shifted entry
+ * shows up as a gap when read against the source. The wording is this repo's, matching the rest of
+ * the UI rather than the reference's translation. The two per-cell ranges are generated instead of
+ * listed, and a code the reference leaves blank is shown as raw hex rather than guessed at.
  */
 const LOGBOOK_LABELS: Readonly<Record<number, string>> = {
   0x01: 'Boot',
   0x02: 'Shutdown',
+  0x03: 'App charge off',
+  0x04: 'App charge on',
+  0x05: 'App discharge off',
+  0x06: 'App discharge on',
+  0x07: 'Remote charge off',
+  0x08: 'Remote charge on',
+  0x09: 'Remote discharge off',
+  0x0a: 'Remote discharge on',
+  0x0b: 'MOSFET over-temperature protection',
+  0x0c: 'MOSFET over-temperature protection released',
+  0x0d: 'Current sensor abnormal',
+  0x0e: 'Current sensor abnormal released',
+  0x0f: 'Coprocessor communication abnormal',
+  0x10: 'Coprocessor communication abnormal released',
   0x11: 'Cell overcharge protection',
   0x12: 'Cell overcharge protection released',
-  0x13: 'Cell undervoltage protection',
-  0x14: 'Cell undervoltage protection released',
+  0x13: 'Battery overcharge protection',
+  0x14: 'Battery overcharge protection released',
   0x15: 'Charge overcurrent protection',
   0x16: 'Charge overcurrent protection released',
-  0x1b: 'Charge low-temperature protection released',
+  0x17: 'Charge short-circuit protection',
+  0x18: 'Charge short-circuit protection released',
+  0x19: 'Charge over-temperature protection',
+  0x1a: 'Charge over-temperature protection released',
+  0x1b: 'Charge low-temperature protection',
+  0x1c: 'Charge low-temperature protection released',
+  0x1d: 'Cell undervoltage protection',
+  0x1e: 'Cell undervoltage protection released',
+  0x1f: 'Battery undervoltage protection',
+  0x20: 'Battery undervoltage protection released',
   0x21: 'Discharge overcurrent protection',
   0x22: 'Discharge overcurrent protection released',
+  0x23: 'Discharge short-circuit protection',
+  0x24: 'Discharge short-circuit protection released',
+  0x25: 'Discharge over-temperature protection',
+  0x26: 'Discharge over-temperature protection released',
+  0x27: 'Watchdog reset',
+  0x28: 'Discharge short-circuit protection II',
+  0x29: 'Emergency mode enabled manually',
+  0x2a: 'Emergency mode disabled manually',
+  0x2b: 'Emergency mode ended automatically',
+  0x2c: 'Turned off by app',
   0x2d: 'Turned off by button',
+  0x2e: 'Discharge switch-on failed',
+  0x2f: 'RS485 power off',
   0x30: 'CAN charge off',
   0x31: 'CAN charge on',
   0x32: 'CAN discharge off',
@@ -62,7 +105,16 @@ const LOGBOOK_LABELS: Readonly<Record<number, string>> = {
   0x3d: 'Button emergency on',
   0x3e: 'Button emergency off',
   0x3f: 'Button forced heating',
-  0x44: 'Discharge overcurrent protection III',
+  0x40: 'Discharge overcurrent protection II',
+  0x41: 'Discharge overcurrent protection III',
+  0x42: 'Short-circuit protection release failed',
+  0x43: 'Factory setting Li-ion',
+  0x44: 'Factory setting LFP',
+  0x45: 'Factory setting LTO',
+  0x46: 'Remote emergency on',
+  0x47: 'Remote emergency off',
+  0x48: 'Discharge under-temperature protection',
+  0x49: 'Discharge under-temperature protection released',
 }
 
 export function logbookLabel(code: number): string {
