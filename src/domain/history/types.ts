@@ -26,9 +26,10 @@ export const SOLAR_STREAM = 'solar'
 export type StreamName = typeof PACK_STREAM | typeof SOLAR_STREAM
 
 /**
- * Bumped when a column is added, removed or rescaled. Independent of the database version:
- * decoding dispatches on this, so a layout change leaves chunks already written readable
- * instead of forcing a migration that would have to rewrite tens of megabytes.
+ * Bumped when a column is added, removed or rescaled. Independent of the database version: a build
+ * decodes only chunks stamped with its own layout and lists the rest untouched, so a layout change
+ * costs a gap in what can be plotted rather than a migration that would have to rewrite tens of
+ * megabytes of chunks under a transaction that blocks every tab on the origin.
  */
 export const CHUNK_LAYOUT_VERSION = 1
 

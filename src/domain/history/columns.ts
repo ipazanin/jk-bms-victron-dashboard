@@ -389,14 +389,16 @@ export class SolarChunkBuilder extends ChunkStaging {
 // ── reading back ─────────────────────────────────────────────────────────────
 
 /**
- * Whether this build has a reader for a chunk's layout.
+ * Whether this build has a reader for a chunk's layout. Exactly its own, in both directions.
  *
- * A chunk written by a later build carries columns this one has never heard of. The archive lists
- * it and says so; it is never deleted, and it is never plotted from whichever columns happen to
- * line up by name.
+ * The readers below name their columns and index them, with no branch on `layout` anywhere. So a
+ * chunk from any other layout — one column older as much as one column newer — would be read
+ * through columns it need not carry, which throws on the first row rather than decoding to
+ * anything. A chunk this build cannot read is listed and declared; it is never deleted, and it is
+ * never plotted from whichever columns happen to line up by name.
  */
 export function isReadableLayout(layout: number): boolean {
-  return layout <= CHUNK_LAYOUT_VERSION
+  return layout === CHUNK_LAYOUT_VERSION
 }
 
 /** One row. `index` must be under `chunk.length`; the capacity says nothing about a tail chunk. */

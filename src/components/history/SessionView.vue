@@ -356,7 +356,8 @@ function tightSpan(elapsedMs: number): string {
           No samples. The BMS connected but sent nothing before the link went quiet.
         </p>
         <p v-if="loaded.unreadableChunks > 0" class="copy">
-          This browser holds a log recorded by a newer version of this page. It is left untouched.
+          Part of this log is stored in a layout this version of the page does not read. It is left
+          untouched.
         </p>
       </template>
 

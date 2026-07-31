@@ -99,8 +99,8 @@ const NOTHING_PRUNED: PruneExecution = { evicted: [], freedSamples: 0, truncated
  *
  * An upgrade transaction blocks every tab on the origin, and the chunk store is tens of megabytes,
  * so an upgrade may only add — never rewrite a chunk. A change to what a chunk holds rides on
- * `CHUNK_LAYOUT_VERSION` instead, where decoding dispatches on it and chunks already written stay
- * readable.
+ * `CHUNK_LAYOUT_VERSION` instead: a chunk keeps the layout it was stamped with, and a build that
+ * reads a different one lists it untouched rather than migrating it.
  */
 export function applySchema(database: IDBDatabase, oldVersion: number): void {
   if (oldVersion < 1) {
@@ -314,8 +314,11 @@ export class IdbHistoryStore implements HistoryStore {
       const chunks = tx.objectStore(CHUNKS).index(BY_SESSION).openCursor(IDBKeyRange.only(id))
       await cursorEach(chunks, (cursor) => {
         const chunk = cursor.value as HistoryChunk
-        if (!isReadableLayout(chunk.layout)) return
-        if (!overlapsWindow(chunk, held.window)) return
+        // A chunk in a layout this build does not read is handed over rather than dropped, and is
+        // not windowed either — its offsets are a column like any other, so this build cannot place
+        // it in time. The reader counts it and decodes nothing from it, which is what stops a
+        // session full of rows from being reported as empty.
+        if (isReadableLayout(chunk.layout) && !overlapsWindow(chunk, held.window)) return
         if (chunk.stream === PACK_STREAM) pack.push(chunk)
         else solar.push(chunk)
       })
@@ -345,6 +348,8 @@ export class IdbHistoryStore implements HistoryStore {
       const range = IDBKeyRange.bound([id, stream], [id, stream, HIGHEST_SEQ])
       await cursorEach(transaction.objectStore(CHUNKS).openCursor(range), (cursor) => {
         const chunk = cursor.value as HistoryChunk
+        // Unlike readSession, an unreadable chunk stops here: this feeds the export, which writes
+        // decoded rows and has no row it could write from a layout it cannot decode.
         if (!isReadableLayout(chunk.layout)) return
         if (!overlapsWindow(chunk, window)) return
         visit(chunk)

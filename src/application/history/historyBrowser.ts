@@ -97,7 +97,8 @@ export interface LoadedSession {
   /** What was actually read, which is not the session's own span when the read was clamped. */
   readonly window: TimeWindow
   readonly windowClamped: boolean
-  /** Chunks written by a newer build of this page. Skipped, never deleted, always declared. */
+  /** Chunks in a layout this build does not read, older or newer. Skipped, never deleted, always
+   *  declared — the store hands them over precisely so they can be counted here. */
   readonly unreadableChunks: number
 }
 

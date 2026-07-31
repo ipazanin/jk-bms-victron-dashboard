@@ -10,6 +10,7 @@ import {
   decodePackChunk,
   decodeSolarChunk,
   isReadableLayout,
+  readPackSample,
   sampleBytes,
 } from '../src/domain/history/columns'
 import {
@@ -19,7 +20,7 @@ import {
   PACK_STREAM,
   SOLAR_STREAM,
 } from '../src/domain/history/types'
-import type { HistoryChunk, PackSample, SolarSample } from '../src/domain/history/types'
+import type { HistoryChunk, PackChunk, PackSample, SolarSample } from '../src/domain/history/types'
 import { NOT_AVAILABLE_I16, NOT_AVAILABLE_U16, NOT_AVAILABLE_U9 } from '../src/domain/solar/types'
 import { SAMPLE_EPOCH, packSample, packSamples, solarSample, solarSamples } from './support/samples'
 
@@ -304,12 +305,27 @@ describe('what a chunk refuses', () => {
 })
 
 describe('the layout gate', () => {
-  it('reads its own layout and every earlier one', () => {
+  it('refuses any layout but its own, in both directions', () => {
+    // Neither reader branches on `layout`, so an older layout is exactly as unreadable as a newer
+    // one: both are a set of columns other than the ones the readers name. A chunk on either side
+    // is listed and declared, and never deleted for it.
     expect(isReadableLayout(CHUNK_LAYOUT_VERSION)).toBe(true)
-    expect(isReadableLayout(CHUNK_LAYOUT_VERSION - 1)).toBe(true)
+    expect(isReadableLayout(CHUNK_LAYOUT_VERSION - 1)).toBe(false)
+    expect(isReadableLayout(CHUNK_LAYOUT_VERSION + 1)).toBe(false)
   })
 
-  it('refuses a chunk a newer build wrote, which is listed and never deleted', () => {
-    expect(isReadableLayout(CHUNK_LAYOUT_VERSION + 1)).toBe(false)
+  it('is the only thing standing between a foreign chunk and a reader that throws on it', () => {
+    // What the gate is for, in the shape the next column change will produce it: a chunk written
+    // before that column existed carries every other column intact, and the reader indexes the one
+    // it does not hold. That is a TypeError on row 0, not a wrong number — so a gate that let any
+    // layout but its own through would take the session view down rather than skip the chunk.
+    const chunk = packChunkOf(packSamples(1))
+    const missingAColumn = { ...chunk, switches: undefined } as unknown as PackChunk
+
+    for (const foreignLayout of [CHUNK_LAYOUT_VERSION - 1, CHUNK_LAYOUT_VERSION + 1]) {
+      const foreignChunk: PackChunk = { ...chunk, layout: foreignLayout }
+      expect(isReadableLayout(foreignChunk.layout)).toBe(false)
+    }
+    expect(() => readPackSample(missingAColumn, 0)).toThrow(TypeError)
   })
 })
