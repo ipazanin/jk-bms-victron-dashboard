@@ -8,6 +8,7 @@
  * through the same guards the browser goes through.
  */
 
+import type { DetailLogTransfer } from '../../src/domain/bms/DetailLogTransfer'
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../src/domain/bms/types'
 import type { SolarReading } from '../../src/domain/solar/types'
 import type { BmsLink, DisconnectReason, JkBmsHandlers } from '../../src/infrastructure/ble/JkBmsClient'
@@ -46,6 +47,21 @@ export interface FakeBmsLink {
   reportDuringNextReconnect(report: () => void, rejection: Error): void
   /** The last id reconnect() was asked for, so a spec can assert the persisted id was used. */
   readonly lastReconnectId: string | null
+  /** What the next stored-log read comes back with. Silence, until a spec says otherwise. */
+  answerNextDetailLogWith(transfer: DetailLogTransfer): void
+  /** How a read over a link that has gone reaches the app: readDetailLog() rejects. */
+  failNextDetailLogWith(error: Error): void
+  /** The pack UTC offset the app supplied, so a spec can assert what it resolved records against. */
+  readonly lastDetailLogOffsetMinutes: number | null
+}
+
+const NOTHING_CAME_BACK: DetailLogTransfer = {
+  outcome: 'no-answer',
+  notificationBytes: 0,
+  notificationCount: 0,
+  frames: [],
+  records: [],
+  elapsedMs: 8_000,
 }
 
 export function fakeBmsLink(
@@ -58,6 +74,9 @@ export function fakeBmsLink(
   let interruptedConnect: InterruptedAttempt | null = null
   let interruptedReconnect: InterruptedAttempt | null = null
   let lastReconnectId: string | null = null
+  let nextDetailLog: DetailLogTransfer = NOTHING_CAME_BACK
+  let nextDetailLogError: Error | null = null
+  let lastDetailLogOffsetMinutes: number | null = null
 
   const link: BmsLink = {
     deviceName: options.deviceName ?? null,
@@ -90,6 +109,13 @@ export function fakeBmsLink(
       if (failure !== null) throw failure
       connected = true
     },
+    async readDetailLog({ packUtcOffsetMinutes }) {
+      lastDetailLogOffsetMinutes = packUtcOffsetMinutes
+      const failure = nextDetailLogError
+      nextDetailLogError = null
+      if (failure !== null) throw failure
+      return nextDetailLog
+    },
     async disconnect() {
       connected = false
     },
@@ -105,6 +131,15 @@ export function fakeBmsLink(
     },
     get lastReconnectId() {
       return lastReconnectId
+    },
+    get lastDetailLogOffsetMinutes() {
+      return lastDetailLogOffsetMinutes
+    },
+    answerNextDetailLogWith: (transfer) => {
+      nextDetailLog = transfer
+    },
+    failNextDetailLogWith: (error) => {
+      nextDetailLogError = error
     },
     emitSnapshot: (snapshot) => handlers.onSnapshot?.(snapshot),
     emitDeviceInfo: (info) => handlers.onDeviceInfo?.(info),

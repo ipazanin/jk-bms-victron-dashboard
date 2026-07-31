@@ -20,6 +20,7 @@
 
 import { computed, reactive, readonly, ref, shallowRef, watch } from 'vue'
 
+import type { DetailLogTransfer } from '../domain/bms/DetailLogTransfer'
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../domain/bms/types'
 import { JOINT_SERIOUS, JOINT_WARNING } from '../domain/cellBalance'
 import { reconcile } from '../domain/dcBus'
@@ -682,6 +683,37 @@ export function createTelemetry(deps: TelemetryDeps) {
     if (solarState.value !== 'idle') clearBmsView('user')
   }
 
+  /**
+   * The last stored-log read and how it went. A diagnostic and nothing more: it is not persisted,
+   * not recorded, and no instrument reads it — the only consumer is the card that shows it.
+   */
+  const detailLog = shallowRef<DetailLogTransfer | null>(null)
+  const detailLogReading = ref(false)
+  const detailLogError = ref<string | null>(null)
+
+  /**
+   * The pack's own zone is unknown — which offset resolves its counter is one of the things a real
+   * read is meant to settle — so this browser's current offset stands in for it, signed the way a
+   * zone is written rather than the way getTimezoneOffset reports it. It moves each record's
+   * `recordedAt` and nothing else; the raw counter is carried through whatever we guess here.
+   */
+  function browserUtcOffsetMinutes(): number {
+    return -new Date(now()).getTimezoneOffset()
+  }
+
+  async function readDetailLog(): Promise<void> {
+    if (bmsState.value !== 'live' || detailLogReading.value) return
+    detailLogReading.value = true
+    detailLogError.value = null
+    try {
+      detailLog.value = await bmsLink.readDetailLog({ packUtcOffsetMinutes: browserUtcOffsetMinutes() })
+    } catch (error) {
+      detailLogError.value = (error as Error).message
+    } finally {
+      detailLogReading.value = false
+    }
+  }
+
   async function startSolar(key: string): Promise<void> {
     solarError.value = null
     foreignDeviceSeen.value = false
@@ -804,6 +836,9 @@ export function createTelemetry(deps: TelemetryDeps) {
     rememberedStatus: readonly(rememberedStatus),
     lastDevice: readonly(lastDevice),
     logbook,
+    detailLog,
+    detailLogReading: readonly(detailLogReading),
+    detailLogError: readonly(detailLogError),
     packReach: observations.packReach,
     solarReach: observations.solarReach,
     cellReach: observations.cellReach,
@@ -813,6 +848,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     connectBms,
     reconnectBms,
     disconnectBms,
+    readDetailLog,
     startSolar,
     stopSolar,
     browseSession,

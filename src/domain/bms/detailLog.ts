@@ -42,12 +42,16 @@
  * hours from a neighbouring record drifts a second per sample.
  */
 
+import type { DetailLogFrameHeader } from './DetailLogFrameHeader'
+import type { DetailLogOutcome } from './DetailLogOutcome'
 import { logbookLabel } from './logbook'
+import { FRAME_DETAIL_LOG, frameType } from './protocol'
 
 const MILLI = 0.001
 const CENTI = 0.01
 const DECI = 0.1
 
+const FRAME_COUNTER = 5
 const FIRST_RECORD_INDEX = 6
 const RECORD_COUNT = 8
 const RECORD_BASE = 9
@@ -204,4 +208,37 @@ export function decodeDetailLog(
     records.push(readRecord(data, base, firstIndex + position, packUtcOffsetMs))
   }
   return records
+}
+
+/**
+ * Reads a frame's leading fields without decoding a single record, and without caring what type of
+ * frame it is — a reply to 0xA7 that is not a detail log has to be describable too, or the case
+ * where the opcode means something else on this firmware cannot be told from the case where it
+ * means nothing.
+ */
+export function readDetailLogHeader(frame: Uint8Array): DetailLogFrameHeader {
+  const header = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
+  return {
+    frameType: frameType(frame),
+    counter: header.getUint8(FRAME_COUNTER),
+    firstRecordIndex: header.getUint16(FIRST_RECORD_INDEX, true),
+    recordCount: header.getUint8(RECORD_COUNT),
+  }
+}
+
+/**
+ * Which of the four answers a stored-log read came back with.
+ *
+ * The order of the tests is the point. Raw bytes are asked about first, before anything that
+ * depends on assembly succeeding, because a pack that never answered and a burst that arrived in
+ * pieces are indistinguishable by any later measure.
+ */
+export function detailLogOutcome(
+  notificationBytes: number,
+  frames: readonly DetailLogFrameHeader[],
+): DetailLogOutcome {
+  if (notificationBytes === 0) return 'no-answer'
+  if (frames.length === 0) return 'torn-burst'
+  if (!frames.some((header) => header.frameType === FRAME_DETAIL_LOG)) return 'other-frames'
+  return 'records-read'
 }

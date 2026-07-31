@@ -11,10 +11,13 @@
  * Below the range-scoped cards are the two facts that belong to the pack rather than to a window:
  * the lifetime counters off whatever frame is on the instruments now, and the event logbook from
  * the last time this browser read one, kept so it can be reviewed off the boat.
+ *
+ * Last of all is a diagnostic that belongs to no window and is kept nowhere: an on-demand read of
+ * the pack's stored detail log, which reports what the command produced rather than what it means.
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
-import { ampHours, duration } from '../../application/format'
+import { ampHours, amps, duration, volts } from '../../application/format'
 import { useHistoryBrowser } from '../../application/history/historyBrowser'
 import {
   bucketUnitFor,
@@ -26,6 +29,7 @@ import {
   windowFor,
 } from '../../application/history/statsRange'
 import type { RangeKind } from '../../application/history/statsRange'
+import type { DetailLogTransfer } from '../../domain/bms/DetailLogTransfer'
 import type { TimeWindow } from '../../domain/history/types'
 import { eventWallTime } from '../../application/logbook'
 import { hashOf } from '../../application/route'
@@ -37,7 +41,8 @@ import RangeFilter from '../stats/RangeFilter.vue'
 import SummaryTiles from '../stats/SummaryTiles.vue'
 
 const telemetry = useTelemetry()
-const { battery, device, logbook, source } = telemetry
+const { battery, bmsState, detailLog, detailLogError, detailLogReading, device, logbook, readDetailLog, source } =
+  telemetry
 const browser = useHistoryBrowser()
 
 /**
@@ -179,6 +184,60 @@ const logbookAge = computed(() => {
   if (stored === null) return null
   return stamp.format(stored.fetchedAt)
 })
+
+// ── stored detail log (diagnostic) ────────────────────────────────────────────
+
+/**
+ * The pack's counter rendered exactly as the pack holds it — read with UTC getters, no zone
+ * applied. It is shown beside the resolved instant because which of the two the counter means is
+ * still unsettled, and only the raw face is a fact about the device.
+ */
+const packCounterFace = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'UTC',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+})
+
+function describeOutcome(transfer: DetailLogTransfer): string {
+  const seconds = (transfer.elapsedMs / 1000).toFixed(1)
+  if (transfer.outcome === 'no-answer') {
+    return `Nothing came back — not one byte in ${seconds} s. The pack does not answer this command.`
+  }
+  if (transfer.outcome === 'torn-burst') {
+    return `${transfer.notificationBytes} bytes arrived across ${transfer.notificationCount} notifications and not one frame assembled from them. The pack answered; the reply was torn up in transit.`
+  }
+  if (transfer.outcome === 'other-frames') {
+    return `${transfer.frames.length} frames came back and none was a detail log. The command means something else on this firmware — the frame types below say what.`
+  }
+  return `${transfer.frames.length} frames, ${transfer.records.length} records, ${transfer.notificationBytes} bytes in ${seconds} s.`
+}
+
+const outcomeSentence = computed(() => {
+  const transfer = detailLog.value
+  return transfer === null ? null : describeOutcome(transfer)
+})
+
+/** One line per frame, so a whole reply's paging can be read off a single run. */
+const frameLines = computed(() => {
+  const transfer = detailLog.value
+  if (transfer === null) return []
+  return transfer.frames.map((header, position) => ({
+    key: position,
+    text: `#${position} · type 0x${header.frameType.toString(16).padStart(2, '0')} · counter ${header.counter} · first record ${header.firstRecordIndex} · carries ${header.recordCount}`,
+  }))
+})
+
+/** By the pack's own counter rather than by ring index, which wraps and can be read out of order. */
+const newestRecord = computed(() => {
+  const transfer = detailLog.value
+  if (transfer === null || transfer.records.length === 0) return null
+  return transfer.records.reduce((newest, record) => (record.packClockMs > newest.packClockMs ? record : newest))
+})
 </script>
 
 <template>
@@ -266,6 +325,91 @@ const logbookAge = computed(() => {
             <span class="what">{{ row.label }}</span>
           </li>
         </ul>
+      </section>
+
+      <!-- The pack's other store, read on demand and kept nowhere. -->
+      <section class="card">
+        <header class="card-head">
+          <h3 class="plate">Stored detail log</h3>
+          <p class="muted">
+            Asks the pack for its own ring of sampled snapshots. Nothing is saved — what this reports
+            is what came back, counted in raw notification bytes.
+          </p>
+        </header>
+
+        <div class="actions">
+          <button
+            type="button"
+            :disabled="bmsState !== 'live' || detailLogReading"
+            @click="readDetailLog()"
+          >
+            {{ detailLogReading ? 'Reading…' : 'Read stored log' }}
+          </button>
+          <span v-if="bmsState !== 'live'" class="muted">Connect the BMS first.</span>
+          <span v-else-if="detailLogReading" class="muted">
+            Waiting on the pack. It has up to thirty seconds, and ends early once the reply goes quiet.
+          </span>
+        </div>
+
+        <p v-if="detailLogError !== null" class="copy failure">{{ detailLogError }}</p>
+
+        <template v-if="detailLog !== null">
+          <p class="copy outcome">{{ outcomeSentence }}</p>
+
+          <dl class="lifetime-tiles">
+            <div class="chip">
+              <dt>Raw bytes</dt>
+              <dd class="secondary-figure">{{ detailLog.notificationBytes }}</dd>
+            </div>
+            <div class="chip">
+              <dt>Notifications</dt>
+              <dd class="secondary-figure">{{ detailLog.notificationCount }}</dd>
+            </div>
+            <div class="chip">
+              <dt>Frames</dt>
+              <dd class="secondary-figure">{{ detailLog.frames.length }}</dd>
+            </div>
+            <div class="chip">
+              <dt>Elapsed</dt>
+              <dd class="secondary-figure">{{ (detailLog.elapsedMs / 1000).toFixed(1) }} s</dd>
+            </div>
+          </dl>
+
+          <ul v-if="frameLines.length > 0" class="frames">
+            <li v-for="line in frameLines" :key="line.key" class="readout frame">{{ line.text }}</li>
+          </ul>
+
+          <!-- The layout check, on screen rather than left to be remembered: the newest stored
+               snapshot beside what the instruments read right now. Wrong offsets or a wrong stride
+               show up here as a voltage and a current that do not match the pack in front of you. -->
+          <div v-if="newestRecord !== null" class="compare">
+            <p class="muted">
+              Newest stored record, ring index {{ newestRecord.index }}. Pack counter reads
+              <span class="readout">{{ packCounterFace.format(newestRecord.packClockMs) }}</span> —
+              resolved against this browser's offset that is
+              <span class="readout">{{ stamp.format(newestRecord.recordedAt) }}</span
+              >.
+            </p>
+            <dl class="lifetime-tiles">
+              <div class="chip">
+                <dt>Stored pack voltage</dt>
+                <dd class="secondary-figure">{{ volts(newestRecord.packVoltage, 2) }}</dd>
+              </div>
+              <div class="chip">
+                <dt>Live pack voltage</dt>
+                <dd class="secondary-figure">{{ battery === null ? '—' : volts(battery.packVoltage, 2) }}</dd>
+              </div>
+              <div class="chip">
+                <dt>Stored current</dt>
+                <dd class="secondary-figure">{{ amps(newestRecord.current) }}</dd>
+              </div>
+              <div class="chip">
+                <dt>Live current</dt>
+                <dd class="secondary-figure">{{ battery === null ? '—' : amps(battery.current) }}</dd>
+              </div>
+            </dl>
+          </div>
+        </template>
       </section>
     </div>
   </section>
@@ -410,6 +554,78 @@ const logbookAge = computed(() => {
 
 .what {
   color: var(--ink);
+}
+
+/* Stored detail log */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--card-border);
+  color: var(--ink);
+  border-radius: var(--r-sm);
+  padding: 0.6rem 1rem;
+  min-height: var(--tap);
+  font-family: var(--font-label);
+  font-size: 0.8125rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.actions button:hover:not(:disabled) {
+  border-color: var(--ink-secondary);
+}
+
+.actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.outcome {
+  margin: 1rem 0;
+}
+
+.failure {
+  margin: 1rem 0 0;
+  color: var(--status-serious);
+}
+
+/* The frame headers are the paging evidence, so all of them are listed; the box scrolls rather
+   than pushing the comparison below it off the screen. */
+.frames {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--raised);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-sm);
+  max-height: 12rem;
+  overflow: auto;
+}
+
+.frame {
+  font-size: 0.75rem;
+  color: var(--ink-secondary);
+  white-space: nowrap;
+}
+
+.compare {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--gridline);
+}
+
+.compare > .muted {
+  margin: 0 0 0.85rem;
 }
 
 @container (max-width: 560px) {

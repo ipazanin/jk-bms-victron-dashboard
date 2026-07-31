@@ -12,9 +12,11 @@
 
 import {
   CMD_CELL_INFO,
+  CMD_DETAIL_LOG,
   CMD_DEVICE_INFO,
   CMD_LOGBOOK,
   FRAME_CELL_INFO,
+  FRAME_DETAIL_LOG,
   FRAME_DEVICE_INFO,
   FRAME_LOGBOOK,
   FRAME_SETTINGS,
@@ -27,8 +29,10 @@ import {
 import { decodeCellInfo, decodeDeviceInfo, decodeSettings } from '../../domain/bms/decode'
 import { decodeLogbook } from '../../domain/bms/logbook'
 import type { LogbookEvent } from '../../domain/bms/logbook'
+import type { DetailLogTransfer } from '../../domain/bms/DetailLogTransfer'
 import { toArrayBuffer } from '../../domain/bytes'
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../domain/bms/types'
+import { DetailLogRun } from './DetailLogRun'
 
 const STALL_TIMEOUT_MS = 8_000
 const STALL_CHECK_MS = 2_000
@@ -89,6 +93,22 @@ export interface BmsLink {
    * (out of range, or permission gone), or the connection does not complete in time.
    */
   reconnect(deviceId: string): Promise<void>
+  /**
+   * Read the pack's own store of sampled snapshots (command 0xA7) as a one-off diagnostic, and
+   * report what came back rather than only what decoded.
+   *
+   * On demand, from the UI, and never from the handshake: the reply can take tens of seconds, where
+   * `attachWithin` bounds the whole handshake at six and turns anything slower into an
+   * out-of-range error.
+   *
+   * `packUtcOffsetMinutes` is signed the way a zone is written, so CET is +60. It resolves the
+   * records' `recordedAt` and nothing else — each record carries the pack's raw counter untouched,
+   * which is what settles the convention the counter runs on.
+   *
+   * Rejects only when there is no link to read over. A read that heard nothing resolves, because
+   * silence is the finding.
+   */
+  readDetailLog(packClock: { readonly packUtcOffsetMinutes: number }): Promise<DetailLogTransfer>
   disconnect(): Promise<void>
 }
 
@@ -107,6 +127,10 @@ export class JkBmsClient implements BmsLink {
    * unwinds instead of installing a listener and a stall timer on a link nothing is holding.
    */
   private attachToken = 0
+  /** The stored-log read in flight, if any. Notifications are tallied into it as they arrive. */
+  private detailLogRun: DetailLogRun | null = null
+  /** Held so a second press joins the running read instead of starting a rival one. */
+  private detailLogRead: Promise<DetailLogTransfer> | null = null
 
   constructor(handlers: JkBmsHandlers = {}) {
     this.handlers = handlers
@@ -248,6 +272,9 @@ export class JkBmsClient implements BmsLink {
 
   async disconnect(): Promise<void> {
     this.stopStallTimer()
+    // A read still in flight is settled with what it collected rather than left hanging on a
+    // characteristic that is about to be unsubscribed.
+    this.detailLogRun?.stop()
     // Supersede any attach still in flight, so a handshake completing after a deliberate teardown
     // aborts rather than re-establishing the link this call is tearing down.
     this.attachToken += 1
@@ -273,6 +300,59 @@ export class JkBmsClient implements BmsLink {
     this.assembler.reset()
   }
 
+  readDetailLog(packClock: { readonly packUtcOffsetMinutes: number }): Promise<DetailLogTransfer> {
+    if (this.detailLogRead === null) {
+      this.detailLogRead = this.collectDetailLog(packClock.packUtcOffsetMinutes).finally(() => {
+        this.detailLogRead = null
+      })
+    }
+    return this.detailLogRead
+  }
+
+  /**
+   * Writes 0xA7 and measures the window behind it.
+   *
+   * The stall watch is suspended for the read and restarted after it, deliberately. A pack that is
+   * preparing a dump goes quiet, and three quiet strikes tear the link down at about twenty-four
+   * seconds — killing the very measurement this method exists to take, and doing it in a way that
+   * would read as "the pack stopped answering" when the pack was busy answering. Suspending also
+   * keeps the stall poke out of the window: its cell-info reply would otherwise be counted as bytes
+   * 0xA7 produced, which is exactly the confusion the raw byte count is here to prevent.
+   *
+   * Nothing is lost by suspending. A link that genuinely dies still reports through
+   * gattserverdisconnected, which is untouched, and the run settles with what it collected; the
+   * ceiling inside the run bounds the blind window either way.
+   */
+  private async collectDetailLog(packUtcOffsetMinutes: number): Promise<DetailLogTransfer> {
+    if (!this.connected || this.characteristic === null) {
+      throw new Error('Connect the BMS before reading its stored log.')
+    }
+    this.stopStallTimer()
+    const run = new DetailLogRun(packUtcOffsetMinutes)
+    this.detailLogRun = run
+    try {
+      await this.request(CMD_DETAIL_LOG)
+      return await run.transfer
+    } finally {
+      run.stop()
+      this.detailLogRun = null
+      this.resumeStallWatch()
+    }
+  }
+
+  /**
+   * Puts the stall watch back with a fresh grace period, so the silence the read asked for is never
+   * counted against the pack. Skipped on a link that has gone away in the meantime — there is
+   * nothing left to poke, and a timer over a dead radio would report a stall for a link that
+   * already announced its own drop.
+   */
+  private resumeStallWatch(): void {
+    if (!this.connected || this.stallTimer !== null) return
+    this.lastFrameAt = Date.now()
+    this.stallStrikes = 0
+    this.stallTimer = setInterval(this.checkStall, STALL_CHECK_MS)
+  }
+
   private async request(command: number): Promise<void> {
     const characteristic = this.characteristic
     if (!characteristic) return
@@ -288,10 +368,16 @@ export class JkBmsClient implements BmsLink {
     const value = (event.target as BluetoothRemoteGATTCharacteristic).value
     if (!value) return
     const chunk = new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+    // Counted before the assembler is given it. A pack that ignored the command and a burst the
+    // transport tore up both assemble to nothing, and only the raw byte count tells them apart.
+    this.detailLogRun?.noteNotification(chunk)
 
     for (const frame of this.assembler.feed(chunk)) {
       this.lastFrameAt = Date.now()
       this.stallStrikes = 0
+      // Every frame in the window, whatever its type: 0xA7 answering with something that is not a
+      // detail log is a finding of its own, and it is only visible if the other types are recorded.
+      this.detailLogRun?.noteFrame(frame)
       try {
         switch (frameType(frame)) {
           case FRAME_CELL_INFO:
@@ -305,6 +391,13 @@ export class JkBmsClient implements BmsLink {
             break
           case FRAME_LOGBOOK:
             this.handlers.onLogbook?.(decodeLogbook(frame))
+            break
+          case FRAME_DETAIL_LOG:
+            // Decoded only while a read is running: the offset that resolves the pack's counter
+            // comes from the caller, and nothing outside a transfer consumes these records. It sits
+            // in the switch so a frame that will not decode reaches onError like every other type,
+            // instead of failing the whole transfer.
+            this.detailLogRun?.readRecordsFrom(frame)
             break
         }
       } catch (error) {
@@ -335,6 +428,9 @@ export class JkBmsClient implements BmsLink {
 
   private readonly handleDisconnect = (): void => {
     this.stopStallTimer()
+    // The bytes counted before the radio went are a measurement in their own right, so the read
+    // ends with them rather than waiting out a ceiling nothing can answer.
+    this.detailLogRun?.stop()
     // Supersede any attach still in flight. The link it is handshaking over has just gone, and
     // without this the remaining requests write to a null characteristic and return quietly — the
     // handshake would then "succeed" and start a stall timer over a dead radio.

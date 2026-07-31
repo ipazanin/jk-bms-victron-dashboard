@@ -312,6 +312,65 @@ describe('browsing a stored session', () => {
   })
 })
 
+describe('reading the pack’s stored detail log', () => {
+  // Diagnostic wiring only: the transfer is held for the card that shows it and reaches neither
+  // the archive nor the remembered snapshot.
+  let bms: FakeBmsLink
+  let solar: FakeSolarScan
+
+  beforeEach(() => {
+    localStorage.clear()
+    bms = fakeBmsLink()
+    solar = fakeSolarScan()
+    telemetry = createTelemetry({
+      createBmsLink: bms.create,
+      createSolarScan: solar.create,
+      historyStore: () => null,
+      now: () => Date.now(),
+      monotonic: () => performance.now(),
+      newId: () => 'session',
+    })
+  })
+
+  it('holds what came back and resolves the records against this browser’s offset', async () => {
+    await telemetry.connectBms()
+    const answer = {
+      outcome: 'torn-burst',
+      notificationBytes: 4_812,
+      notificationCount: 27,
+      frames: [],
+      records: [],
+      elapsedMs: 3_100,
+    } as const
+    bms.answerNextDetailLogWith(answer)
+
+    await telemetry.readDetailLog()
+
+    expect(telemetry.detailLog.value).toEqual(answer)
+    expect(telemetry.detailLogReading.value).toBe(false)
+    expect(telemetry.detailLogError.value).toBeNull()
+    expect(bms.lastDetailLogOffsetMinutes).toBe(-new Date().getTimezoneOffset())
+  })
+
+  it('does nothing at all when no pack is connected', async () => {
+    await telemetry.readDetailLog()
+
+    expect(bms.lastDetailLogOffsetMinutes).toBeNull()
+    expect(telemetry.detailLog.value).toBeNull()
+  })
+
+  it('shows a failed read as a banner and leaves the last transfer alone', async () => {
+    await telemetry.connectBms()
+    bms.failNextDetailLogWith(new Error('Connect the BMS before reading its stored log.'))
+
+    await telemetry.readDetailLog()
+
+    expect(telemetry.detailLogError.value).toMatch(/Connect the BMS/)
+    expect(telemetry.detailLog.value).toBeNull()
+    expect(telemetry.detailLogReading.value).toBe(false)
+  })
+})
+
 describe('the windows never outlive the pack they describe', () => {
   let clock = 0
   let bms: FakeBmsLink
