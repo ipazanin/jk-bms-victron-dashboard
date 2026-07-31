@@ -32,7 +32,7 @@ import {
   readCborByteString,
   readCborUnsignedInteger,
 } from '../src/domain/solar/tunnel/cbor'
-import { TUNNEL_OPCODES, TUNNEL_OPCODE_BYTES } from '../src/domain/solar/tunnel/TunnelOpcode'
+import { TUNNEL_OPCODE_BYTES } from '../src/domain/solar/tunnel/TunnelOpcode'
 import { MAX_PDU_LENGTH, TunnelReassembler } from '../src/domain/solar/tunnel/TunnelReassembler'
 import { decodeTunnelReply, encodeRegisterReadRequest, readTunnelPdu } from '../src/domain/solar/tunnel/pdu'
 import type { TunnelPdu } from '../src/domain/solar/tunnel/TunnelPdu'
@@ -484,7 +484,12 @@ describe('readTunnelPdu', () => {
 
 describe('the opcode enum', () => {
   it('names every byte the protocol defines', () => {
-    expect(TUNNEL_OPCODES).toHaveLength(5)
-    expect(TUNNEL_OPCODES.map((opcode) => TUNNEL_OPCODE_BYTES[opcode])).toEqual([0x05, 0x06, 0x07, 0x08, 0x09])
+    expect(TUNNEL_OPCODE_BYTES).toEqual({
+      read: 0x05,
+      write: 0x06,
+      error: 0x07,
+      valueReport: 0x08,
+      registerUnsupported: 0x09,
+    })
   })
 })

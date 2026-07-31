@@ -8,14 +8,12 @@
  */
 export type TunnelOpcode = 'read' | 'write' | 'error' | 'valueReport' | 'registerUnsupported'
 
-export const TUNNEL_OPCODES: readonly TunnelOpcode[] = [
-  'read',
-  'write',
-  'error',
-  'valueReport',
-  'registerUnsupported',
-]
-
+/**
+ * The whole opcode space, and the only place it is written down. A `Record` keyed by the union is
+ * exhaustiveness-checked, so a name added to `TunnelOpcode` without a byte here fails to compile —
+ * which a parallel list of the same names could not catch. An opcode missing its byte would make a
+ * valid PDU undecodable, and the reassembler would then resynchronise straight past it.
+ */
 export const TUNNEL_OPCODE_BYTES: Readonly<Record<TunnelOpcode, number>> = {
   read: 0x05,
   write: 0x06,
@@ -25,7 +23,10 @@ export const TUNNEL_OPCODE_BYTES: Readonly<Record<TunnelOpcode, number>> = {
 }
 
 const OPCODES_BY_BYTE: ReadonlyMap<number, TunnelOpcode> = new Map(
-  TUNNEL_OPCODES.map((opcode): [number, TunnelOpcode] => [TUNNEL_OPCODE_BYTES[opcode], opcode]),
+  Object.entries(TUNNEL_OPCODE_BYTES).map(([opcode, opcodeByte]): [number, TunnelOpcode] => [
+    opcodeByte,
+    opcode as TunnelOpcode,
+  ]),
 )
 
 export function tunnelOpcodeForByte(opcodeByte: number): TunnelOpcode | null {
