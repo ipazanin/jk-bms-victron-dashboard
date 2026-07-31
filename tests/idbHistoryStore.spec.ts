@@ -33,12 +33,10 @@ import { describeHistoryStore } from './support/describeHistoryStore'
  * exercised — compound keys, index cursors, transaction scope and commit ordering are exactly the
  * things a hand-rolled fake would get wrong in the same direction as the code under test.
  *
- * Two limitations are worth stating rather than working around. `fake-indexeddb` emulates no
- * quota, so a full disk cannot be reproduced here: the adapter's retry decision is extracted as
+ * One limitation is worth stating rather than working around: `fake-indexeddb` emulates no quota,
+ * so a full disk cannot be reproduced here. The adapter's retry decision is extracted as
  * `classifyWriteFailure` and tested as the pure branch it is, and the recorder's behaviour on a
- * refused write is driven through the port instead. And `onblocked` needs an upgrade to block; at
- * DATABASE_VERSION 1 there is no earlier version for another connection to hold open, so the
- * blocked path has no trigger until a second version exists.
+ * refused write is driven through the port instead.
  */
 
 let databaseCount = 0
@@ -370,9 +368,37 @@ describe('another tab upgrading the schema', () => {
   })
 })
 
+/** Comfortably past the probe's own blocked wait, which the module keeps to itself. */
+const PAST_THE_BLOCKED_WAIT_MS = 10_000
+
+/**
+ * Waits for the probe to start counting the blocking tab out.
+ *
+ * Only `setTimeout` may be faked while a blocked open is in flight: `fake-indexeddb` drives its
+ * whole event dispatch through `setImmediate` and polls on it for the blocking connection to
+ * close, so faking that strands the request half-open and every later use of the database with it.
+ * With the clock only half fake, the countdown has to be waited for rather than assumed — it is
+ * armed several dispatches after `open()` returns.
+ */
+async function waitForBlockedCountdown(): Promise<void> {
+  for (let dispatch = 0; dispatch < 100 && vi.getTimerCount() === 0; dispatch += 1) {
+    await new Promise((resume) => setImmediate(resume))
+  }
+}
+
 describe('probing for an archive', () => {
+  /**
+   * The connection standing in for the tab that is holding the upgrade off. It is closed here
+   * rather than in the case, because a failed assertion that left it open would leave the open
+   * request stuck half-way and hang every case after this one instead of failing one.
+   */
+  let blockingTab: IDBDatabase | null = null
+
   afterEach(async () => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
+    blockingTab?.close()
+    blockingTab = null
     await deleteDatabase(DATABASE_NAME)
   })
 
@@ -406,6 +432,25 @@ describe('probing for an archive', () => {
     const survivor = await openDatabase(DATABASE_NAME, DATABASE_VERSION + 1)
     expect(survivor.version).toBe(DATABASE_VERSION + 1)
     survivor.close()
+  })
+
+  it('gives up on a tab that is still holding the older version open', async () => {
+    // A tab running the previous build blocks the upgrade for as long as it stays open, and no
+    // event ever arrives to say so. Waiting forever leaves the owner with a page that will never
+    // record and never explain itself, so the probe bounds the wait and names the cause.
+    blockingTab = await openDatabase(DATABASE_NAME, DATABASE_VERSION - 1)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+
+    const probe = openHistoryStore()
+    await waitForBlockedCountdown()
+    vi.advanceTimersByTime(PAST_THE_BLOCKED_WAIT_MS)
+    const store = await probe
+
+    expect(store.availability.usable).toBe(false)
+    expect(store.availability.reason).toBe('open-blocked')
+    const outcome = await store.commitChunk(packChunk(packSamples(3)), sessionPatch())
+    expect(outcome.stored).toBe(false)
+    expect(outcome.failure).toBe('open-blocked')
   })
 
   it('answers null for persistence when the browser will not say', async () => {
