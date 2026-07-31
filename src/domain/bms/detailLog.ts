@@ -16,8 +16,26 @@
  *   [8]     count of records carried, at most 12
  *   [9..]   records, 24 bytes each, contiguous — 9 + 12 × 24 = 297, two bytes idle before the checksum
  *
- * Timestamps are the pack's own RTC counter: seconds from midnight on 2020-01-01 in LOCAL time,
- * not UTC. Read against a UTC epoch every record shifts by the host's offset from Greenwich.
+ * Timestamps are the pack's own RTC counter, seconds wide, counting from midnight on 2020-01-01.
+ * That epoch is confirmed independently: a capture of the vendor app setting the pack's clock
+ * writes the counter that date produces. What the counter is counting is NOT confirmed. It is
+ * either a naive local wall clock, or absolute seconds since the instant that was local midnight
+ * on 2020-01-01 in the pack's own zone. The two agree wherever the pack's zone is on standard
+ * time and differ by its summer-time shift, one hour in Europe, wherever it is not.
+ *
+ * Both readings are one equation with a different constant, so the caller supplies the constant
+ * and this decoder does not have to choose:
+ *
+ *     recordedAt = Date.UTC(2020, 0, 1) + rtcSeconds × 1000 − packUtcOffsetMinutes × 60000
+ *
+ * Under the naive-local reading that offset is the pack zone's offset in force at the record;
+ * under the absolute reading it is the pack zone's standard offset, the same number all year. A
+ * summer record resolved with the wrong one of the two is an hour out, so until the convention is
+ * settled a caller that cannot tell them apart must not present these instants as exact.
+ *
+ * A pack whose RTC was never set counts from the epoch itself, which makes a record dated near
+ * 2020-01-01 an unset clock rather than a sample. No threshold separates the two — an uncalibrated
+ * pack reads small and non-zero, not zero — so the decoder hands the counter through unjudged.
  *
  * Sampling runs on a 3601-second period rather than 3600, because the device crystal is slow. A
  * record's own timestamp is therefore the only authority on when it was taken; stepping whole
@@ -38,8 +56,14 @@ const RECORD_STRIDE = 24
 /** One frame carries no more than this, and 9 + 12 × 24 = 297 is why. */
 const MAX_RECORDS_PER_FRAME = 12
 
-/** Midnight on 2020-01-01 in the host's own zone, where the pack's RTC counter starts. */
-const RTC_EPOCH_MS = new Date(2020, 0, 1).getTime()
+/** Where the pack's RTC counter starts, as a fixed instant so that no host clock can move it. */
+const RTC_EPOCH_UTC_MS = Date.UTC(2020, 0, 1)
+
+const MILLISECONDS_PER_MINUTE = 60_000
+
+/** Real zones span −12:00 to +14:00; past that the caller has handed us something that is not one. */
+const LOWEST_REAL_UTC_OFFSET_MINUTES = -12 * 60
+const HIGHEST_REAL_UTC_OFFSET_MINUTES = 14 * 60
 
 /** The device reports this in place of a temperature when no probe answers. */
 const TEMPERATURE_UNAVAILABLE = -1
@@ -69,7 +93,17 @@ const HEATING_CURRENT = 23
 export interface DetailLogRecord {
   /** Position in the device's ring, counting from the oldest record it still holds. */
   readonly index: number
-  /** Wall-clock milliseconds, read from the pack's RTC against a local 2020-01-01 epoch. */
+  /**
+   * The pack's own clock reading and nothing more: its RTC counter laid on 2020-01-01T00:00:00Z.
+   * Read it with the UTC getters and it renders the clock face the vendor app shows — exactly, if
+   * the counter runs on naive local time; shifted by the pack zone's standard offset, if it runs
+   * on absolute seconds. It shares no origin with `Date.now()` and must never be compared to it.
+   */
+  readonly packClockMs: number
+  /**
+   * Epoch milliseconds: the counter resolved against the offset the caller supplied, and the only
+   * timestamp here that can be joined against a real clock.
+   */
   readonly recordedAt: number
   readonly eventCode: number
   /** The event that triggered this record, or null when it is a scheduled sample. */
@@ -99,14 +133,16 @@ function eventLabelFor(code: number): string | null {
   return logbookLabel(code)
 }
 
-function readRecord(data: DataView, base: number, index: number): DetailLogRecord {
+function readRecord(data: DataView, base: number, index: number, packUtcOffsetMs: number): DetailLogRecord {
   const statusBits = data.getUint8(base + STATUS_BITS)
   const eventCode = data.getUint8(base + EVENT_CODE)
   const highestTemperature = data.getInt8(base + HIGHEST_TEMPERATURE)
+  const packClockMs = RTC_EPOCH_UTC_MS + data.getUint32(base + RTC_SECONDS, true) * 1000
 
   return {
     index,
-    recordedAt: RTC_EPOCH_MS + data.getUint32(base + RTC_SECONDS, true) * 1000,
+    packClockMs,
+    recordedAt: packClockMs - packUtcOffsetMs,
     eventCode,
     eventLabel: eventLabelFor(eventCode),
     chargingEnabled: (statusBits & CHARGE_MOSFET_ON) !== 0,
@@ -131,11 +167,27 @@ function readRecord(data: DataView, base: number, index: number): DetailLogRecor
 /**
  * Reads the records one frame carries, keyed by their position in the device's ring.
  *
+ * `packUtcOffsetMinutes` is signed the way a zone is written rather than the way JavaScript
+ * reports it, so CET is +60 and CEST +120 — the opposite sign to `Date.prototype.getTimezoneOffset`.
+ * It has no default: which offset resolves this pack's counter is a fact about the pack and its
+ * installation, and a decoder that guessed it would hand back plausible instants that are wrong.
+ *
  * The frame is expected to have passed the assembler's checksum already, so a count above what a
  * frame can physically hold means the layout is not what this decoder was written for, and
  * throwing beats handing back records read from the wrong offsets.
  */
-export function decodeDetailLog(frame: Uint8Array): DetailLogRecord[] {
+export function decodeDetailLog(
+  frame: Uint8Array,
+  { packUtcOffsetMinutes }: { readonly packUtcOffsetMinutes: number },
+): DetailLogRecord[] {
+  if (
+    !Number.isFinite(packUtcOffsetMinutes) ||
+    packUtcOffsetMinutes < LOWEST_REAL_UTC_OFFSET_MINUTES ||
+    packUtcOffsetMinutes > HIGHEST_REAL_UTC_OFFSET_MINUTES
+  ) {
+    throw new Error(`pack UTC offset of ${packUtcOffsetMinutes} minutes is not an offset any zone uses`)
+  }
+
   const data = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
   const firstIndex = data.getUint16(FIRST_RECORD_INDEX, true)
   const declared = data.getUint8(RECORD_COUNT)
@@ -143,12 +195,13 @@ export function decodeDetailLog(frame: Uint8Array): DetailLogRecord[] {
     throw new Error(`detail log frame claims ${declared} records; a frame holds at most ${MAX_RECORDS_PER_FRAME}`)
   }
 
+  const packUtcOffsetMs = packUtcOffsetMinutes * MILLISECONDS_PER_MINUTE
   const records: DetailLogRecord[] = []
   for (let position = 0; position < declared; position += 1) {
     const base = RECORD_BASE + position * RECORD_STRIDE
     // Never read into the trailing checksum or past a short frame.
     if (base + RECORD_STRIDE > frame.length - 1) break
-    records.push(readRecord(data, base, firstIndex + position))
+    records.push(readRecord(data, base, firstIndex + position, packUtcOffsetMs))
   }
   return records
 }
