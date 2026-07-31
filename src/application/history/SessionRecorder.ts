@@ -33,8 +33,12 @@
  *
  * Two tabs of this page reconnect to the same pack without anyone asking them to, and two recorders
  * against one database store two full copies of the same watch: every figure folded out of it reads
- * double, and a day bucket claims more recorded time than the day holds. So a session opens only
- * behind the lease, and the tab that does not get it says as much and keeps its instruments.
+ * double, and a day bucket claims more recorded time than the day holds.
+ *
+ * The lease gates the writing, not the opening. A session is built the moment an observation
+ * arrives, because nothing on that path may await, and the claim runs on the queued step behind it;
+ * until it lands, nothing about that session reaches the archive. A recorder refused the lease drops
+ * its session whole, says as much, and keeps its instruments.
  */
 
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../domain/bms/types'

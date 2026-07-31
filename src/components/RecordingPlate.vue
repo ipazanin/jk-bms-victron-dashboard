@@ -6,8 +6,8 @@
  * recording indicator borrowing the alarm palette would make every session look like an incident.
  *
  * It says nothing at all when the archive is usable and no session is open — there is no honest
- * claim to make about a link that has not started. The two sentences it does print in the negative
- * name the real cause, because "not recording" without a reason reads as a bug.
+ * claim to make about a link that has not started. Every negative case it does print names its
+ * cause, because "not recording" without a reason reads as a bug.
  *
  * Another tab holding the recording lease is one of those causes and an ordinary one, so it is
  * worded as the plain fact it is: the watch is being written down, just not here.
@@ -86,6 +86,9 @@ function stopwatch(elapsedMs: number): string {
   </p>
   <p v-else-if="!usable" class="plate-line copy">
     NOT RECORDING — this browser will not keep a log.
+  </p>
+  <p v-else-if="state.failure !== null" class="plate-line copy">
+    NOT RECORDING — the log could not be written to.
   </p>
 </template>
 

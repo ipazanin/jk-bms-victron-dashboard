@@ -136,8 +136,9 @@ session with a gap drawn in it.
 **One tab records at a time.** A second tab rejoins the pack on its own, without being asked to, and
 two recorders on one archive would store the same watch twice — doubling every figure folded out of
 it and letting a single day claim more recorded time than the day holds. So a recorder takes a lease
-before it opens a session. The tab that does not get it keeps every instrument, says plainly that
-another tab is keeping the log, and starts recording itself the moment that tab stops.
+before it writes anything down. The tab that does not get it keeps every instrument and says plainly
+that another tab is keeping the log. It takes over as soon as that tab announces it has stopped, and
+within the retry interval when it cannot — a tab that is killed outright announces nothing.
 
 **What is stored is what the radios said.** The pack and the controller are two separate streams,
 never one joined row, because they run on separate cadences and a joined row would have to invent

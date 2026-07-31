@@ -412,10 +412,9 @@ describe('JkBmsClient link loss', () => {
   })
 })
 
-// The stored detail log is a diagnostic before it is a feature: a bare 0xA7 has already been sent
-// to this pack on a demonstrably live link and produced no frames, and nobody knows whether the
-// pack ignored it or the transport dropped the reply. The two are indistinguishable by frame count
-// and separable only by raw notification bytes, so that is what these cases pin.
+// The stored detail log is a diagnostic before it is a feature. A pack that ignored 0xA7 and a
+// reply the transport tore up are indistinguishable by frame count, and separable only by raw
+// notification bytes, so that is what these cases pin.
 
 describe('JkBmsClient stored detail log', () => {
   const PACK_CLOCK = { packUtcOffsetMinutes: 60 }

@@ -398,8 +398,8 @@ async def capture_combined(address: str | None, seconds: float, detail_log_reque
             before = raw_bytes
             print(f"sending detail-log request {attempt + 1}/{detail_log_requests} (0x{CMD_DETAIL_LOG:02x})", file=sys.stderr)
             await send(CMD_DETAIL_LOG)
-            # A previous attempt saw zero assembled frames here. Whether that was silence or a burst
-            # the module tore up is a question only the raw byte count answers, so report it per request.
+            # Silence and a burst the module tore up both end with no assembled frame, and only the
+            # raw byte count tells them apart, so report it per request.
             await asyncio.sleep(25.0)
             print(f"  raw bytes since that request: {raw_bytes - before}", file=sys.stderr)
 
