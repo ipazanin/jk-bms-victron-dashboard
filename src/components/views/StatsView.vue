@@ -387,7 +387,7 @@ const newestRecord = computed(() => {
             <p class="muted">
               Newest stored record, ring index {{ newestRecord.index }}. Pack counter reads
               <span class="readout">{{ packCounterFace.format(newestRecord.packClockMs) }}</span> —
-              resolved against this browser's offset that is
+              resolved against this browser's standard offset that is
               <span class="readout">{{ stamp.format(newestRecord.recordedAt) }}</span
               >.
             </p>
