@@ -213,9 +213,9 @@ function describeOutcome(transfer: DetailLogTransfer): string {
     return `${transfer.notificationBytes} bytes arrived across ${transfer.notificationCount} notifications and not one frame assembled from them. The pack answered; the reply was torn up in transit.`
   }
   if (transfer.outcome === 'other-frames') {
-    return `${transfer.frames.length} frames came back and none was a detail log. The command means something else on this firmware — the frame types below say what.`
+    return `${transfer.assembledFrameCount} frames assembled in ${seconds} s and not one was a detail log. The link is carrying whole frames; this firmware answers 0xA7 with no stored log.`
   }
-  return `${transfer.frames.length} frames, ${transfer.records.length} records, ${transfer.notificationBytes} bytes in ${seconds} s.`
+  return `${transfer.frames.length} log frames, ${transfer.records.length} records, ${transfer.notificationBytes} bytes in ${seconds} s.`
 }
 
 const outcomeSentence = computed(() => {
@@ -229,7 +229,7 @@ const frameLines = computed(() => {
   if (transfer === null) return []
   return transfer.frames.map((header, position) => ({
     key: position,
-    text: `#${position} · type 0x${header.frameType.toString(16).padStart(2, '0')} · byte 5 0x${header.unidentifiedByte.toString(16).padStart(2, '0')} · first record ${header.firstRecordIndex} · carries ${header.recordCount}`,
+    text: `#${position} · byte 5 0x${header.unidentifiedByte.toString(16).padStart(2, '0')} · first record ${header.firstRecordIndex} · carries ${header.recordCount}`,
   }))
 })
 
@@ -367,7 +367,7 @@ const newestRecord = computed(() => {
               <dd class="secondary-figure">{{ detailLog.notificationCount }}</dd>
             </div>
             <div class="chip">
-              <dt>Frames</dt>
+              <dt>Log frames</dt>
               <dd class="secondary-figure">{{ detailLog.frames.length }}</dd>
             </div>
             <div class="chip">

@@ -375,8 +375,8 @@ export class JkBmsClient implements BmsLink {
     for (const frame of this.assembler.feed(chunk)) {
       this.lastFrameAt = Date.now()
       this.stallStrikes = 0
-      // Every frame in the window, whatever its type: 0xA7 answering with something that is not a
-      // detail log is a finding of its own, and it is only visible if the other types are recorded.
+      // Every frame in the window, whatever its type: a window that assembled frames and no detail
+      // log is a finding of its own, and it is only visible if the other types reach the run too.
       this.detailLogRun?.noteFrame(frame)
       try {
         switch (frameType(frame)) {

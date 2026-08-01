@@ -59,6 +59,7 @@ const NOTHING_CAME_BACK: DetailLogTransfer = {
   outcome: 'no-answer',
   notificationBytes: 0,
   notificationCount: 0,
+  assembledFrameCount: 0,
   frames: [],
   records: [],
   elapsedMs: 8_000,

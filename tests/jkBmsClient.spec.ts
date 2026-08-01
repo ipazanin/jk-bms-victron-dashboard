@@ -464,36 +464,42 @@ describe('JkBmsClient stored detail log', () => {
     const wreckage = concat(mangledFrame(), mangledFrame(), mangledFrame())
 
     const reading = client.readDetailLog(PACK_CLOCK)
-    // Delivered in MTU-sized pieces, as the browser would: no one notification is a frame.
+    // Delivered in MTU-sized pieces, as the browser would: no one notification is a frame. Bytes
+    // that never assemble hold nothing open, so the read runs to the first-answer grace.
     for (let offset = 0; offset < wreckage.length; offset += 180) {
       mock.notify(wreckage.subarray(offset, offset + 180))
     }
-    await vi.advanceTimersByTimeAsync(2_100)
+    await vi.advanceTimersByTimeAsync(8_100)
     const transfer = await reading
 
     expect(transfer.outcome).toBe('torn-burst')
     expect(transfer.notificationBytes).toBe(wreckage.length)
     expect(transfer.notificationCount).toBe(5)
+    expect(transfer.assembledFrameCount).toBe(0)
     expect(transfer.frames).toEqual([])
     expect(transfer.records).toEqual([])
 
     await client.disconnect()
   })
 
-  it('reports frames of another type as the opcode meaning something else', async () => {
+  it('reports whole frames with no stored log among them as a firmware without one', async () => {
     vi.useFakeTimers()
     const onSnapshot = vi.fn()
     const client = await liveClient({ onSnapshot })
 
     const reading = client.readDetailLog(PACK_CLOCK)
     mock.notify(responseFrame(FRAME_CELL_INFO))
-    await vi.advanceTimersByTimeAsync(2_100)
+    // Cell-info streams unprompted through every window, so it must not hold the read open: the
+    // first-answer grace expires as if nothing had arrived, and the frame count says what did.
+    await vi.advanceTimersByTimeAsync(8_100)
     const transfer = await reading
 
     expect(transfer.outcome).toBe('other-frames')
-    expect(transfer.frames.map((header) => header.frameType)).toEqual([FRAME_CELL_INFO])
+    expect(transfer.assembledFrameCount).toBe(1)
+    expect(transfer.frames).toEqual([])
     expect(transfer.notificationBytes).toBe(FRAME_LENGTH)
     expect(transfer.records).toEqual([])
+    expect(transfer.elapsedMs).toBe(8_000)
     // A frame that arrives inside a read window is still a frame: it reaches its own decoder.
     expect(onSnapshot).toHaveBeenCalledTimes(1)
 
@@ -516,8 +522,8 @@ describe('JkBmsClient stored detail log', () => {
 
     expect(transfer.outcome).toBe('records-read')
     expect(transfer.frames).toEqual([
-      { frameType: FRAME_DETAIL_LOG, unidentifiedByte: 0, firstRecordIndex: 0, recordCount: 2 },
-      { frameType: FRAME_DETAIL_LOG, unidentifiedByte: 1, firstRecordIndex: 2, recordCount: 1 },
+      { unidentifiedByte: 0, firstRecordIndex: 0, recordCount: 2 },
+      { unidentifiedByte: 1, firstRecordIndex: 2, recordCount: 1 },
     ])
     expect(transfer.records.map((record) => record.index)).toEqual([0, 1, 2])
     expect(transfer.records[0].packVoltage).toBeCloseTo(13.42, 2)
@@ -544,24 +550,25 @@ describe('JkBmsClient stored detail log', () => {
     await client.disconnect()
   })
 
-  it('holds the link through a long burst that assembles nothing, which the stall watch would kill', async () => {
+  it('holds the link through a torn burst and counts every byte the grace admits', async () => {
     vi.useFakeTimers()
     const onDisconnect = vi.fn()
     const client = await liveClient({ onDisconnect })
     const junk = new Uint8Array(20)
 
     const reading = client.readDetailLog(PACK_CLOCK)
-    // Twenty-seven seconds of bytes that never become a frame — past the three silent strikes that
-    // end a link, because only an assembled frame resets the stall clock and none of these does.
-    for (let tick = 0; tick < 18; tick += 1) {
+    // Bytes that never become a frame hold nothing open, so the read runs exactly to the
+    // first-answer grace — with every byte that fell inside it counted, and the link intact.
+    for (let tick = 0; tick < 5; tick += 1) {
       mock.notify(junk)
       await vi.advanceTimersByTimeAsync(1_500)
     }
-    await vi.advanceTimersByTimeAsync(2_100)
+    await vi.advanceTimersByTimeAsync(700)
     const transfer = await reading
 
     expect(transfer.outcome).toBe('torn-burst')
-    expect(transfer.notificationBytes).toBe(18 * junk.length)
+    expect(transfer.notificationBytes).toBe(5 * junk.length)
+    expect(transfer.elapsedMs).toBe(8_000)
     expect(onDisconnect).not.toHaveBeenCalled()
     expect(client.connected).toBe(true)
 
@@ -589,17 +596,17 @@ describe('JkBmsClient stored detail log', () => {
   it('stops at the ceiling rather than following a reply that never ends', async () => {
     vi.useFakeTimers()
     const client = await liveClient()
-    const junk = new Uint8Array(20)
 
     const reading = client.readDetailLog(PACK_CLOCK)
+    // A stored-log frame every second rearms the quiet gap forever; only the ceiling ends this.
     for (let tick = 0; tick < 34; tick += 1) {
-      mock.notify(junk)
+      mock.notify(detailLogFrame(0, tick, [{ rtcSeconds: tick, packVoltage: 13.2, current: 0 }]))
       await vi.advanceTimersByTimeAsync(1_000)
     }
     const transfer = await reading
 
     expect(transfer.elapsedMs).toBe(30_000)
-    expect(transfer.outcome).toBe('torn-burst')
+    expect(transfer.outcome).toBe('records-read')
 
     await client.disconnect()
   })

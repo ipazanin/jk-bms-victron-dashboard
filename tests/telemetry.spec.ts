@@ -350,6 +350,7 @@ describe('reading the pack’s stored detail log', () => {
       outcome: 'torn-burst',
       notificationBytes: 4_812,
       notificationCount: 27,
+      assembledFrameCount: 0,
       frames: [],
       records: [],
       elapsedMs: 3_100,

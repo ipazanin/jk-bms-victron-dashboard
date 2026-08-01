@@ -52,7 +52,6 @@
 import type { DetailLogFrameHeader } from './DetailLogFrameHeader'
 import type { DetailLogOutcome } from './DetailLogOutcome'
 import { logbookLabel } from './logbook'
-import { FRAME_DETAIL_LOG, frameType } from './protocol'
 
 const MILLI = 0.001
 const CENTI = 0.01
@@ -219,15 +218,12 @@ export function decodeDetailLog(
 }
 
 /**
- * Reads a frame's leading fields without decoding a single record, and without caring what type of
- * frame it is — a reply to 0xA7 that is not a detail log has to be describable too, or the case
- * where the opcode means something else on this firmware cannot be told from the case where it
- * means nothing.
+ * Reads a frame's paging fields without decoding a single record, so that a frame whose records
+ * will not decode still shows its place in the burst.
  */
 export function readDetailLogHeader(frame: Uint8Array): DetailLogFrameHeader {
   const header = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
   return {
-    frameType: frameType(frame),
     unidentifiedByte: header.getUint8(UNIDENTIFIED_BYTE),
     firstRecordIndex: header.getUint16(FIRST_RECORD_INDEX, true),
     recordCount: header.getUint8(RECORD_COUNT),
@@ -239,14 +235,22 @@ export function readDetailLogHeader(frame: Uint8Array): DetailLogFrameHeader {
  *
  * The order of the tests is the point. Raw bytes are asked about first, before anything that
  * depends on assembly succeeding, because a pack that never answered and a burst that arrived in
- * pieces are indistinguishable by any later measure.
+ * pieces are indistinguishable by any later measure. Frames of every type are asked about next, for
+ * the same reason one step up: a window in which nothing at all assembled is a torn transport,
+ * whereas one in which frames assembled and none was a stored log is a link that works carrying an
+ * answer that is not the one 0xA7 was supposed to produce.
  */
-export function detailLogOutcome(
-  notificationBytes: number,
-  frames: readonly DetailLogFrameHeader[],
-): DetailLogOutcome {
+export function detailLogOutcome({
+  notificationBytes,
+  assembledFrameCount,
+  storedLogFrameCount,
+}: {
+  readonly notificationBytes: number
+  readonly assembledFrameCount: number
+  readonly storedLogFrameCount: number
+}): DetailLogOutcome {
   if (notificationBytes === 0) return 'no-answer'
-  if (frames.length === 0) return 'torn-burst'
-  if (!frames.some((header) => header.frameType === FRAME_DETAIL_LOG)) return 'other-frames'
+  if (assembledFrameCount === 0) return 'torn-burst'
+  if (storedLogFrameCount === 0) return 'other-frames'
   return 'records-read'
 }

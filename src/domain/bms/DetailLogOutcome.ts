@@ -10,8 +10,9 @@
  *                  or answers it only under a precondition we have not met.
  * - `torn-burst`   bytes arrived and none of them survived assembly. The pack does answer; the
  *                  transport lost or mangled the reply, so the fix is in the link, not the opcode.
- * - `other-frames` frames assembled and none was type 0x06. The opcode is understood as something
- *                  else on this firmware, and the frame types that came back say what.
+ * - `other-frames` frames assembled and none was type 0x06. The transport is carrying whole frames,
+ *                  so the fix is neither in the link nor in the reach: on this firmware 0xA7
+ *                  produced no stored log at all.
  * - `records-read` at least one type 0x06 frame arrived. Whether every one of them decoded is a
  *                  separate question the transfer's record count answers.
  */
