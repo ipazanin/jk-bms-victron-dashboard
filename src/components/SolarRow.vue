@@ -4,11 +4,13 @@ import { computed } from 'vue'
 import StageStepper from './StageStepper.vue'
 import StatusChip from './StatusChip.vue'
 import { amps, kilowattHours, volts, watts } from '../application/format'
+import { isPending, type LinkPhase } from '../application/linkPhase'
 import type { BusReconciliation } from '../domain/dcBus'
 import type { SolarReading } from '../domain/solar/types'
 
 const props = defineProps<{
   solar: SolarReading | null
+  solarPhase: LinkPhase
   bus: BusReconciliation | null
   packVoltage: number | null
   rssi: number
@@ -16,6 +18,14 @@ const props = defineProps<{
 }>()
 
 const errorLevel = computed(() => (props.solar && props.solar.chargerError !== 0 ? 'critical' : 'good'))
+
+const paragraph = computed(() => {
+  if (props.solarPhase === 'connecting') return 'Starting the scan for the Victron.'
+  if (props.solarPhase === 'listening' || props.solarPhase === 'waiting') {
+    return 'Listening — the scan is up, nothing decoded from the controller right now.'
+  }
+  return 'Solar not connected. Boat load needs both radios.'
+})
 </script>
 
 <template>
@@ -29,24 +39,24 @@ const errorLevel = computed(() => (props.solar && props.solar.chargerError !== 0
       />
     </header>
 
-    <template v-if="solar">
-      <StageStepper :stage="solar.chargeState" />
+    <template v-if="solarPhase === 'reading'">
+      <StageStepper :stage="solar!.chargeState" />
 
       <dl class="stats">
         <div>
           <dt class="plate">PV input</dt>
-          <dd class="secondary-figure">{{ solar.pvPower === null ? '—' : watts(solar.pvPower) }}</dd>
+          <dd class="secondary-figure">{{ solar!.pvPower === null ? '—' : watts(solar!.pvPower) }}</dd>
         </div>
         <div>
           <dt class="plate">To battery</dt>
           <dd class="secondary-figure">
-            {{ solar.batteryCurrent === null ? '—' : amps(solar.batteryCurrent) }}
+            {{ solar!.batteryCurrent === null ? '—' : amps(solar!.batteryCurrent) }}
           </dd>
         </div>
         <div>
           <dt class="plate">Yield today</dt>
           <dd class="secondary-figure">
-            {{ solar.yieldTodayKwh === null ? '—' : kilowattHours(solar.yieldTodayKwh) }}
+            {{ solar!.yieldTodayKwh === null ? '—' : kilowattHours(solar!.yieldTodayKwh) }}
           </dd>
         </div>
       </dl>
@@ -54,7 +64,7 @@ const errorLevel = computed(() => (props.solar && props.solar.chargerError !== 0
       <p v-if="bus && packVoltage !== null" class="crosscheck">
         <span class="plate">Voltage cross-check</span>
         <span class="readout">
-          BMS {{ volts(packVoltage) }} · Victron {{ volts(solar.batteryVoltage ?? 0, 2) }} ·
+          BMS {{ volts(packVoltage) }} · Victron {{ volts(solar!.batteryVoltage ?? 0, 2) }} ·
           Δ {{ (bus.voltageDelta * 1000).toFixed(0) }} mV
         </span>
         <StatusChip
@@ -67,7 +77,7 @@ const errorLevel = computed(() => (props.solar && props.solar.chargerError !== 0
     </template>
 
     <template v-else>
-      <p class="empty">Solar not connected. Boat load needs both radios.</p>
+      <p class="empty" :class="{ pending: isPending(solarPhase) }">{{ paragraph }}</p>
       <p v-if="!canScan" class="hint">
         This browser cannot read Bluetooth advertisements. Enable
         <code>chrome://flags/#enable-experimental-web-platform-features</code> in Chrome on Android
@@ -127,6 +137,20 @@ dd {
 .empty {
   margin: 0;
   color: var(--ink-secondary);
+}
+
+.empty.pending {
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .hint {

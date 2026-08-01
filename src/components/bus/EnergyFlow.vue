@@ -8,9 +8,10 @@
  * survives with the dashes frozen, so the picture stays true under reduced motion.
  *
  * Purely presentational — every figure arrives as a prop, the same bindings that feed the shunt
- * beneath. The component never fabricates a flow it cannot measure: solar with no controller and a
- * house load the difference cannot vouch for both render as static muted ghosts, honestly labelled
- * "no reading", rather than as a confident line to nowhere.
+ * beneath. The component never fabricates a flow it cannot measure: a pack whose radio has yet to
+ * deliver a frame, solar with no controller, and a house load the difference cannot vouch for all
+ * render as static muted ghosts, each labelled with the reason it is one, rather than as a
+ * confident line to nowhere.
  *
  * Geometry is a fixed viewBox with every mark on constant coordinates. A value update rewrites only
  * text content, a stroke width, and the flow period — never an x, a y, a d, or a points list — so a
@@ -19,20 +20,30 @@
 import { computed, ref, watch } from 'vue'
 
 import { amps, ampsAbsolute, storedWattHours, volts, watts, wattsSigned } from '../../application/format'
+import type { LinkPhase } from '../../application/linkPhase'
 import { useMediaQuery } from '../../application/useMediaQuery'
 import type { StoredEnergy } from '../../domain/dcBus'
 import type { Reach } from '../../domain/reach'
 import { CURRENT_LADDER, nextStop } from '../../domain/scaleLadder'
 
+/**
+ * `packCurrent` and `packVoltage` are non-null exactly when `packPhase` is 'reading', and
+ * `solarCurrent` exactly when `solarPhase` is — BusView derives both phases from those same refs.
+ * The type system cannot say it, so every figure below is drawn inside a phase branch.
+ */
 const props = defineProps<{
-  packCurrent: number
-  packVoltage: number
+  packCurrent: number | null
+  packVoltage: number | null
+  packPhase: LinkPhase
   solarCurrent: number | null
+  solarPhase: LinkPhase
+  /** The bus as whichever radio is measuring it; both sense the same rail. */
+  busVoltage: number | null
   pvPower: number | null
   houseCurrent: number | null
   housePower: number | null
   houseLoadPlausible: boolean | null
-  /** Null while the pack's series count is unknown, which is the only case with no figure to give. */
+  /** Null with no pack connected, and with a pack that has not reported its series count. */
   packStored: StoredEnergy | null
   packReach: Reach | null
   solarReach: Reach | null
@@ -166,6 +177,7 @@ const PHONE_GEO: Geometry = {
 const compact = useMediaQuery('(max-width: 720px)')
 const geo = computed(() => (compact.value ? PHONE_GEO : DESKTOP_GEO))
 
+const packReading = computed(() => props.packPhase === 'reading')
 const solarPresent = computed(() => props.solarCurrent !== null)
 
 /**
@@ -180,9 +192,10 @@ const houseCharged = computed(
   () => solarPresent.value && props.houseCurrent !== null && props.houseLoadPlausible === false,
 )
 
-const packFlow = computed<'charging' | 'discharging' | 'at rest'>(() =>
-  props.packCurrent > REST ? 'charging' : props.packCurrent < -REST ? 'discharging' : 'at rest',
-)
+const packFlow = computed<'charging' | 'discharging' | 'at rest'>(() => {
+  const current = props.packCurrent ?? 0
+  return current > REST ? 'charging' : current < -REST ? 'discharging' : 'at rest'
+})
 
 /**
  * The shared current scale, auto-ranged off the recent envelope with hysteresis, so one spike
@@ -190,7 +203,7 @@ const packFlow = computed<'charging' | 'discharging' | 'at rest'>(() =>
  */
 const reachA = computed(() => {
   const edges = [
-    Math.abs(props.packCurrent),
+    Math.abs(props.packCurrent ?? 0),
     Math.abs(props.solarCurrent ?? 0),
     houseKnown.value ? Math.abs(props.houseCurrent!) : 0,
   ]
@@ -233,7 +246,7 @@ function flowPeriod(magnitude: number): number {
 }
 
 const solarMagnitude = computed(() => props.solarCurrent ?? 0)
-const packMagnitude = computed(() => Math.abs(props.packCurrent))
+const packMagnitude = computed(() => Math.abs(props.packCurrent ?? 0))
 const houseMagnitude = computed(() => (houseKnown.value ? Math.abs(props.houseCurrent!) : 0))
 
 type EdgeState = 'active' | 'idle' | 'ghost'
@@ -241,7 +254,9 @@ type EdgeState = 'active' | 'idle' | 'ghost'
 const solarState = computed<EdgeState>(() =>
   !solarPresent.value ? 'ghost' : props.solarCurrent! > REST ? 'active' : 'idle',
 )
-const packState = computed<EdgeState>(() => (packFlow.value === 'at rest' ? 'idle' : 'active'))
+const packState = computed<EdgeState>(() =>
+  !packReading.value ? 'ghost' : packFlow.value === 'at rest' ? 'idle' : 'active',
+)
 const houseState = computed<EdgeState>(() =>
   houseKnown.value ? (houseMagnitude.value > REST ? 'active' : 'idle') : 'ghost',
 )
@@ -274,20 +289,34 @@ const solarSub = computed(() => amps(props.solarCurrent ?? 0))
 /**
  * Watts, like solar and boat beside it, so one screen reads in one unit. Current times voltage
  * rather than the BMS's own power field, which is an unsigned magnitude — the sign has to survive,
- * and this is how the archive derives a stored sample's power too.
+ * and this is how the archive derives a stored sample's power too. The zero substitutes carry the
+ * pipe width while the pack is silent; every consumer that prints the figure is gated on 'reading'.
  */
-const packPower = computed(() => props.packCurrent * props.packVoltage)
+const packPower = computed(() => (props.packCurrent ?? 0) * (props.packVoltage ?? 0))
 const packPrimary = computed(() => wattsSigned(packPower.value))
-const packSub = computed(() => `${amps(props.packCurrent)} · ${volts(props.packVoltage, 2)}`)
+const packSub = computed(() => `${amps(props.packCurrent!)} · ${volts(props.packVoltage!, 2)}`)
+
+/** Absent, connecting and waiting are three different silences, and the node has room to say which. */
+const packNote = computed(() => {
+  if (props.packPhase === 'connecting') return 'connecting'
+  if (props.packPhase === 'listening' || props.packPhase === 'waiting') return 'no frame yet'
+  return 'no pack'
+})
+
+const solarNote = computed(() => {
+  if (props.solarPhase === 'connecting') return 'connecting'
+  if (props.solarPhase === 'listening' || props.solarPhase === 'waiting') return 'listening'
+  return 'no controller'
+})
 
 const packStoredFigure = computed(() =>
   props.packStored === null ? '—' : storedWattHours(props.packStored.wattHours),
 )
-const packStoredBasis = computed(() =>
-  props.packStored === null
-    ? 'the pack has not reported its series count'
-    : `charge valued at ${volts(props.packStored.nominalVoltage, 1)} nominal, so a switching load cannot move it`,
-)
+const packStoredBasis = computed(() => {
+  if (!packReading.value) return 'the pack is not connected'
+  if (props.packStored === null) return 'the pack has not reported its series count'
+  return `charge valued at ${volts(props.packStored.nominalVoltage, 1)} nominal, so a switching load cannot move it`
+})
 
 const housePrimary = computed(() => (props.housePower !== null ? watts(props.housePower) : '—'))
 const houseSub = computed(() => (props.houseCurrent !== null ? ampsAbsolute(props.houseCurrent) : '—'))
@@ -295,7 +324,7 @@ const houseNote = computed(() =>
   houseCharged.value ? 'unavailable — another source charging' : 'no reading',
 )
 
-const busVolts = computed(() => volts(props.packVoltage, 1))
+const busVolts = computed(() => (props.busVoltage === null ? '—' : volts(props.busVoltage, 1)))
 
 // Edge readouts. Idle edges still read '0.0 A · 0 W'; ghosts read nothing (the node carries the note).
 const solarRead = computed(() => {
@@ -316,28 +345,34 @@ const houseRead = computed(() => {
  * the one thing it has no room for, and the one thing a reader with the dashes frozen would
  * otherwise have to take from the arrowhead alone.
  */
-const packRead = computed(() => packFlow.value)
+const packRead = computed(() => (packReading.value ? packFlow.value : ''))
 
 // The aria sentence carries direction in words, so the arrowhead is never the only direction channel.
 function cap(sentence: string): string {
   return sentence.charAt(0).toUpperCase() + sentence.slice(1)
 }
 
-const solarPhrase = computed(() =>
-  !solarPresent.value
-    ? 'solar not connected'
-    : props.solarCurrent! <= REST
-      ? 'solar idle'
-      : props.pvPower !== null
-        ? `Solar ${watts(props.pvPower)} in`
-        : `Solar ${ampsAbsolute(props.solarCurrent!)} in`,
-)
+const solarPhrase = computed(() => {
+  if (props.solarPhase === 'connecting') return 'starting the scan for the controller'
+  if (props.solarPhase === 'listening' || props.solarPhase === 'waiting') {
+    return 'listening for the controller'
+  }
+  if (!solarPresent.value) return 'solar not connected'
+  if (props.solarCurrent! <= REST) return 'solar idle'
+  return props.pvPower !== null
+    ? `Solar ${watts(props.pvPower)} in`
+    : `Solar ${ampsAbsolute(props.solarCurrent!)} in`
+})
 
-const packPhrase = computed(() =>
-  packFlow.value === 'at rest'
-    ? 'pack at rest'
-    : `pack ${packFlow.value} ${watts(packPower.value)}, ${ampsAbsolute(props.packCurrent)}`,
-)
+const packPhrase = computed(() => {
+  if (props.packPhase === 'connecting') return 'connecting to the pack'
+  if (props.packPhase === 'listening' || props.packPhase === 'waiting') {
+    return 'the pack link is open, waiting for the first frame'
+  }
+  if (!packReading.value) return 'no pack connected'
+  if (packFlow.value === 'at rest') return 'pack at rest'
+  return `pack ${packFlow.value} ${watts(packPower.value)}, ${ampsAbsolute(props.packCurrent!)}`
+})
 
 const housePhrase = computed(() =>
   houseKnown.value
@@ -349,9 +384,19 @@ const housePhrase = computed(() =>
       : 'boat load not measured',
 )
 
+/**
+ * Without a pack the hub's figure is the controller's reading of the same rail, and the hub prints
+ * it unlabelled. This clause is where that attribution lives.
+ */
+const busPhrase = computed(() =>
+  packReading.value || props.busVoltage === null
+    ? ''
+    : `, bus ${volts(props.busVoltage, 1)} as the controller reports it`,
+)
+
 const summary = computed(
   () =>
-    `${cap(solarPhrase.value)}, ${packPhrase.value}, ${housePhrase.value}` +
+    `${cap(solarPhrase.value)}, ${packPhrase.value}, ${housePhrase.value}${busPhrase.value}` +
     (props.packStored === null ? '.' : `. ${packStoredFigure.value} stored.`),
 )
 </script>
@@ -430,28 +475,33 @@ const summary = computed(
       </g>
 
       <g class="edge pack" :class="packState" :style="{ '--flow-period': packPeriod }">
-        <path class="pipe" :d="geo.edges.pack.d" :stroke-width="packWidth" />
-        <path
-          v-if="packState === 'active'"
-          class="flow"
-          :class="{ reverse: packReverse }"
-          :d="geo.edges.pack.d"
-          :stroke-width="packFlowWidth"
-        />
-        <polygon
-          v-if="packState === 'active'"
-          class="head"
-          :points="packHead"
-          aria-hidden="true"
-        />
-        <text
-          class="edge-read pack-ink"
-          :x="geo.edges.pack.readX"
-          :y="geo.edges.pack.readY"
-          :text-anchor="geo.edges.pack.readAnchor"
-        >
-          {{ packRead }}
-        </text>
+        <template v-if="packState === 'ghost'">
+          <path class="ghost-pipe" :d="geo.edges.pack.d" />
+        </template>
+        <template v-else>
+          <path class="pipe" :d="geo.edges.pack.d" :stroke-width="packWidth" />
+          <path
+            v-if="packState === 'active'"
+            class="flow"
+            :class="{ reverse: packReverse }"
+            :d="geo.edges.pack.d"
+            :stroke-width="packFlowWidth"
+          />
+          <polygon
+            v-if="packState === 'active'"
+            class="head"
+            :points="packHead"
+            aria-hidden="true"
+          />
+          <text
+            class="edge-read pack-ink"
+            :x="geo.edges.pack.readX"
+            :y="geo.edges.pack.readY"
+            :text-anchor="geo.edges.pack.readAnchor"
+          >
+            {{ packRead }}
+          </text>
+        </template>
       </g>
 
       <!-- Nodes on top. -->
@@ -468,19 +518,24 @@ const summary = computed(
           </text>
         </template>
         <text v-else class="node-note" :x="geo.solar.cx" :y="geo.solar.primaryY" text-anchor="middle">
-          no controller
+          {{ solarNote }}
         </text>
       </g>
 
-      <g class="node pack">
+      <g class="node pack" :class="{ dim: !packReading }">
         <rect :x="geo.pack.x" :y="geo.pack.y" :width="geo.pack.w" :height="geo.pack.h" rx="16" />
         <text class="glyph" :x="geo.pack.glyphX" :y="geo.pack.nameY" aria-hidden="true">▮</text>
         <text class="node-name" :x="geo.pack.cx" :y="geo.pack.nameY" text-anchor="middle">PACK</text>
-        <text class="node-primary pack-ink" :x="geo.pack.cx" :y="geo.pack.primaryY" text-anchor="middle">
-          {{ packPrimary }}
-        </text>
-        <text class="node-sub" :x="geo.pack.cx" :y="geo.pack.subY" text-anchor="middle">
-          {{ packSub }}
+        <template v-if="packReading">
+          <text class="node-primary pack-ink" :x="geo.pack.cx" :y="geo.pack.primaryY" text-anchor="middle">
+            {{ packPrimary }}
+          </text>
+          <text class="node-sub" :x="geo.pack.cx" :y="geo.pack.subY" text-anchor="middle">
+            {{ packSub }}
+          </text>
+        </template>
+        <text v-else class="node-note" :x="geo.pack.cx" :y="geo.pack.primaryY" text-anchor="middle">
+          {{ packNote }}
         </text>
       </g>
 

@@ -4,19 +4,22 @@
  *
  * An annunciator's whole job is to be believed, so two things it must never do are hard-coded
  * here rather than left to the severity model. It never reports a clean bill of health over
- * quantities nothing measured — an empty fault list under an unconnected radio is the absence of
- * an assessment, not the absence of a fault. And the fault lane is always occupied while a radio
- * is live, so a fault arriving does not shove the instruments below it down the page.
+ * quantities nothing measured — an empty fault list under a radio that has delivered nothing is
+ * the absence of an assessment, not the absence of a fault. And the fault lane is always occupied
+ * while a radio is reading, so a fault arriving does not shove the instruments below it down the
+ * page.
  */
 import { computed } from 'vue'
 
 import StatusChip from './StatusChip.vue'
-import type { Fault, FaultLevel, LinkState, Source } from '../application/telemetry'
+import { isPending } from '../application/linkPhase'
+import type { LinkPhase } from '../application/linkPhase'
+import type { Fault, FaultLevel, Source } from '../application/telemetry'
 
 const props = defineProps<{
   source: Source
-  bmsState: LinkState
-  solarState: LinkState
+  packPhase: LinkPhase
+  solarPhase: LinkPhase
   faults: Fault[]
   worstFault: FaultLevel
   /** The pack's name as the Log knows it, so the live page and the archive agree on what it is. */
@@ -28,33 +31,58 @@ const props = defineProps<{
  * annunciator text it had at the time and is never re-assessed, so in any other mode the fault
  * list is empty because nothing was examined — which is a different claim from all-clear, and the
  * chip and the watch list are both withheld rather than reworded.
+ *
+ * A resolved link is not yet a reading. `source` flips to 'live' the moment a scan starts
+ * listening, so gating on it alone would print a clean bill over quantities nothing has measured
+ * — the very thing this component exists to refuse.
  */
-const watching = computed(() => props.source === 'live')
+const watching = computed(
+  () => props.source === 'live' && (props.packPhase === 'reading' || props.solarPhase === 'reading'),
+)
 
+/** Committed to a radio with nothing to show for it yet: the chooser-and-dial window. */
+const engaging = computed(() => isPending(props.packPhase) || isPending(props.solarPhase))
+
+/** Uppercase names a link that is delivering. */
 const links = computed(() => {
   const parts: string[] = []
-  if (props.bmsState === 'live') parts.push('BMS')
-  if (props.solarState === 'live') parts.push('SOLAR')
-  return parts.length ? parts.join(' + ') : 'NO LINK'
+  if (props.packPhase === 'reading') parts.push('BMS')
+  if (props.solarPhase === 'reading') parts.push('SOLAR')
+  return parts.join(' + ')
 })
+
+/** Lowercase names one that is up to something but has delivered nothing. */
+const pending = computed(() => {
+  const parts: string[] = []
+  if (props.packPhase === 'connecting') parts.push('bms connecting')
+  if (props.packPhase === 'waiting' || props.packPhase === 'listening') parts.push('bms — no frame yet')
+  if (props.solarPhase === 'connecting') parts.push('solar connecting')
+  if (props.solarPhase === 'listening' || props.solarPhase === 'waiting') parts.push('solar listening')
+  return parts.join(' · ')
+})
+
+/** NO LINK is a claim about a dead page, so it is withheld while a radio is still coming up. */
+const linkReadout = computed(() => links.value || (pending.value ? '' : 'NO LINK'))
 
 const mode = computed(() => {
   if (props.source === 'live') return 'Live'
-  return props.source === 'history' ? 'Stored' : 'Idle'
+  if (props.source === 'history') return 'Stored'
+  return engaging.value ? 'Connecting' : 'Idle'
 })
 
 /** A claim about the fault list, which is what the engine computes — never a clean bill of health. */
 const summary = computed(() => props.faults[0]?.title ?? 'No active faults')
 
 /**
- * What the nominal row names must be true of the radios actually reporting. With no BMS on the
- * link there are no cells, no MOSFET and no breakers to watch, and saying otherwise would be the
- * same false assurance the empty-list chip is withheld to avoid.
+ * What the nominal row names must be true of the radios actually reporting. With no pack frame in
+ * there are no cells, no MOSFET and no breakers to watch, and saying otherwise would be the same
+ * false assurance the empty-list chip is withheld to avoid. The controller's own faults are all
+ * that is left: the bus cross-check needs both radios reporting, so it cannot run here.
  */
 const watchList = computed(() =>
-  props.bmsState === 'live'
+  props.packPhase === 'reading'
     ? 'Cell balance, path resistance, MOSFET and cell temperature, breakers, charge level.'
-    : 'Charger faults, and whether the two radios agree on the bus voltage.',
+    : 'Charger faults reported by the controller.',
 )
 </script>
 
@@ -64,14 +92,15 @@ const watchList = computed(() =>
   <div class="strip card">
     <header class="annunciator">
       <div class="left">
-        <span class="pulse" :class="{ on: watching }" aria-hidden="true" />
+        <span class="pulse" :class="{ on: watching, pending: !watching && engaging }" aria-hidden="true" />
         <span class="plate">{{ mode }}</span>
-        <span class="readout links">{{ links }}</span>
+        <span v-if="linkReadout" class="readout links">{{ linkReadout }}</span>
+        <span v-if="pending" class="readout waiting">{{ pending }}</span>
         <span v-if="deviceLabel" class="readout name">{{ deviceLabel }}</span>
       </div>
 
       <StatusChip v-if="watching" :level="worstFault" :label="summary" />
-      <span v-else class="nothing">Nothing connected</span>
+      <span v-else class="nothing">{{ engaging ? 'Waiting for a first reading' : 'Nothing connected' }}</span>
 
       <!-- The recording plate belongs on this line, at the right. It is passed in rather than
            imported so the strip stays a presentation component with no view of the archive. -->
@@ -125,6 +154,12 @@ const watchList = computed(() =>
   animation: breathe 2.4s ease-in-out infinite;
 }
 
+/* Alive but not yet assessed. Engaged is not the same claim as healthy, so it breathes on the
+   muted ink rather than on the good-status green. */
+.pulse.pending {
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
 @keyframes breathe {
   0%,
   100% {
@@ -137,6 +172,11 @@ const watchList = computed(() =>
 
 .links {
   color: var(--ink-secondary);
+}
+
+.waiting {
+  font-size: 0.8125rem;
+  color: var(--ink-muted);
 }
 
 .name {

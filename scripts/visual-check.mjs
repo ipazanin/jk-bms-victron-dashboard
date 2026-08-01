@@ -104,10 +104,10 @@ const PASSES = [
     archive: false,
     remembered: false,
     hash: '',
-    ready: '[data-testid="shunt-chassis"]',
+    ready: '[data-testid="shunt-ammeter"][data-powered="false"]',
     check(scope, report) {
-      if (report.hasAmmeter) fail(scope, 'the live ammeter rendered with nothing connected')
-      if (!report.hasChassis) fail(scope, 'the unpowered instrument did not render')
+      if (!report.hasAmmeter) fail(scope, 'the instrument did not render')
+      if (report.powered) fail(scope, 'the instrument read as powered with nothing connected')
       if (!/read your dc bus/i.test(report.text)) fail(scope, 'the landing copy did not render')
       // The proof that the page fabricates nothing from nothing: no charge figure exists to print.
       if (report.soc !== null) {
@@ -578,7 +578,7 @@ function readPage(page) {
       overflowing: [...new Set(overflowing)].slice(0, 6),
       text,
       hasAmmeter: document.querySelector('[data-testid="shunt-ammeter"]') !== null,
-      hasChassis: document.querySelector('[data-testid="shunt-chassis"]') !== null,
+      powered: document.querySelector('[data-testid="shunt-ammeter"]')?.dataset.powered === 'true',
       hasHouseLoad: /BOAT/i.test(text),
       // A figure that rounds to zero must carry no direction. A real −0.3 A is not that, and
       // matching it would fail the check on the very reading the sign rule exists to print.

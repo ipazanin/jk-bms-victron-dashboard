@@ -15,9 +15,9 @@ import TrendStrips from '../TrendStrips.vue'
 import { storedEnergy } from '../../domain/dcBus'
 import { deviceLabel, packDefaultLabel, packDeviceKeyFor } from '../../domain/history/identity'
 import { useHistoryBrowser } from '../../application/history/historyBrowser'
+import { linkPhase } from '../../application/linkPhase'
 import { hashOf } from '../../application/route'
 import { useTelemetry } from '../../application/telemetry'
-import { useMediaQuery } from '../../application/useMediaQuery'
 
 const telemetry = useTelemetry()
 const {
@@ -51,6 +51,12 @@ const { availability: archiveAvailability } = log
 const connectHref = hashOf({ name: 'connect' })
 const logHref = hashOf({ name: 'log' })
 
+const packPhase = computed(() => linkPhase(bmsState.value, battery.value !== null))
+const solarPhase = computed(() => linkPhase(solarState.value, solar.value !== null))
+
+/** Something to show, or something on its way: the page has left the cold landing. */
+const engaged = computed(() => packPhase.value !== 'absent' || solarPhase.value !== 'absent')
+
 const sessionCount = computed(() => log.archive.value.sessions)
 
 /** The configured series count wins; the domain falls back to the cell frame's own when it is absent. */
@@ -79,19 +85,6 @@ const recordedSummary = computed(() => {
   const line = `→ ${sessions} session${sessions === 1 ? '' : 's'} in the log`
   return oldestStartedAt === null ? line : `${line}, back to ${oldestDay.format(oldestStartedAt)}`
 })
-
-/*
- * The unpowered instrument: the same viewBox, margins and row positions the live ammeter draws
- * on, so connecting fills the chassis in rather than replacing it with a different picture.
- * Nothing here is a measurement — no ticks, no bars, no numbers — so it teaches the reading
- * order without fabricating a reading.
- */
-const CHASSIS_DESKTOP = { width: 1000, height: 196, margin: 128, axisY: 58, packY: 96, solarY: 128, houseY: 170 }
-const CHASSIS_PHONE = { width: 420, height: 208, margin: 92, axisY: 54, packY: 100, solarY: 138, houseY: 184 }
-
-const compact = useMediaQuery('(max-width: 720px)')
-const chassis = computed(() => (compact.value ? CHASSIS_PHONE : CHASSIS_DESKTOP))
-const chassisCentre = computed(() => chassis.value.width / 2)
 </script>
 
 <template>
@@ -104,8 +97,8 @@ const chassisCentre = computed(() => chassis.value.width / 2)
   <AnnunciatorStrip
     v-else
     :source="source"
-    :bms-state="bmsState"
-    :solar-state="solarState"
+    :pack-phase="packPhase"
+    :solar-phase="solarPhase"
     :faults="faults"
     :worst-fault="worstFault"
     :device-label="packLabel"
@@ -114,147 +107,85 @@ const chassisCentre = computed(() => chassis.value.width / 2)
   </AnnunciatorStrip>
 
   <main>
-    <template v-if="battery">
-      <EnergyFlow
-        class="card"
-        :pack-current="battery.current"
-        :pack-voltage="battery.packVoltage"
-        :solar-current="solar?.batteryCurrent ?? null"
-        :pv-power="solar?.pvPower ?? null"
-        :house-current="bus?.houseCurrent ?? null"
-        :house-power="bus?.housePower ?? null"
-        :house-load-plausible="bus?.houseLoadPlausible ?? null"
-        :pack-stored="packStored"
-        :pack-reach="packReach"
-        :solar-reach="solarReach"
+    <EnergyFlow
+      v-if="engaged"
+      class="card"
+      :pack-current="battery?.current ?? null"
+      :pack-voltage="battery?.packVoltage ?? null"
+      :pack-phase="packPhase"
+      :solar-current="solar?.batteryCurrent ?? null"
+      :solar-phase="solarPhase"
+      :bus-voltage="battery?.packVoltage ?? solar?.batteryVoltage ?? null"
+      :pv-power="solar?.pvPower ?? null"
+      :house-current="bus?.houseCurrent ?? null"
+      :house-power="bus?.housePower ?? null"
+      :house-load-plausible="bus?.houseLoadPlausible ?? null"
+      :pack-stored="packStored"
+      :pack-reach="packReach"
+      :solar-reach="solarReach"
+    />
+
+    <ShuntAmmeter
+      class="card"
+      :pack-current="battery?.current ?? null"
+      :pack-voltage="battery?.packVoltage ?? null"
+      :pack-phase="packPhase"
+      :solar-current="solar?.batteryCurrent ?? null"
+      :solar-phase="solarPhase"
+      :house-current="bus?.houseCurrent ?? null"
+      :house-power="bus?.housePower ?? null"
+      :house-load-plausible="bus?.houseLoadPlausible ?? null"
+      :pv-power="solar?.pvPower ?? null"
+      :pack-reach="packReach"
+      :solar-reach="solarReach"
+    />
+
+    <div v-if="battery" class="instruments">
+      <SocCluster :battery="battery" :projection="projection" />
+      <CellLadder
+        :battery="battery"
+        :balance="balance"
+        :cell-reach="cellReach"
+        :balance-trigger="settings?.balanceTriggerDelta ?? null"
       />
+      <TempTrio :battery="battery" />
+      <BreakerPanel :battery="battery" :device="device" />
+    </div>
 
-      <ShuntAmmeter
-        class="card"
-        :pack-current="battery.current"
-        :pack-voltage="battery.packVoltage"
-        :solar-current="solar?.batteryCurrent ?? null"
-        :house-current="bus?.houseCurrent ?? null"
-        :house-power="bus?.housePower ?? null"
-        :house-load-plausible="bus?.houseLoadPlausible ?? null"
-        :pv-power="solar?.pvPower ?? null"
-        :pack-reach="packReach"
-        :solar-reach="solarReach"
-      />
+    <SolarRow
+      v-if="engaged"
+      class="card"
+      :solar="solar"
+      :solar-phase="solarPhase"
+      :bus="bus"
+      :pack-voltage="battery?.packVoltage ?? null"
+      :rssi="solarRssi"
+      :can-scan="capabilities.canScan"
+    />
 
-      <div class="instruments">
-        <SocCluster :battery="battery" :projection="projection" />
-        <CellLadder
-          :battery="battery"
-          :balance="balance"
-          :cell-reach="cellReach"
-          :balance-trigger="settings?.balanceTriggerDelta ?? null"
-        />
-        <TempTrio :battery="battery" />
-        <BreakerPanel :battery="battery" :device="device" />
-      </div>
+    <!-- The live trend sits last: a strip mounting when a series first arrives grows the panel,
+         and from the foot of the stack that nudges only the footer, never the instruments above. -->
+    <TrendStrips
+      v-if="source === 'live' && packPhase !== 'absent'"
+      class="card"
+      :history="history"
+    />
 
-      <SolarRow
-        class="card"
-        :solar="solar"
-        :bus="bus"
-        :pack-voltage="battery.packVoltage"
-        :rssi="solarRssi"
-        :can-scan="capabilities.canScan"
-      />
-
-      <!-- The live trend sits last: a strip mounting when a series first arrives grows the panel,
-           and from the foot of the stack that nudges only the footer, never the instruments above. -->
-      <TrendStrips v-if="source === 'live'" class="card" :history="history" />
-    </template>
-
-    <template v-else>
-      <section class="chassis card">
-        <header class="chassis-head">
-          <h2 class="plate">DC bus reconciliation</h2>
-          <p class="muted">boat = solar − pack</p>
-        </header>
-
-        <svg
-          :viewBox="`0 0 ${chassis.width} ${chassis.height}`"
-          class="chart"
-          data-testid="shunt-chassis"
-          role="img"
-          aria-label="The instrument, unpowered: a centre-zero current axis with a row each for pack, solar and boat. It fills in when you connect."
-        >
-          <text :x="chassis.margin" :y="chassis.axisY - 30" text-anchor="start" class="pole">
-            − discharge
-          </text>
-          <text
-            :x="chassis.width - chassis.margin"
-            :y="chassis.axisY - 30"
-            text-anchor="end"
-            class="pole"
-          >
-            charge +
-          </text>
-
-          <line
-            :x1="chassis.margin"
-            :y1="chassis.axisY"
-            :x2="chassis.width - chassis.margin"
-            :y2="chassis.axisY"
-            class="axis"
-          />
-          <line
-            :x1="chassisCentre"
-            :y1="chassis.axisY"
-            :x2="chassisCentre"
-            :y2="chassis.houseY + 12"
-            class="axis"
-          />
-
-          <text :x="8" :y="chassis.packY + 5" class="row-label">PACK</text>
-
-          <line
-            :x1="chassisCentre - 6"
-            :y1="chassis.solarY"
-            :x2="chassisCentre + 6"
-            :y2="chassis.solarY"
-            class="ghost"
-          />
-          <text :x="8" :y="chassis.solarY + 5" class="row-label">SOLAR</text>
-          <text :x="chassisCentre + 20" :y="chassis.solarY + 5" class="hint">
-            Connect the Victron
-          </text>
-
-          <line
-            :x1="chassisCentre - 6"
-            :y1="chassis.houseY"
-            :x2="chassisCentre + 6"
-            :y2="chassis.houseY"
-            class="ghost"
-          />
-          <text :x="8" :y="chassis.houseY + 5" class="row-label">BOAT</text>
-          <text :x="chassisCentre + 20" :y="chassis.houseY + 5" class="hint">
-            needs both radios
-          </text>
-        </svg>
-
-        <p class="muted caption">This is the instrument. It fills in when you connect.</p>
-      </section>
-
-      <section class="landing card">
-        <h2>Read your DC bus.</h2>
-        <p>
-          Connect the battery to see charge, discharge and cell health. Add the Victron to see solar
-          in and boat load — the number neither vendor app shows, and which normally needs a shunt
-          you never installed.
-        </p>
-        <p class="copy">
-          Needs Chrome or Edge and the two radios. Firefox and Safari cannot do Web Bluetooth at all.
-        </p>
-        <p class="landing-actions">
-          <a class="primary" :href="connectHref">Connect your devices</a>
-          <a v-if="sessionCount > 0" class="recorded" :href="logHref">{{ recordedSummary }}</a>
-        </p>
-      </section>
-    </template>
+    <section v-if="!engaged" class="landing card">
+      <h2>Read your DC bus.</h2>
+      <p>
+        Connect the battery to see charge, discharge and cell health. Add the Victron to see solar in
+        and boat load — the number neither vendor app shows, and which normally needs a shunt you
+        never installed.
+      </p>
+      <p class="copy">
+        Needs Chrome or Edge and the two radios. Firefox and Safari cannot do Web Bluetooth at all.
+      </p>
+      <p class="landing-actions">
+        <a class="primary" :href="connectHref">Connect your devices</a>
+        <a v-if="sessionCount > 0" class="recorded" :href="logHref">{{ recordedSummary }}</a>
+      </p>
+    </section>
   </main>
 </template>
 
@@ -272,7 +203,7 @@ main {
 
 /*
  * The elevated-card treatment shared by every top-level block on the Bus: the flow hero, the
- * ammeter, the trend, the solar row, the landing chassis, and each instrument in the cluster.
+ * ammeter, the trend, the solar row, the landing, and each instrument in the cluster.
  * Contrast between blocks comes from the plane → card elevation step, not a 1px rule. The class
  * falls through to each child component's root, which carries this scope, and each panel supplies
  * its own padding, so the card sets only surface, edge, radius and shadow.
@@ -284,62 +215,6 @@ main {
   border-radius: var(--r-md);
   box-shadow: var(--shadow-card);
   min-width: 0;
-}
-
-.chassis {
-  padding: var(--pad);
-}
-
-.chassis-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 1rem;
-  margin: 0 0 0.25rem;
-}
-
-.chassis-head h2 {
-  margin: 0;
-}
-
-.caption {
-  margin: 0.75rem 0 0;
-}
-
-.chart {
-  width: 100%;
-  height: auto;
-  display: block;
-}
-
-.axis {
-  stroke: var(--baseline);
-  stroke-width: 1;
-}
-
-.ghost {
-  stroke: var(--ink-muted);
-  stroke-width: 2;
-}
-
-.pole,
-.row-label,
-.hint {
-  font-family: var(--font-label);
-  font-size: var(--svg-label);
-  letter-spacing: 0.08em;
-  fill: var(--ink-muted);
-}
-
-.pole,
-.row-label {
-  text-transform: uppercase;
-}
-
-.hint {
-  font-family: var(--font-body);
-  text-transform: none;
-  letter-spacing: 0;
 }
 
 .landing {
