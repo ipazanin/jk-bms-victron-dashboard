@@ -35,6 +35,7 @@ import { VictronScanner } from '../infrastructure/ble/VictronScanner'
 import type { SolarScan, VictronHandlers } from '../infrastructure/ble/VictronScanner'
 import { BridgeSolarScan } from '../infrastructure/ble/BridgeSolarScan'
 import { resolveSolarBridgeUrl } from '../infrastructure/ble/solarBridge'
+import { browserStandardUtcOffsetMinutes } from './browserZone'
 import { describeConnectError, describeScanError } from './errors'
 import { amps } from './format'
 import type { HistoryStore } from './history/port'
@@ -692,21 +693,23 @@ export function createTelemetry(deps: TelemetryDeps) {
   const detailLogError = ref<string | null>(null)
 
   /**
-   * The pack's own zone is unknown — which offset resolves its counter is one of the things a real
-   * read is meant to settle — so this browser's current offset stands in for it, signed the way a
-   * zone is written rather than the way getTimezoneOffset reports it. It moves each record's
+   * The pack never states which zone it was installed in, so this browser's zone stands in for it.
+   * That assumption holds while the boat is browsed from the country it sits in and breaks the
+   * moment it is browsed from another one, where every stored timestamp lands out by the distance
+   * between the two zones.
+   *
+   * What the decoder is given is that zone's STANDARD offset, not the offset in force right now:
+   * the counter runs from the instant that was local midnight on 2020-01-01, so summer time never
+   * entered it and must not enter the subtraction that resolves it. It moves each record's
    * `recordedAt` and nothing else; the raw counter is carried through whatever we guess here.
    */
-  function browserUtcOffsetMinutes(): number {
-    return -new Date(now()).getTimezoneOffset()
-  }
-
   async function readDetailLog(): Promise<void> {
     if (bmsState.value !== 'live' || detailLogReading.value) return
     detailLogReading.value = true
     detailLogError.value = null
     try {
-      detailLog.value = await bmsLink.readDetailLog({ packUtcOffsetMinutes: browserUtcOffsetMinutes() })
+      const packUtcOffsetMinutes = browserStandardUtcOffsetMinutes(now())
+      detailLog.value = await bmsLink.readDetailLog({ packUtcOffsetMinutes })
     } catch (error) {
       detailLogError.value = (error as Error).message
     } finally {

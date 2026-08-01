@@ -2,6 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import { browserStandardUtcOffsetMinutes } from '../src/application/browserZone'
 import { createTelemetry } from '../src/application/telemetry'
 import type { Telemetry, TelemetryDeps } from '../src/application/telemetry'
 import { saveRememberedSession } from '../src/application/rememberedSession'
@@ -318,21 +319,32 @@ describe('reading the pack’s stored detail log', () => {
   let bms: FakeBmsLink
   let solar: FakeSolarScan
 
+  const hostZone = process.env.TZ
+
+  function telemetryReadingAt(now: () => number): Telemetry {
+    return createTelemetry({
+      createBmsLink: bms.create,
+      createSolarScan: solar.create,
+      historyStore: () => null,
+      now,
+      monotonic: () => performance.now(),
+      newId: () => 'session',
+    })
+  }
+
   beforeEach(() => {
     localStorage.clear()
     bms = fakeBmsLink()
     solar = fakeSolarScan()
-    telemetry = createTelemetry({
-      createBmsLink: bms.create,
-      createSolarScan: solar.create,
-      historyStore: () => null,
-      now: () => Date.now(),
-      monotonic: () => performance.now(),
-      newId: () => 'session',
-    })
+    telemetry = telemetryReadingAt(() => Date.now())
   })
 
-  it('holds what came back and resolves the records against this browser’s offset', async () => {
+  afterEach(() => {
+    if (hostZone === undefined) delete process.env.TZ
+    else process.env.TZ = hostZone
+  })
+
+  it('holds what came back and resolves the records against this browser’s standard offset', async () => {
     await telemetry.connectBms()
     const answer = {
       outcome: 'torn-burst',
@@ -349,7 +361,26 @@ describe('reading the pack’s stored detail log', () => {
     expect(telemetry.detailLog.value).toEqual(answer)
     expect(telemetry.detailLogReading.value).toBe(false)
     expect(telemetry.detailLogError.value).toBeNull()
-    expect(bms.lastDetailLogOffsetMinutes).toBe(-new Date().getTimezoneOffset())
+    expect(bms.lastDetailLogOffsetMinutes).toBe(browserStandardUtcOffsetMinutes(Date.now()))
+  })
+
+  /**
+   * The pack's counter runs on its zone's standard offset whatever season a record falls in, so a
+   * read taken during summer time still has to hand the decoder the winter offset. Hand it the
+   * offset in force at the moment of the read instead and every stored timestamp the Stats card
+   * shows lands an hour late, for as long as summer time lasts.
+   */
+  it('hands the decoder the standard offset even when the read itself is taken in summer', async () => {
+    process.env.TZ = 'Europe/Zagreb'
+    const midsummer = Date.UTC(2026, 6, 15, 12)
+    telemetry.dispose()
+    telemetry = telemetryReadingAt(() => midsummer)
+    await telemetry.connectBms()
+
+    await telemetry.readDetailLog()
+
+    expect(new Date(midsummer).getTimezoneOffset()).toBe(-120)
+    expect(bms.lastDetailLogOffsetMinutes).toBe(60)
   })
 
   it('does nothing at all when no pack is connected', async () => {
