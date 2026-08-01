@@ -59,9 +59,11 @@ function openDatabase(factory: IDBFactory): Promise<OpenAttempt> {
     }
 
     let blockedTimer: ReturnType<typeof setTimeout> | null = null
+    let settled = false
     const settle = (attempt: OpenAttempt): void => {
       if (blockedTimer !== null) clearTimeout(blockedTimer)
       blockedTimer = null
+      settled = true
       resolve(attempt)
     }
 
@@ -74,7 +76,18 @@ function openDatabase(factory: IDBFactory): Promise<OpenAttempt> {
         OPEN_BLOCKED_TIMEOUT_MS,
       )
     })
-    request.addEventListener('success', () => settle({ kind: 'opened', database: request.result }))
+    request.addEventListener('success', () => {
+      if (settled) {
+        // An open request cannot be cancelled, so giving up on the blocking tab only stops this
+        // page waiting — the upgrade still runs the moment that tab lets go, and hands back a
+        // connection nobody asked for any more. It carries no `onversionchange` handler, because
+        // the store that installs one is never built once the probe has reported a failure, so
+        // left open it is the thing that blocks the next schema upgrade in every other tab.
+        request.result.close()
+        return
+      }
+      settle({ kind: 'opened', database: request.result })
+    })
     request.addEventListener('error', (event) => {
       event.preventDefault()
       settle({ kind: 'failed', reason: reasonFor(request.error) })

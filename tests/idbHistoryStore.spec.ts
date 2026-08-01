@@ -386,6 +386,41 @@ async function waitForBlockedCountdown(): Promise<void> {
   }
 }
 
+/**
+ * The archive as the build before this one left it.
+ *
+ * `applySchema` only ever builds every version it knows in one pass, so it cannot play an older
+ * build: the store this build's upgrade adds would already be there, and the upgrade under test
+ * would abort on the constraint rather than complete.
+ */
+function openThePreviousVersion(name: string): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(name, DATABASE_VERSION - 1)
+    request.onupgradeneeded = () => {
+      applySchema(request.result, 0)
+      request.result.deleteObjectStore('warnings')
+    }
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+}
+
+/**
+ * Opens at `version` and says which of the two things happened, so a case can assert that a version
+ * bump got through rather than hanging on one that never will.
+ */
+function attemptUpgrade(name: string, version: number): Promise<'upgraded' | 'blocked'> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(name, version)
+    request.onblocked = () => resolve('blocked')
+    request.onsuccess = () => {
+      request.result.close()
+      resolve('upgraded')
+    }
+    request.onerror = () => reject(request.error)
+  })
+}
+
 describe('probing for an archive', () => {
   /**
    * The connection standing in for the tab that is holding the upgrade off. It is closed here
@@ -451,6 +486,29 @@ describe('probing for an archive', () => {
     const outcome = await store.commitChunk(packChunk(packSamples(3)), sessionPatch())
     expect(outcome.stored).toBe(false)
     expect(outcome.failure).toBe('open-blocked')
+  })
+
+  it('closes the connection the abandoned open still hands back later', async () => {
+    // Giving up on the blocking tab only stops this page waiting: the request cannot be cancelled,
+    // so the upgrade runs anyway once that tab goes and produces a connection nobody holds. Nothing
+    // gave it an `onversionchange`, so left open it is the permanent block the timeout escaped.
+    blockingTab = await openThePreviousVersion(DATABASE_NAME)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+
+    const probe = openHistoryStore()
+    await waitForBlockedCountdown()
+    vi.advanceTimersByTime(PAST_THE_BLOCKED_WAIT_MS)
+    const store = await probe
+    expect(store.availability.reason).toBe('open-blocked')
+
+    vi.useRealTimers()
+    blockingTab.close()
+    blockingTab = null
+
+    // The strongest proof available that nothing is still holding the archive: the next schema bump
+    // gets through instead of announcing itself as blocked, the way this one did. It queues behind
+    // the abandoned upgrade, so it is only judged once that upgrade has run and been let go of.
+    expect(await attemptUpgrade(DATABASE_NAME, DATABASE_VERSION + 1)).toBe('upgraded')
   })
 
   it('answers null for persistence when the browser will not say', async () => {
