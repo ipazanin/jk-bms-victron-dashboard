@@ -1,21 +1,21 @@
 /**
- * What these tests establish, and what they deliberately do not.
+ * What these tests establish, and how the two halves of the file divide the work.
  *
- * They prove that `decodeDetailLog` reads the field offsets, scale factors, signedness and RTC
- * epoch that the detail-log layout specifies: every sampled row here is a real row from a vendor-app
- * export of this pack, encoded into that layout and read back, and the decoded values are checked
- * against the numbers the vendor app itself printed.
+ * The real-frame cases drive bytes captured off a JK_B2A8S20P answering a bare 0xA7, committed
+ * verbatim in `detailLogFrame.json`. They are what prove the layout is what a device actually sends,
+ * and what pin the epoch: the captured records were matched to the vendor app's own export by value
+ * fingerprint, so the wall-clock strings asserted against them are the strings that app printed.
  *
- * They do not prove the layout is what a device actually sends. No 0x06 frame has been captured, so
- * every frame below is synthesized by this file from the same specification the decoder implements.
- * A layout error shared by both would pass here and fail on the water.
+ * The synthesized cases encode vendor-exported rows into that layout and read them back. They cover
+ * what the capture does not contain — event codes, MOSFETs off, both current signs, an unfitted
+ * probe, heating — and the malformed and boundary frames, which have to be constructed to exist at
+ * all. Their encoder writes the counter the way the device writes it: absolute seconds from the
+ * instant that was local midnight on 2020-01-01, which means the pack zone's standard offset applied
+ * to every record whatever season it falls in.
  *
- * Nor do they settle which clock the RTC counter runs on. To make bytes at all the encoder here has
- * to pick one, and it picks the naive-local reading. What is genuinely checked is that the decoder
- * is host-independent and that its offset arithmetic is right: the expected instants come from the
- * `recordedTimeZone` the fixture records, resolved through `Intl` rather than through the machine
- * running the suite, and the clock faces are compared against the vendor app's own strings. Run
- * this file under any TZ and every number below stays the same.
+ * Nothing here reads the host clock or the host zone. Every expected instant is either a literal
+ * `Date.UTC(…)` or comes from an `Intl` formatter pinned to the pack's own zone, so every number
+ * below stays the same under any TZ.
  *
  * The export carries no record with heating on and none with an unavailable temperature probe, so
  * those two paths are exercised by rows edited by hand, marked as such where they appear.
@@ -23,7 +23,8 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { decodeDetailLog } from '../src/domain/bms/detailLog'
+import { decodeDetailLog, readDetailLogHeader } from '../src/domain/bms/detailLog'
+import type { DetailLogRecord } from '../src/domain/bms/detailLog'
 import {
   FRAME_DETAIL_LOG,
   FRAME_LENGTH,
@@ -33,6 +34,7 @@ import {
   frameType,
   isChecksumValid,
 } from '../src/domain/bms/protocol'
+import capturedFrames from './fixtures/detailLogFrame.json'
 import vendorExport from './fixtures/detailLogRows.json'
 
 interface SampledRow {
@@ -65,6 +67,7 @@ const packZone: string = vendorExport.recordedTimeZone
 
 const RECORD_STRIDE = 24
 const RECORD_BASE = 9
+const MAX_RECORDS_PER_FRAME = 12
 
 const MILLISECONDS_PER_MINUTE = 60_000
 
@@ -95,26 +98,31 @@ function clockFaceFields(stamp: string): readonly number[] {
   return parts.slice(1).map(Number)
 }
 
-/** A clock face read as if it were UTC — a pack counter reading, with no zone applied to it. */
-function packClockMsOf(stamp: string): number {
+/** A clock face read as if it were UTC — a wall clock with no zone applied to it. */
+function wallClockMsOf(stamp: string): number {
   const [year, month, day, hour, minute, second] = clockFaceFields(stamp)
   return Date.UTC(year, month - 1, day, hour, minute, second)
 }
 
-/** The inverse: what the UTC getters spell out, in the format the vendor app prints. */
-function clockFaceOf(packClockMs: number): string {
-  const face = new Date(packClockMs)
-  const day = `${face.getUTCFullYear()}-${twoDigits(face.getUTCMonth() + 1)}-${twoDigits(face.getUTCDate())}`
-  const time = `${twoDigits(face.getUTCHours())}:${twoDigits(face.getUTCMinutes())}:${twoDigits(face.getUTCSeconds())}`
+/** The pack zone's calendar fields at an instant, read through `Intl` and never off the host zone. */
+function packZoneFieldsAt(instantMs: number): Record<string, number> {
+  return packZoneClock
+    .formatToParts(new Date(instantMs))
+    .filter((part) => part.type !== 'literal')
+    .reduce<Record<string, number>>((fields, part) => ({ ...fields, [part.type]: Number(part.value) }), {})
+}
+
+/** An instant written the way the pack's own zone spells it, in the format the vendor app prints. */
+function renderInPackZone(instantMs: number): string {
+  const spelled = packZoneFieldsAt(instantMs)
+  const day = `${spelled.year}-${twoDigits(spelled.month)}-${twoDigits(spelled.day)}`
+  const time = `${twoDigits(spelled.hour)}:${twoDigits(spelled.minute)}:${twoDigits(spelled.second)}`
   return `${day} ${time}`
 }
 
 /** How far ahead of UTC the pack's zone stands at a given instant, signed the way a zone is written. */
 function packZoneOffsetMinutesAt(instantMs: number): number {
-  const spelled = packZoneClock
-    .formatToParts(new Date(instantMs))
-    .filter((part) => part.type !== 'literal')
-    .reduce<Record<string, number>>((fields, part) => ({ ...fields, [part.type]: Number(part.value) }), {})
+  const spelled = packZoneFieldsAt(instantMs)
   const asIfUtc = Date.UTC(spelled.year, spelled.month - 1, spelled.day, spelled.hour, spelled.minute, spelled.second)
   return (asIfUtc - instantMs) / MILLISECONDS_PER_MINUTE
 }
@@ -124,13 +132,23 @@ function packZoneOffsetMinutesAt(instantMs: number): number {
  * resolves a wall clock is the offset in force at the instant it resolves to, not at UTC.
  */
 function instantInPackZone(stamp: string): number {
-  const wallClock = packClockMsOf(stamp)
+  const wallClock = wallClockMsOf(stamp)
   const firstGuess = wallClock - packZoneOffsetMinutesAt(wallClock) * MILLISECONDS_PER_MINUTE
   return wallClock - packZoneOffsetMinutesAt(firstGuess) * MILLISECONDS_PER_MINUTE
 }
 
-/** Every fixture row sits in one season, so one offset resolves the whole export. */
-const PACK_UTC_OFFSET_MINUTES = packZoneOffsetMinutesAt(instantInPackZone(sampledRows[0].at))
+/**
+ * The pack zone's standard offset — the one constant the RTC counter runs on, whatever season a
+ * record falls in. Summer time is always an advance, so the smallest offset a zone takes across a
+ * year is its standard one, and derived that way it holds for either hemisphere.
+ */
+function standardOffsetMinutesOf(year: number): number {
+  const monthStarts = Array.from({ length: 12 }, (_, month) => Date.UTC(year, month, 1))
+  return Math.min(...monthStarts.map(packZoneOffsetMinutesAt))
+}
+
+const [EXPORT_YEAR] = clockFaceFields(sampledRows[0].at)
+const PACK_UTC_OFFSET_MINUTES = standardOffsetMinutesOf(EXPORT_YEAR)
 const packClock = { packUtcOffsetMinutes: PACK_UTC_OFFSET_MINUTES }
 
 function statusBits(row: SampledRow): number {
@@ -143,14 +161,15 @@ function statusBits(row: SampledRow): number {
 }
 
 /**
- * One 24-byte record laid out the way the detail-log specification describes it. The counter is
- * written on the naive-local reading, which is a choice this file makes rather than a fact about
- * the hardware; the decoder under test takes no position on it.
+ * One 24-byte record laid out the way the detail log describes it, with the counter written the way
+ * the device writes it: the row's true instant carried up by the pack zone's standard offset, so
+ * that subtracting that same standard offset resolves it back whatever season the row falls in.
  */
 function encodeRecord(row: SampledRow): Uint8Array {
+  const packClockMs = instantInPackZone(row.at) + PACK_UTC_OFFSET_MINUTES * MILLISECONDS_PER_MINUTE
   const record = new Uint8Array(RECORD_STRIDE)
   const view = new DataView(record.buffer)
-  view.setUint32(0, Math.round((packClockMsOf(row.at) - RTC_EPOCH_UTC_MS) / 1000), true)
+  view.setUint32(0, Math.round((packClockMs - RTC_EPOCH_UTC_MS) / 1000), true)
   view.setUint8(4, row.eventCode)
   view.setUint8(5, statusBits(row))
   view.setUint8(6, row.highestCellIndex)
@@ -180,25 +199,191 @@ function detailLogFrame(records: readonly Uint8Array[], firstIndex = 0, declared
   return frame
 }
 
-describe('a vendor detail-log export read back through the documented layout', () => {
+// ── the captured frames ──────────────────────────────────────────────────────
+
+/** Europe/Zagreb standard time, which is what this pack's counter runs on the year round. */
+const CAPTURED_PACK_UTC_OFFSET_MINUTES = 60
+const capturedPackClock = { packUtcOffsetMinutes: CAPTURED_PACK_UTC_OFFSET_MINUTES }
+
+/** The gap between consecutive records, every one of them: the device crystal runs a second slow. */
+const SAMPLING_PERIOD_SECONDS = 3601
+
+/** How many records the ring holds before it wraps, which its last page is what settles. */
+const RING_CAPACITY = 836
+
+const CELLS_IN_PACK = 4
+const PACK_NOMINAL_CAPACITY_AH = 315
+
+function bytesOfHex(hex: string): Uint8Array {
+  const frame = new Uint8Array(hex.length / 2)
+  for (let position = 0; position < frame.length; position += 1) {
+    frame[position] = Number.parseInt(hex.slice(position * 2, position * 2 + 2), 16)
+  }
+  return frame
+}
+
+const fullPage = bytesOfHex(capturedFrames.full.hex)
+const tailPage = bytesOfHex(capturedFrames.tail.hex)
+
+const capturedPages = [
+  { described: 'a full page', frame: fullPage, declared: capturedFrames.full },
+  { described: "the ring's tail", frame: tailPage, declared: capturedFrames.tail },
+] as const
+
+function everyCapturedRecord(): readonly DetailLogRecord[] {
+  return [...decodeDetailLog(fullPage, capturedPackClock), ...decodeDetailLog(tailPage, capturedPackClock)]
+}
+
+describe('the frames a bare 0xA7 brought back off a real pack', () => {
+  it('is read against the same offset the fixture was fingerprinted with', () => {
+    expect(capturedFrames.packUtcOffsetMinutes).toBe(CAPTURED_PACK_UTC_OFFSET_MINUTES)
+  })
+
+  capturedPages.forEach((page) => {
+    it(`carries ${page.described} as one whole frame the assembler accepts`, () => {
+      expect(page.frame).toHaveLength(FRAME_LENGTH)
+      expect(isChecksumValid(page.frame)).toBe(true)
+      expect(frameType(page.frame)).toBe(FRAME_DETAIL_LOG)
+      expect(new FrameAssembler().feed(page.frame)).toHaveLength(1)
+    })
+
+    it(`decodes ${page.described} into exactly the records its header declares`, () => {
+      const header = readDetailLogHeader(page.frame)
+      const records = decodeDetailLog(page.frame, capturedPackClock)
+      const expectedIndices = Array.from(
+        { length: page.declared.recordCount },
+        (_, position) => page.declared.firstRecordIndex + position,
+      )
+
+      expect(header.firstRecordIndex).toBe(page.declared.firstRecordIndex)
+      expect(header.recordCount).toBe(page.declared.recordCount)
+      expect(records).toHaveLength(page.declared.recordCount)
+      expect(records.map((record) => record.index)).toEqual(expectedIndices)
+    })
+
+    it(`spaces every record in ${page.described} exactly ${SAMPLING_PERIOD_SECONDS} s from the last`, () => {
+      const records = decodeDetailLog(page.frame, capturedPackClock)
+      const gaps = records.slice(1).map((record, position) => record.recordedAt - records[position].recordedAt)
+
+      expect(new Set(gaps)).toEqual(new Set([SAMPLING_PERIOD_SECONDS * 1000]))
+    })
+  })
+
+  it('reads every captured record as a pack that is physically this one', () => {
+    const records = everyCapturedRecord()
+    const packVoltages = records.map((record) => record.packVoltage)
+    const cellVoltages = records.flatMap((record) => [record.highestCellVoltage, record.lowestCellVoltage])
+    const cellIndices = records.flatMap((record) => [record.highestCellIndex, record.lowestCellIndex])
+    const nominalCapacities = records.map((record) => record.nominalCapacity)
+
+    expect(new Set(nominalCapacities)).toEqual(new Set([PACK_NOMINAL_CAPACITY_AH]))
+    expect(Math.min(...packVoltages)).toBeGreaterThan(13)
+    expect(Math.max(...packVoltages)).toBeLessThan(14)
+    expect(Math.min(...cellVoltages)).toBeGreaterThan(3.3)
+    expect(Math.max(...cellVoltages)).toBeLessThan(3.45)
+    expect(Math.max(...cellIndices)).toBeLessThan(CELLS_IN_PACK)
+    expect(Math.max(...records.map((record) => record.remainingCapacity))).toBeLessThan(PACK_NOMINAL_CAPACITY_AH)
+  })
+
+  /**
+   * The concrete instant, spelled out, because it is the whole of what the epoch convention decides.
+   * The vendor app prints this record as 2026-06-29 17:15:25 and the fingerprint match is what says
+   * so; any change to how the counter is resolved has to break this line to get through.
+   */
+  it('puts the oldest record the ring holds where the vendor app puts it', () => {
+    const [oldest] = decodeDetailLog(fullPage, capturedPackClock)
+
+    expect(oldest.index).toBe(0)
+    expect(oldest.recordedAt).toBe(Date.UTC(2026, 5, 29, 15, 15, 25))
+    expect(renderInPackZone(oldest.recordedAt)).toBe('2026-06-29 17:15:25')
+    expect(oldest.packClockMs).toBe(Date.UTC(2026, 5, 29, 16, 15, 25))
+  })
+
+  it('puts that record an hour early if the summer offset is used in place of the standard one', () => {
+    const [oldest] = decodeDetailLog(fullPage, { packUtcOffsetMinutes: 120 })
+
+    expect(renderInPackZone(oldest.recordedAt)).toBe('2026-06-29 16:15:25')
+  })
+
+  it('runs the last record of a full page an hour past its first', () => {
+    const records = decodeDetailLog(fullPage, capturedPackClock)
+
+    expect(renderInPackZone(records[records.length - 1].recordedAt)).toBe('2026-06-30 04:15:36')
+  })
+
+  it('reads the newest record the ring holds as the pack the instruments showed moments later', () => {
+    const records = decodeDetailLog(tailPage, capturedPackClock)
+    const newest = records[records.length - 1]
+
+    expect(newest.index).toBe(RING_CAPACITY - 1)
+    expect(newest.recordedAt).toBe(Date.UTC(2026, 7, 1, 7, 29, 14))
+    expect(renderInPackZone(newest.recordedAt)).toBe('2026-08-01 09:29:14')
+    expect(newest.packVoltage).toBeCloseTo(13.61, 2)
+    expect(newest.highestCellVoltage).toBeCloseTo(3.415, 3)
+    expect(newest.lowestCellVoltage).toBeCloseTo(3.399, 3)
+    expect(newest.highestCellIndex).toBe(0)
+    expect(newest.lowestCellIndex).toBe(3)
+    expect(newest.current).toBeCloseTo(14.7, 1)
+    expect(newest.remainingCapacity).toBeCloseTo(292, 1)
+    expect(newest.nominalCapacity).toBeCloseTo(315, 1)
+    expect(newest.highestTemperature).toBe(26)
+    expect(newest.lowestTemperature).toBe(25)
+    expect(newest.mosfetTemperature).toBe(31)
+  })
+
+  it('ends the ring at a short page, which is what puts its capacity at 836 records', () => {
+    const tail = readDetailLogHeader(tailPage)
+
+    expect(tail.recordCount).toBeLessThan(12)
+    expect(tail.firstRecordIndex % 12).toBe(0)
+    expect(tail.firstRecordIndex + tail.recordCount).toBe(RING_CAPACITY)
+  })
+
+  it('has nothing sequential in byte 5, so the index field is the only thing that orders a burst', () => {
+    const full = readDetailLogHeader(fullPage)
+    const tail = readDetailLogHeader(tailPage)
+    const pagesBetween = (tail.firstRecordIndex - full.firstRecordIndex) / MAX_RECORDS_PER_FRAME
+
+    expect(full.unidentifiedByte).toBe(0x52)
+    expect(tail.unidentifiedByte).toBe(0x1b)
+    expect(tail.unidentifiedByte).not.toBe(full.unidentifiedByte + pagesBetween)
+  })
+
+  it('reads every captured record as a scheduled sample rather than an event', () => {
+    const records = everyCapturedRecord()
+
+    expect(records.filter((record) => record.eventCode !== 0)).toEqual([])
+    expect(records.filter((record) => record.eventLabel !== null)).toEqual([])
+  })
+
+  it('finds the balancer running on one record alone, both MOSFETs on throughout and no heating', () => {
+    const records = everyCapturedRecord()
+
+    expect(records.filter((record) => record.balancing).map((record) => record.index)).toEqual([RING_CAPACITY - 1])
+    expect(records.filter((record) => !record.chargingEnabled || !record.dischargingEnabled)).toEqual([])
+    expect(records.filter((record) => record.heating)).toEqual([])
+  })
+})
+
+describe('a vendor detail-log export encoded into the layout and read back', () => {
   const records = decodeDetailLog(detailLogFrame(sampledRows.map(encodeRecord)), packClock)
 
   it('yields one record per exported row', () => {
     expect(records).toHaveLength(sampledRows.length)
   })
 
-  it('has every exported row inside one offset of the pack zone, so one offset resolves them all', () => {
-    const offsets = sampledRows.map((row) => packZoneOffsetMinutesAt(instantInPackZone(row.at)))
+  it('resolves the export with the pack zone standard offset, which none of its rows is on', () => {
+    const offsetsInForce = sampledRows.map((row) => packZoneOffsetMinutesAt(instantInPackZone(row.at)))
 
-    expect(new Set(offsets).size).toBe(1)
-    expect(PACK_UTC_OFFSET_MINUTES).toBe(offsets[0])
+    expect(PACK_UTC_OFFSET_MINUTES).toBe(60)
+    expect(offsetsInForce.every((offset) => offset === 120)).toBe(true)
   })
 
   sampledRows.forEach((row, position) => {
     it(`reproduces every value the vendor app rendered for ${row.at}`, () => {
       const record = records[position]
 
-      expect(clockFaceOf(record.packClockMs)).toBe(row.at)
+      expect(renderInPackZone(record.recordedAt)).toBe(row.at)
       expect(record.recordedAt).toBe(instantInPackZone(row.at))
       expect(record.eventCode).toBe(row.eventCode)
       expect(record.eventLabel).toBe(row.eventLabel)
@@ -265,7 +450,7 @@ describe('decodeDetailLog', () => {
     expect(records).toHaveLength(12)
     records.forEach((record, position) => {
       expect(record.index).toBe(100 + position)
-      expect(clockFaceOf(record.packClockMs)).toBe(filled[position].at)
+      expect(renderInPackZone(record.recordedAt)).toBe(filled[position].at)
       expect(record.recordedAt).toBe(instantInPackZone(filled[position].at))
       expect(record.current).toBeCloseTo(filled[position].current, 1)
       expect(record.mosfetTemperature).toBe(filled[position].mosfetTemperature)
@@ -302,12 +487,12 @@ describe('decodeDetailLog', () => {
   it('moves the instant, and only the instant, when the same bytes are read against another offset', () => {
     const frame = detailLogFrame(sampledRows.map(encodeRecord))
 
-    const atZagrebSummer = decodeDetailLog(frame, { packUtcOffsetMinutes: 120 })
+    const atCentralEurope = decodeDetailLog(frame, { packUtcOffsetMinutes: 60 })
     const atKolkata = decodeDetailLog(frame, { packUtcOffsetMinutes: 330 })
 
-    atZagrebSummer.forEach((record, position) => {
+    atCentralEurope.forEach((record, position) => {
       expect(atKolkata[position].packClockMs).toBe(record.packClockMs)
-      expect(record.recordedAt - atKolkata[position].recordedAt).toBe((330 - 120) * MILLISECONDS_PER_MINUTE)
+      expect(record.recordedAt - atKolkata[position].recordedAt).toBe((330 - 60) * MILLISECONDS_PER_MINUTE)
     })
   })
 

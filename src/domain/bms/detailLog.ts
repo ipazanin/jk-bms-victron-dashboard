@@ -1,45 +1,52 @@
 /**
  * The JK-BMS stored detail log (command 0xA7, frame type 0x06).
  *
- * The pack keeps its own ring of roughly 768 sampled records — about 32 days — plus a record
- * written whenever an event fires. This is a different store from the event logbook in
- * `logbook.ts`: a logbook entry is a bare code and a timestamp, whereas every detail record is a
+ * The pack keeps its own ring of 836 sampled records — about 35 days at the sampling period below —
+ * plus a record written whenever an event fires. This is a different store from the event logbook
+ * in `logbook.ts`: a logbook entry is a bare code and a timestamp, whereas every detail record is a
  * small snapshot of the whole pack. Both stores draw event codes from one vocabulary, so labels
  * come from `logbookLabel` rather than a second table.
  *
- * Offsets come from the vendor Android app's own decoder rather than from a captured frame: the
- * layout is specified, not yet observed on the wire.
+ * There is no paging to drive. A bare 0xA7 carries no index and opens no negotiation; the pack
+ * answers it by streaming the whole ring back as one burst of frames.
  *
  *   [4]     frame type 0x06
- *   [5]     frame counter
- *   [6..7]  uint16 LE index of the first record carried; index 0 is the oldest the ring holds
- *   [8]     count of records carried, at most 12
+ *   [5]     unidentified. It changes from frame to frame of a burst with no sequence to it, and
+ *           nothing here reads it for meaning — [6..7] is what orders a burst.
+ *   [6..7]  uint16 LE index of the first record carried; index 0 is the oldest the ring holds. It
+ *           starts at 0 and steps by exactly 12 down the burst.
+ *   [8]     count of records carried, at most 12. Only the burst's last frame reads below 12.
  *   [9..]   records, 24 bytes each, contiguous — 9 + 12 × 24 = 297, two bytes idle before the checksum
  *
- * Timestamps are the pack's own RTC counter, seconds wide, counting from midnight on 2020-01-01.
- * That epoch is confirmed independently: a capture of the vendor app setting the pack's clock
- * writes the counter that date produces. What the counter is counting is NOT confirmed. It is
- * either a naive local wall clock, or absolute seconds since the instant that was local midnight
- * on 2020-01-01 in the pack's own zone. The two agree wherever the pack's zone is on standard
- * time and differ by its summer-time shift, one hour in Europe, wherever it is not.
+ * The record offsets below are confirmed against captured frames rather than taken on the vendor
+ * decoder's word: read this way, the newest stored record reproduces a live cell-info frame taken
+ * moments after it across pack voltage, both cell extremes and all three temperature channels, and
+ * every record's nominal capacity lands on the pack's rating.
  *
- * Both readings are one equation with a different constant, so the caller supplies the constant
- * and this decoder does not have to choose:
+ * Timestamps are the pack's own RTC counter, seconds wide. It counts absolute seconds from the
+ * instant that was midnight on 2020-01-01 in the pack's own zone, so one fixed subtraction resolves
+ * it — and the fixed number is that zone's STANDARD offset, in force all year, not the summer
+ * offset in force at the record:
  *
  *     recordedAt = Date.UTC(2020, 0, 1) + rtcSeconds × 1000 − packUtcOffsetMinutes × 60000
  *
- * Under the naive-local reading that offset is the pack zone's offset in force at the record;
- * under the absolute reading it is the pack zone's standard offset, the same number all year. A
- * summer record resolved with the wrong one of the two is an hour out, so until the convention is
- * settled a caller that cannot tell them apart must not present these instants as exact.
+ * Fingerprinting captured records against the vendor app's own export is what settles that: for a
+ * pack on Central European time the app renders every matched summer record exactly one hour later
+ * than a naive reading of the counter from 2020-01-01, which is the standard offset and not the
+ * summer one. Resolve a summer record with the summer offset instead and it lands an hour early.
+ *
+ * The counter is a standard-time wall clock, in other words, not a local one. Read `packClockMs`
+ * with the UTC getters and it spells the pack's zone on standard time: the vendor app's clock face
+ * outside summer, an hour behind it inside summer.
  *
  * A pack whose RTC was never set counts from the epoch itself, which makes a record dated near
  * 2020-01-01 an unset clock rather than a sample. No threshold separates the two — an uncalibrated
  * pack reads small and non-zero, not zero — so the decoder hands the counter through unjudged.
  *
- * Sampling runs on a 3601-second period rather than 3600, because the device crystal is slow. A
- * record's own timestamp is therefore the only authority on when it was taken; stepping whole
- * hours from a neighbouring record drifts a second per sample.
+ * Sampling runs on a 3601-second period rather than 3600, because the device crystal is slow: every
+ * observed gap between consecutive records is 3601, with no exceptions. A record's own timestamp is
+ * therefore the only authority on when it was taken; stepping whole hours from a neighbouring
+ * record drifts a second per sample.
  */
 
 import type { DetailLogFrameHeader } from './DetailLogFrameHeader'
@@ -51,7 +58,7 @@ const MILLI = 0.001
 const CENTI = 0.01
 const DECI = 0.1
 
-const FRAME_COUNTER = 5
+const UNIDENTIFIED_BYTE = 5
 const FIRST_RECORD_INDEX = 6
 const RECORD_COUNT = 8
 const RECORD_BASE = 9
@@ -99,9 +106,9 @@ export interface DetailLogRecord {
   readonly index: number
   /**
    * The pack's own clock reading and nothing more: its RTC counter laid on 2020-01-01T00:00:00Z.
-   * Read it with the UTC getters and it renders the clock face the vendor app shows — exactly, if
-   * the counter runs on naive local time; shifted by the pack zone's standard offset, if it runs
-   * on absolute seconds. It shares no origin with `Date.now()` and must never be compared to it.
+   * Read it with the UTC getters and it spells the pack's zone on standard time — the clock face
+   * the vendor app shows outside summer, an hour behind it inside summer. It shares no origin with
+   * `Date.now()` and must never be compared to it.
    */
   readonly packClockMs: number
   /**
@@ -171,10 +178,11 @@ function readRecord(data: DataView, base: number, index: number, packUtcOffsetMs
 /**
  * Reads the records one frame carries, keyed by their position in the device's ring.
  *
- * `packUtcOffsetMinutes` is signed the way a zone is written rather than the way JavaScript
- * reports it, so CET is +60 and CEST +120 — the opposite sign to `Date.prototype.getTimezoneOffset`.
- * It has no default: which offset resolves this pack's counter is a fact about the pack and its
- * installation, and a decoder that guessed it would hand back plausible instants that are wrong.
+ * `packUtcOffsetMinutes` is signed the way a zone is written rather than the way JavaScript reports
+ * it, so Central European time is +60 — the opposite sign to `Date.prototype.getTimezoneOffset` —
+ * and it stays +60 for a summer record, because the counter runs on the zone's standard offset all
+ * year. It has no default: which zone the pack was installed in is a fact about the installation,
+ * and a decoder that guessed it would hand back plausible instants that are wrong.
  *
  * The frame is expected to have passed the assembler's checksum already, so a count above what a
  * frame can physically hold means the layout is not what this decoder was written for, and
@@ -220,7 +228,7 @@ export function readDetailLogHeader(frame: Uint8Array): DetailLogFrameHeader {
   const header = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
   return {
     frameType: frameType(frame),
-    counter: header.getUint8(FRAME_COUNTER),
+    unidentifiedByte: header.getUint8(UNIDENTIFIED_BYTE),
     firstRecordIndex: header.getUint16(FIRST_RECORD_INDEX, true),
     recordCount: header.getUint8(RECORD_COUNT),
   }

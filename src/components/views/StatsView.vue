@@ -189,8 +189,9 @@ const logbookAge = computed(() => {
 
 /**
  * The pack's counter rendered exactly as the pack holds it — read with UTC getters, no zone
- * applied. It is shown beside the resolved instant because which of the two the counter means is
- * still unsettled, and only the raw face is a fact about the device.
+ * applied, so it spells the pack's own zone on standard time. It is shown beside the resolved
+ * instant because it is the one figure here that is a fact about the device rather than about the
+ * offset the caller supplied.
  */
 const packCounterFace = new Intl.DateTimeFormat('en-GB', {
   timeZone: 'UTC',
@@ -222,13 +223,13 @@ const outcomeSentence = computed(() => {
   return transfer === null ? null : describeOutcome(transfer)
 })
 
-/** One line per frame, so a whole reply's paging can be read off a single run. */
+/** One line per frame, so a whole burst's chunking can be read off a single run. */
 const frameLines = computed(() => {
   const transfer = detailLog.value
   if (transfer === null) return []
   return transfer.frames.map((header, position) => ({
     key: position,
-    text: `#${position} · type 0x${header.frameType.toString(16).padStart(2, '0')} · counter ${header.counter} · first record ${header.firstRecordIndex} · carries ${header.recordCount}`,
+    text: `#${position} · type 0x${header.frameType.toString(16).padStart(2, '0')} · byte 5 0x${header.unidentifiedByte.toString(16).padStart(2, '0')} · first record ${header.firstRecordIndex} · carries ${header.recordCount}`,
   }))
 })
 

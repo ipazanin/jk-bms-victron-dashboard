@@ -68,14 +68,18 @@ interface StoredSample {
 }
 
 /**
- * A type 0x06 frame carrying the given samples, laid out the way the detail-log specification
- * describes. Only the three fields these cases assert on are populated; everything else is zero,
- * which decodes to a scheduled sample with no event.
+ * A type 0x06 frame carrying the given samples, laid out the way the detail-log layout describes.
+ * Only the three fields these cases assert on are populated; everything else is zero, which decodes
+ * to a scheduled sample with no event.
  */
-function detailLogFrame(counter: number, firstRecordIndex: number, samples: readonly StoredSample[]): Uint8Array {
+function detailLogFrame(
+  unidentifiedByte: number,
+  firstRecordIndex: number,
+  samples: readonly StoredSample[],
+): Uint8Array {
   const frame = responseFrame(FRAME_DETAIL_LOG)
   const view = new DataView(frame.buffer)
-  frame[5] = counter
+  frame[5] = unidentifiedByte
   view.setUint16(6, firstRecordIndex, true)
   frame[8] = samples.length
   samples.forEach((sample, position) => {
@@ -512,8 +516,8 @@ describe('JkBmsClient stored detail log', () => {
 
     expect(transfer.outcome).toBe('records-read')
     expect(transfer.frames).toEqual([
-      { frameType: FRAME_DETAIL_LOG, counter: 0, firstRecordIndex: 0, recordCount: 2 },
-      { frameType: FRAME_DETAIL_LOG, counter: 1, firstRecordIndex: 2, recordCount: 1 },
+      { frameType: FRAME_DETAIL_LOG, unidentifiedByte: 0, firstRecordIndex: 0, recordCount: 2 },
+      { frameType: FRAME_DETAIL_LOG, unidentifiedByte: 1, firstRecordIndex: 2, recordCount: 1 },
     ])
     expect(transfer.records.map((record) => record.index)).toEqual([0, 1, 2])
     expect(transfer.records[0].packVoltage).toBeCloseTo(13.42, 2)
