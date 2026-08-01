@@ -102,6 +102,13 @@ function spacedTotal(elapsedMs: number): string {
         </p>
       </div>
 
+      <div v-else-if="blocked === 'open-blocked'" class="card state-card">
+        <p class="copy state">
+          Another tab is running an older version of this page and is holding the log open. Close it
+          and reload.
+        </p>
+      </div>
+
       <div v-else-if="blocked !== null" class="card state-card">
         <p class="state-title">This browser will not keep a log.</p>
         <p class="copy state">

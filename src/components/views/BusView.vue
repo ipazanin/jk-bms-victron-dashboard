@@ -42,10 +42,11 @@ const {
   rememberedAt,
   rememberedStatus,
   recording,
-  archiveUsable,
 } = telemetry
 
 const log = useHistoryBrowser()
+// Destructured so the template reads it as a top-level ref, which `<script setup>` unwraps.
+const { availability: archiveAvailability } = log
 
 const connectHref = hashOf({ name: 'connect' })
 const logHref = hashOf({ name: 'log' })
@@ -109,7 +110,7 @@ const chassisCentre = computed(() => chassis.value.width / 2)
     :worst-fault="worstFault"
     :device-label="packLabel"
   >
-    <RecordingPlate :state="recording" :usable="archiveUsable" />
+    <RecordingPlate :state="recording" :availability="archiveAvailability" />
   </AnnunciatorStrip>
 
   <main>

@@ -38,7 +38,8 @@
  * The lease gates the writing, not the opening. A session is built the moment an observation
  * arrives, because nothing on that path may await, and the claim runs on the queued step behind it;
  * until it lands, nothing about that session reaches the archive. A recorder refused the lease drops
- * its session whole, says as much, and keeps its instruments.
+ * its session whole, says as much, and keeps its instruments. Between holding and refused there is a
+ * third answer — not decided yet — and nothing on screen may read that one as recording.
  */
 
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../domain/bms/types'
@@ -133,6 +134,16 @@ export interface SessionRecorderOptions {
   readonly onStateChange?: (state: RecorderState) => void
 }
 
+/**
+ * Where this recorder stands on the recording lease.
+ *
+ * 'undecided' is a frame that genuinely happens rather than a placeholder for the other two: the
+ * session is built on the observation that opened it and the claim runs on the queued step behind
+ * it, so between those two there is nothing true to say about which tab is writing. A refusal is
+ * not a fault — the watch is being written down, by the tab that got to the lease first.
+ */
+export type RecordingLease = 'undecided' | 'held' | 'refused'
+
 /** What the recording plate needs, and nothing the plate does not need. */
 export interface RecorderState {
   /** Null when nothing is being recorded, which is also the answer when the store is unusable. */
@@ -146,11 +157,8 @@ export interface RecorderState {
    * instruments carry on untouched.
    */
   readonly failure: HistoryUnavailableReason | null
-  /**
-   * Another tab holds the recording lease. Not a failure and not a fault: the watch is being
-   * written down, by the tab that got to it first.
-   */
-  readonly recordingElsewhere: boolean
+  /** Only 'held' makes an open session this tab's own, and only then is it being recorded. */
+  readonly lease: RecordingLease
 }
 
 /** Why the pack half of a session stopped. Narrower than a session end: the session survives it. */
@@ -606,7 +614,10 @@ export class SessionRecorder {
       id: this.newId(),
       startedAt: at,
       continues: this.continuesSessionId,
-      leased: false,
+      // A lease already in hand is a decided lease. A session that follows another in this same tab
+      // — a link that dropped and came back, a row closed underneath us — is this recorder's own
+      // from its first row, with no undecided frame in between.
+      leased: this.releaseHeldLease !== null,
       packDeviceKey: this.packDeviceKey,
       solarDeviceKey: this.solarDeviceKey,
       packDeviceCounted: false,
@@ -1124,6 +1135,19 @@ export class SessionRecorder {
     })
   }
 
+  /**
+   * What may honestly be said about the lease this instant.
+   *
+   * A refusal outranks an open session, because a tab past its retry interval opens one
+   * optimistically while the last answer it has is still the holder's. Everything else waits on the
+   * claim: an open session this recorder has not been granted is not one it is recording.
+   */
+  private leaseStanding(): RecordingLease {
+    if (this.leaseRefusedMonotonic !== null) return 'refused'
+    if (this.session !== null && this.session.leased) return 'held'
+    return 'undecided'
+  }
+
   private releaseRecordingLease(): void {
     const release = this.releaseHeldLease
     if (release === null) return
@@ -1190,7 +1214,7 @@ export class SessionRecorder {
       solarSamples: session?.solarSamples ?? 0,
       droppedChunks: session?.droppedChunks ?? 0,
       failure: this.failure,
-      recordingElsewhere: this.leaseRefusedMonotonic !== null,
+      lease: this.leaseStanding(),
     }
     if (sameState(this.published, next)) return
     this.published = next
@@ -1215,7 +1239,7 @@ function idleState(): RecorderState {
     solarSamples: 0,
     droppedChunks: 0,
     failure: null,
-    recordingElsewhere: false,
+    lease: 'undecided',
   }
 }
 
@@ -1227,7 +1251,7 @@ function sameState(left: RecorderState, right: RecorderState): boolean {
     left.solarSamples === right.solarSamples &&
     left.droppedChunks === right.droppedChunks &&
     left.failure === right.failure &&
-    left.recordingElsewhere === right.recordingElsewhere
+    left.lease === right.lease
   )
 }
 

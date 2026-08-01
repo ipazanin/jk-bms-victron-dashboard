@@ -6,8 +6,9 @@
  * recording indicator borrowing the alarm palette would make every session look like an incident.
  *
  * It says nothing at all when the archive is usable and no session is open — there is no honest
- * claim to make about a link that has not started. Every negative case it does print names its
- * cause, because "not recording" without a reason reads as a bug.
+ * claim to make about a link that has not started. It says nothing while the lease of a session
+ * just opened is still undecided, for exactly the same reason. Every negative case it does print
+ * names its cause, because "not recording" without a reason reads as a bug.
  *
  * Another tab holding the recording lease is one of those causes and an ordinary one, so it is
  * worded as the plain fact it is: the watch is being written down, just not here.
@@ -15,12 +16,14 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 
 import { groupedCount } from '../application/format'
+import type { HistoryAvailability } from '../application/history/port'
 import type { RecorderState } from '../application/history/SessionRecorder'
 
 const props = defineProps<{
   state: RecorderState
-  /** False when the browser refused an archive at all: private browsing, or no IndexedDB. */
-  usable: boolean
+  /** Null until the storage probe answers. Not a refusal, so the plate stays quiet through it
+   *  rather than printing a line it would have to take back. */
+  availability: HistoryAvailability | null
 }>()
 
 const MS_PER_SECOND = 1000
@@ -49,14 +52,32 @@ onUnmounted(() => {
 
 /**
  * A write that failed is not recording, whatever the session id still says — and neither is a
- * session opened on an observation whose lease another tab still holds.
+ * session opened on an observation whose lease is not this tab's.
  */
 const recording = computed(
   () =>
     props.state.sessionId !== null &&
     props.state.failure === null &&
-    !props.state.recordingElsewhere,
+    props.state.lease === 'held',
 )
+
+/**
+ * A session is built on the observation that opened it and the lease is claimed on the step behind
+ * it, so there is one frame where the session may yet be dropped whole. Nothing is printed across
+ * it: a stopwatch that starts and vanishes is worse than a stopwatch that starts late.
+ */
+const undecided = computed(
+  () => props.state.sessionId !== null && props.state.lease === 'undecided',
+)
+
+/** False once the probe has answered that this browser will keep no archive at all. */
+const usable = computed(() => props.availability === null || props.availability.usable)
+
+/**
+ * The one unusable archive the owner can do something about without leaving the page, so it gets
+ * its own line: the generic one would blame a browser that refused nothing.
+ */
+const heldByOlderTab = computed(() => props.availability?.reason === 'open-blocked')
 
 const elapsed = computed(() => {
   const startedAt = props.state.startedAt
@@ -77,19 +98,24 @@ function stopwatch(elapsedMs: number): string {
 </script>
 
 <template>
-  <p v-if="recording" class="plate-line readout">
-    <span aria-hidden="true" class="mark">■</span>
-    <span>RECORDING · {{ elapsed }} · {{ groupedCount(samples) }} samples</span>
-  </p>
-  <p v-else-if="state.recordingElsewhere" class="plate-line copy">
-    NOT RECORDING — another tab of this page is keeping the log.
-  </p>
-  <p v-else-if="!usable" class="plate-line copy">
-    NOT RECORDING — this browser will not keep a log.
-  </p>
-  <p v-else-if="state.failure !== null" class="plate-line copy">
-    NOT RECORDING — the log could not be written to.
-  </p>
+  <template v-if="!undecided">
+    <p v-if="recording" class="plate-line readout">
+      <span aria-hidden="true" class="mark">■</span>
+      <span>RECORDING · {{ elapsed }} · {{ groupedCount(samples) }} samples</span>
+    </p>
+    <p v-else-if="state.lease === 'refused'" class="plate-line copy">
+      NOT RECORDING — another tab of this page is keeping the log.
+    </p>
+    <p v-else-if="heldByOlderTab" class="plate-line copy">
+      NOT RECORDING — an older version of this page is open in another tab.
+    </p>
+    <p v-else-if="!usable" class="plate-line copy">
+      NOT RECORDING — this browser will not keep a log.
+    </p>
+    <p v-else-if="state.failure !== null" class="plate-line copy">
+      NOT RECORDING — the log could not be written to.
+    </p>
+  </template>
 </template>
 
 <style scoped>

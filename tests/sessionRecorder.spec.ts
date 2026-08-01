@@ -1003,6 +1003,23 @@ describe('one archive, one recorder', () => {
     vi.unstubAllGlobals()
   })
 
+  it('says nothing about recording on the frame before the lease answers', async () => {
+    // The claim runs on the queued step behind the observation that opened the session, so for one
+    // task the session exists and its lease does not. Reading that frame as recording is what puts
+    // a stopwatch on screen for a tab that is about to be refused and drop the session whole.
+    first.drivePack(1)
+    expect(first.recorder.state.sessionId).not.toBeNull()
+    expect(first.recorder.state.lease).toBe('undecided')
+    await first.recorder.drain()
+    expect(first.recorder.state.lease).toBe('held')
+
+    second.drivePack(1)
+    expect(second.recorder.state.sessionId).not.toBeNull()
+    expect(second.recorder.state.lease).toBe('undecided')
+    await second.recorder.drain()
+    expect(second.recorder.state.lease).toBe('refused')
+  })
+
   it('records the watch once when a second tab is fed the same observations', async () => {
     first.drivePack(6)
     await first.recorder.drain()
@@ -1012,7 +1029,7 @@ describe('one archive, one recorder', () => {
 
     expect(await store.listSessions()).toHaveLength(1)
     expect(second.recorder.state.sessionId).toBeNull()
-    expect(second.recorder.state.recordingElsewhere).toBe(true)
+    expect(second.recorder.state.lease).toBe('refused')
     // Not a failure: nothing went wrong, and the plate must not borrow the alarm's vocabulary.
     expect(second.recorder.state.failure).toBeNull()
   })
@@ -1035,7 +1052,7 @@ describe('one archive, one recorder', () => {
     await first.recorder.drain()
     second.drivePack(4)
     await second.recorder.drain()
-    expect(second.recorder.state.recordingElsewhere).toBe(true)
+    expect(second.recorder.state.lease).toBe('refused')
 
     first.recorder.finish('user-disconnect')
     await first.recorder.drain()
@@ -1046,7 +1063,7 @@ describe('one archive, one recorder', () => {
     await second.recorder.drain()
 
     expect(second.recorder.state.sessionId).not.toBeNull()
-    expect(second.recorder.state.recordingElsewhere).toBe(false)
+    expect(second.recorder.state.lease).toBe('held')
     expect(await store.listSessions()).toHaveLength(2)
   })
 
@@ -1070,7 +1087,7 @@ describe('one archive, one recorder', () => {
     await second.recorder.drain()
 
     expect(second.recorder.state.sessionId).not.toBeNull()
-    expect(second.recorder.state.recordingElsewhere).toBe(false)
+    expect(second.recorder.state.lease).toBe('held')
   })
 
   it('stops naming the other tab once this one has stopped watching', async () => {
@@ -1078,12 +1095,12 @@ describe('one archive, one recorder', () => {
     await first.recorder.drain()
     second.drivePack(4)
     await second.recorder.drain()
-    expect(second.recorder.state.recordingElsewhere).toBe(true)
+    expect(second.recorder.state.lease).toBe('refused')
 
     // Both radios idle here, which is the one end a refused tab has: there is no session to close.
     second.recorder.finish('user-disconnect')
 
-    expect(second.recorder.state.recordingElsewhere).toBe(false)
+    expect(second.recorder.state.lease).toBe('undecided')
   })
 
   it('records in a browser that has no Web Locks at all, rather than refusing to', async () => {
