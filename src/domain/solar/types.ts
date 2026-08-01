@@ -1,3 +1,11 @@
+/**
+ * What a Victron SmartSolar tells anyone listening.
+ *
+ * Only what it is doing now. It keeps its stored days to itself: asked for them over its own
+ * VE.Direct tunnel it does answer, and the answer is that the register is not supported. So a day's
+ * history reaches this boat through an export from the vendor app and never through the radio.
+ */
+
 export const VICTRON_COMPANY_ID = 0x02e1
 
 export const RECORD_SOLAR_CHARGER = 0x01
@@ -45,59 +53,4 @@ export interface SolarReading {
   readonly yieldTodayKwh: number | null
   readonly pvPower: number | null
   readonly loadCurrent: number | null
-}
-
-/** The four charger error codes a history record keeps, most recent first. 0 is "no error". */
-export type RecentChargerErrors = readonly [number, number, number, number]
-
-/**
- * One day the controller has stored. Volts, amps, watts and kilowatt-hours; durations in minutes,
- * which is the unit the register itself counts in.
- */
-export interface RecordedSolarHistoryDay {
-  readonly recorded: true
-  /**
-   * Identifies the day and stays with the record as it ages down the backlog: it advances by one
-   * per day and wraps to zero at 365, so it orders days only within a single year's window.
-   */
-  readonly daySequenceNumber: number
-  readonly yieldKwh: number
-  /** Null on a controller without a load output, which reports the field as not available. */
-  readonly consumedKwh: number | null
-  readonly maxBatteryVoltage: number
-  readonly minBatteryVoltage: number
-  readonly errorDatabase: number
-  readonly errors: RecentChargerErrors
-  readonly minutesInBulk: number
-  readonly minutesInAbsorption: number
-  readonly minutesInFloat: number
-  readonly maxPvPower: number
-  readonly maxBatteryCurrent: number
-  readonly maxPvVoltage: number
-}
-
-/**
- * A daily register the controller has not written yet. A recorded day of zero yield is a
- * different thing — a boat under cover produces those — so the two never share a shape.
- */
-export interface UnwrittenSolarHistoryDay {
-  readonly recorded: false
-}
-
-export type SolarHistoryDay = RecordedSolarHistoryDay | UnwrittenSolarHistoryDay
-
-/** The lifetime record that sits alongside the daily backlog. */
-export interface SolarHistoryTotals {
-  readonly errorDatabase: number
-  readonly errors: RecentChargerErrors
-  /** Yield since the owner last reset the counter in VictronConnect. */
-  readonly resettableYieldKwh: number
-  /** Yield over the controller's whole life, which nothing resets. */
-  readonly systemYieldKwh: number
-  readonly maxPvVoltage: number
-  readonly maxBatteryVoltage: number
-  /** How many daily registers hold data, so a fetch need not poll the whole backlog blindly. */
-  readonly daysAvailable: number
-  /** Null on firmware that does not carry the field. */
-  readonly minBatteryVoltage: number | null
 }
