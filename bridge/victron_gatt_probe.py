@@ -47,7 +47,8 @@ OUT = Path(__file__).resolve().parent.parent / "captures"
 MAX_READ_PREVIEW = 64
 
 
-async def find_controller(seconds: float) -> BLEDevice | None:
+async def scan_for_controllers(seconds: float) -> list[tuple[BLEDevice, AdvertisementData]]:
+    """Every Victron in range. Deliberately does not choose between them — see the caller."""
     print(f"scanning {seconds:.0f}s for a Victron controller...", file=sys.stderr)
     found: dict[str, tuple[BLEDevice, AdvertisementData]] = {}
 
@@ -60,12 +61,7 @@ async def find_controller(seconds: float) -> BLEDevice | None:
     await asyncio.sleep(seconds)
     await scanner.stop()
 
-    if not found:
-        return None
-    strongest = max(found.values(), key=lambda pair: pair[1].rssi or -999)
-    device, adv = strongest
-    print(f"found {device.name or '(no name)'} @ {device.address} at {adv.rssi} dBm", file=sys.stderr)
-    return device
+    return list(found.values())
 
 
 async def probe(address: str, listen_seconds: float) -> None:
@@ -158,14 +154,32 @@ async def main() -> None:
 
     address = args.address
     if address is None:
-        controller = await find_controller(args.scan_seconds)
-        if controller is None:
+        found = await scan_for_controllers(args.scan_seconds)
+        if not found:
             print(
                 "No Victron controller in range. It advertises about once a second, so this is "
                 "usually the radio being asleep or the Mac lacking Bluetooth permission.",
                 file=sys.stderr,
             )
-            return
+            raise SystemExit(1)
+        if len(found) > 1:
+            # A marina puts other people's controllers in range, and signal strength does not say
+            # whose is whose. Connecting is not passive — the controller accepts one client, so
+            # picking wrong knocks a stranger's app off their own charger.
+            print(f"{len(found)} Victron controllers are in range. Naming one is on you:", file=sys.stderr)
+            for device, advertisement in sorted(found, key=lambda pair: -(pair[1].rssi or -999)):
+                print(
+                    f"  {advertisement.rssi:>4} dBm  {device.address}  {device.name or '(no name)'}",
+                    file=sys.stderr,
+                )
+            print("Re-run with --address <UUID>, matching the name in VictronConnect.", file=sys.stderr)
+            raise SystemExit(1)
+
+        controller, advertisement = found[0]
+        print(
+            f"found {controller.name or '(no name)'} @ {controller.address} at {advertisement.rssi} dBm",
+            file=sys.stderr,
+        )
         address = controller.address
 
     try:
