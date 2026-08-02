@@ -1,0 +1,499 @@
+{
+  "totalsRegister": 4175,
+  "totals": "0100000000004117000041170000d1089a051ef104ffffffffffffffffffffffffff",
+  "capabilityWord": "76ef0908",
+  "days": [
+    {
+      "register": 4176,
+      "bytes": "0086000000ffffffff70052a0500000000004101f000790034010000db004d084b00"
+    },
+    {
+      "register": 4177,
+      "bytes": "0088000000ffffffff8d05040500000000009201f000ef0027010000d00041084a00"
+    },
+    {
+      "register": 4178,
+      "bytes": "0063000000ffffffff8d052605000000000046017800b90113010000bf003f084900"
+    },
+    {
+      "register": 4179,
+      "bytes": "0067000000ffffffff97050f0500000000003d018d00b1010e010000bb004d084800"
+    },
+    {
+      "register": 4180,
+      "bytes": "005f000000ffffffff98052b05000000000042017f00b90113010000be004a084700"
+    },
+    {
+      "register": 4181,
+      "bytes": "005a000000ffffffff9a052105000000000062018600950103010000b3005f084600"
+    },
+    {
+      "register": 4182,
+      "bytes": "0059000000ffffffff8d052b05000000000039017800cf0115010000bf006a084500"
+    },
+    {
+      "register": 4183,
+      "bytes": "0052000000ffffffff98051a0500000000000501bc00a30122010000ce00b6084400"
+    },
+    {
+      "register": 4184,
+      "bytes": "0065000000ffffffff8d051c0500000000004a017800c30139010000dc0082084300"
+    },
+    {
+      "register": 4185,
+      "bytes": "0082000000ffffffff99052a0500000000007e01810082013a010000dc004c084200"
+    },
+    {
+      "register": 4186,
+      "bytes": "0084000000ffffffff9405f4040000000000a7017a00650152010000f200ca084100"
+    },
+    {
+      "register": 4187,
+      "bytes": "005e000000ffffffff8d052c0500000000003c017800d9010a010000b90076084000"
+    },
+    {
+      "register": 4188,
+      "bytes": "005d000000ffffffff8e052c05000000000026027800c30061010000f5005e083f00"
+    },
+    {
+      "register": 4189,
+      "bytes": "006f000000ffffffff8d052b05000000000076017800990154010000f30061083e00"
+    },
+    {
+      "register": 4190,
+      "bytes": "007a000000ffffffff8d050005000000000080017800960122010000d7006a083d00"
+    },
+    {
+      "register": 4191,
+      "bytes": "006a000000ffffffff8d05090500000000003b017800d30111010000bc0052083c00"
+    },
+    {
+      "register": 4192,
+      "bytes": "005e000000ffffffff8d052c05000000000040017800d8010b010000b80047083b00"
+    },
+    {
+      "register": 4193,
+      "bytes": "0064000000ffffffff8d052c05000000000035017800d20116010000c0002e083a00"
+    },
+    {
+      "register": 4194,
+      "bytes": "005d000000ffffffff8d052c05000000000052017800c60107010000b70059083900"
+    },
+    {
+      "register": 4195,
+      "bytes": "0061000000ffffffff8d052c05000000000024017a00f3011c010000cf0076083800"
+    },
+    {
+      "register": 4196,
+      "bytes": "005b000000ffffffff8d052805000000000022017800ff010d010000ba00ad083700"
+    },
+    {
+      "register": 4197,
+      "bytes": "0073000000ffffffff8d051a050000000000fc017800e3007d010000120187083600"
+    },
+    {
+      "register": 4198,
+      "bytes": "00a6000000ffffffff8e0522050000000000c701a50032016a01000004019b083500"
+    },
+    {
+      "register": 4199,
+      "bytes": "0075000000ffffffff8e052505000000000054017800d0010f010000bd0075083400"
+    },
+    {
+      "register": 4200,
+      "bytes": "0082000000ffffffff91051e05000000000051017a00d60145010000e700aa083300"
+    },
+    {
+      "register": 4201,
+      "bytes": "0096000000ffffffff8d05f5040000000000da0179004d0149010000e900a5083200"
+    },
+    {
+      "register": 4202,
+      "bytes": "009a000000ffffffff8e05f7040000000000e4017800440150010000f10053083100"
+    },
+    {
+      "register": 4203,
+      "bytes": "0084000000ffffffff8e052b050000000000990178008d018d010000180124083000"
+    },
+    {
+      "register": 4204,
+      "bytes": "00a2000000ffffffff92050205000000000042027800e70049010000e7007b082f00"
+    },
+    {
+      "register": 4205,
+      "bytes": "0047000000ffffffff8d0511050000000000850178009c014d010000f40083082e00"
+    },
+    {
+      "register": 4206,
+      "bytes": "000e000000ffffffff8d05340500000000008e0078009a02840000005b0087082d00"
+    }
+  ],
+  "expectedFromVendorExport": [
+    {
+      "register": 4178,
+      "date": "2026-07-31",
+      "yieldWh": 990,
+      "maxPvPowerW": 275,
+      "maxPvVoltage": 21.11,
+      "minBatteryVoltage": 13.18,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 326,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 441
+    },
+    {
+      "register": 4179,
+      "date": "2026-07-30",
+      "yieldWh": 1030,
+      "maxPvPowerW": 270,
+      "maxPvVoltage": 21.25,
+      "minBatteryVoltage": 12.95,
+      "maxBatteryVoltage": 14.31,
+      "minutesInBulk": 317,
+      "minutesInAbsorption": 141,
+      "minutesInFloat": 433
+    },
+    {
+      "register": 4180,
+      "date": "2026-07-29",
+      "yieldWh": 950,
+      "maxPvPowerW": 275,
+      "maxPvVoltage": 21.22,
+      "minBatteryVoltage": 13.23,
+      "maxBatteryVoltage": 14.32,
+      "minutesInBulk": 322,
+      "minutesInAbsorption": 127,
+      "minutesInFloat": 441
+    },
+    {
+      "register": 4181,
+      "date": "2026-07-28",
+      "yieldWh": 900,
+      "maxPvPowerW": 259,
+      "maxPvVoltage": 21.43,
+      "minBatteryVoltage": 13.13,
+      "maxBatteryVoltage": 14.34,
+      "minutesInBulk": 354,
+      "minutesInAbsorption": 134,
+      "minutesInFloat": 405
+    },
+    {
+      "register": 4182,
+      "date": "2026-07-27",
+      "yieldWh": 890,
+      "maxPvPowerW": 277,
+      "maxPvVoltage": 21.54,
+      "minBatteryVoltage": 13.23,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 313,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 463
+    },
+    {
+      "register": 4183,
+      "date": "2026-07-26",
+      "yieldWh": 820,
+      "maxPvPowerW": 290,
+      "maxPvVoltage": 22.3,
+      "minBatteryVoltage": 13.06,
+      "maxBatteryVoltage": 14.32,
+      "minutesInBulk": 261,
+      "minutesInAbsorption": 188,
+      "minutesInFloat": 419
+    },
+    {
+      "register": 4184,
+      "date": "2026-07-25",
+      "yieldWh": 1010,
+      "maxPvPowerW": 313,
+      "maxPvVoltage": 21.78,
+      "minBatteryVoltage": 13.08,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 330,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 451
+    },
+    {
+      "register": 4185,
+      "date": "2026-07-24",
+      "yieldWh": 1300,
+      "maxPvPowerW": 314,
+      "maxPvVoltage": 21.24,
+      "minBatteryVoltage": 13.22,
+      "maxBatteryVoltage": 14.33,
+      "minutesInBulk": 382,
+      "minutesInAbsorption": 129,
+      "minutesInFloat": 386
+    },
+    {
+      "register": 4186,
+      "date": "2026-07-23",
+      "yieldWh": 1320,
+      "maxPvPowerW": 338,
+      "maxPvVoltage": 22.5,
+      "minBatteryVoltage": 12.68,
+      "maxBatteryVoltage": 14.28,
+      "minutesInBulk": 423,
+      "minutesInAbsorption": 122,
+      "minutesInFloat": 357
+    },
+    {
+      "register": 4187,
+      "date": "2026-07-22",
+      "yieldWh": 940,
+      "maxPvPowerW": 266,
+      "maxPvVoltage": 21.66,
+      "minBatteryVoltage": 13.24,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 316,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 473
+    },
+    {
+      "register": 4188,
+      "date": "2026-07-21",
+      "yieldWh": 930,
+      "maxPvPowerW": 353,
+      "maxPvVoltage": 21.42,
+      "minBatteryVoltage": 13.24,
+      "maxBatteryVoltage": 14.22,
+      "minutesInBulk": 550,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 195
+    },
+    {
+      "register": 4189,
+      "date": "2026-07-20",
+      "yieldWh": 1110,
+      "maxPvPowerW": 340,
+      "maxPvVoltage": 21.45,
+      "minBatteryVoltage": 13.23,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 374,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 409
+    },
+    {
+      "register": 4190,
+      "date": "2026-07-19",
+      "yieldWh": 1220,
+      "maxPvPowerW": 290,
+      "maxPvVoltage": 21.54,
+      "minBatteryVoltage": 12.8,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 384,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 406
+    },
+    {
+      "register": 4191,
+      "date": "2026-07-18",
+      "yieldWh": 1060,
+      "maxPvPowerW": 273,
+      "maxPvVoltage": 21.3,
+      "minBatteryVoltage": 12.89,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 315,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 467
+    },
+    {
+      "register": 4192,
+      "date": "2026-07-17",
+      "yieldWh": 940,
+      "maxPvPowerW": 267,
+      "maxPvVoltage": 21.19,
+      "minBatteryVoltage": 13.24,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 320,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 472
+    },
+    {
+      "register": 4193,
+      "date": "2026-07-16",
+      "yieldWh": 1000,
+      "maxPvPowerW": 278,
+      "maxPvVoltage": 20.94,
+      "minBatteryVoltage": 13.24,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 309,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 466
+    },
+    {
+      "register": 4194,
+      "date": "2026-07-15",
+      "yieldWh": 930,
+      "maxPvPowerW": 263,
+      "maxPvVoltage": 21.37,
+      "minBatteryVoltage": 13.24,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 338,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 454
+    },
+    {
+      "register": 4195,
+      "date": "2026-07-14",
+      "yieldWh": 970,
+      "maxPvPowerW": 284,
+      "maxPvVoltage": 21.66,
+      "minBatteryVoltage": 13.24,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 292,
+      "minutesInAbsorption": 122,
+      "minutesInFloat": 499
+    },
+    {
+      "register": 4196,
+      "date": "2026-07-13",
+      "yieldWh": 910,
+      "maxPvPowerW": 269,
+      "maxPvVoltage": 22.21,
+      "minBatteryVoltage": 13.2,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 290,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 511
+    },
+    {
+      "register": 4197,
+      "date": "2026-07-12",
+      "yieldWh": 1150,
+      "maxPvPowerW": 381,
+      "maxPvVoltage": 21.83,
+      "minBatteryVoltage": 13.06,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 508,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 227
+    },
+    {
+      "register": 4198,
+      "date": "2026-07-11",
+      "yieldWh": 1660,
+      "maxPvPowerW": 362,
+      "maxPvVoltage": 22.03,
+      "minBatteryVoltage": 13.14,
+      "maxBatteryVoltage": 14.22,
+      "minutesInBulk": 455,
+      "minutesInAbsorption": 165,
+      "minutesInFloat": 306
+    },
+    {
+      "register": 4199,
+      "date": "2026-07-10",
+      "yieldWh": 1170,
+      "maxPvPowerW": 271,
+      "maxPvVoltage": 21.65,
+      "minBatteryVoltage": 13.17,
+      "maxBatteryVoltage": 14.22,
+      "minutesInBulk": 340,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 464
+    },
+    {
+      "register": 4200,
+      "date": "2026-07-09",
+      "yieldWh": 1300,
+      "maxPvPowerW": 325,
+      "maxPvVoltage": 22.18,
+      "minBatteryVoltage": 13.1,
+      "maxBatteryVoltage": 14.25,
+      "minutesInBulk": 337,
+      "minutesInAbsorption": 122,
+      "minutesInFloat": 470
+    },
+    {
+      "register": 4201,
+      "date": "2026-07-08",
+      "yieldWh": 1500,
+      "maxPvPowerW": 329,
+      "maxPvVoltage": 22.13,
+      "minBatteryVoltage": 12.69,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 474,
+      "minutesInAbsorption": 121,
+      "minutesInFloat": 333
+    },
+    {
+      "register": 4202,
+      "date": "2026-07-07",
+      "yieldWh": 1540,
+      "maxPvPowerW": 336,
+      "maxPvVoltage": 21.31,
+      "minBatteryVoltage": 12.71,
+      "maxBatteryVoltage": 14.22,
+      "minutesInBulk": 484,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 324
+    },
+    {
+      "register": 4203,
+      "date": "2026-07-06",
+      "yieldWh": 1320,
+      "maxPvPowerW": 397,
+      "maxPvVoltage": 20.84,
+      "minBatteryVoltage": 13.23,
+      "maxBatteryVoltage": 14.22,
+      "minutesInBulk": 409,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 397
+    },
+    {
+      "register": 4204,
+      "date": "2026-07-05",
+      "yieldWh": 1620,
+      "maxPvPowerW": 329,
+      "maxPvVoltage": 21.71,
+      "minBatteryVoltage": 12.82,
+      "maxBatteryVoltage": 14.26,
+      "minutesInBulk": 578,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 231
+    },
+    {
+      "register": 4205,
+      "date": "2026-07-04",
+      "yieldWh": 710,
+      "maxPvPowerW": 333,
+      "maxPvVoltage": 21.79,
+      "minBatteryVoltage": 12.97,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 389,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 412
+    },
+    {
+      "register": 4206,
+      "date": "2026-07-03",
+      "yieldWh": 140,
+      "maxPvPowerW": 132,
+      "maxPvVoltage": 21.83,
+      "minBatteryVoltage": 13.32,
+      "maxBatteryVoltage": 14.21,
+      "minutesInBulk": 142,
+      "minutesInAbsorption": 120,
+      "minutesInFloat": 666
+    }
+  ],
+  "capturedFrames": {
+    "sessionOpenControl": [
+      "fa80ff",
+      "f980"
+    ],
+    "sessionOpenCommand": [
+      "01",
+      "0300"
+    ],
+    "keepalive": "0600821893421027",
+    "readRequestTotals": "05038119104f",
+    "readRequestToday": "050381191050",
+    "valueReportTotals": "080319104f58220100000000004117000041170000d1089a051ef104ffffffffffffffffffffffffff",
+    "valueReportToday": "080319105058220086000000ffffffff70052a0500000000004101f000790034010000db004d084b00",
+    "capabilityRequest": "050381190140",
+    "controlNotification": "f901",
+    "sessionErrorAfterOpen": "07000300"
+  }
+}

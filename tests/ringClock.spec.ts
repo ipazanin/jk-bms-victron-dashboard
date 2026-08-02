@@ -111,7 +111,15 @@ function ledgerOf(
   reads: readonly RingReadRow[],
   device: DeviceRecord | null = deviceRow(),
 ): StoredRingLedger {
-  return { deviceKey: 'jk:SYNTHETIC', records, reads, device, retainedFromSeq: null }
+  return {
+    deviceKey: 'jk:SYNTHETIC',
+    records,
+    solarDays: [],
+    reads,
+    solarReads: [],
+    device,
+    retainedFromSeq: null,
+  }
 }
 
 /** The two captured reads merged into one ledger, exactly as the fold would leave it. */
@@ -125,7 +133,9 @@ function capturedLedger(reads: readonly RingReadRow[]): StoredRingLedger {
   return {
     deviceKey: ringMerge.deviceKey,
     records: [...first, ...second],
+    solarDays: [],
     reads,
+    solarReads: [],
     device: deviceRow({ key: ringMerge.deviceKey }),
     retainedFromSeq: null,
   }

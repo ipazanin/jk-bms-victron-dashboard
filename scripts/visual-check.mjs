@@ -188,10 +188,16 @@ const PASSES = [
       }
       if (!/device logbook/i.test(report.text)) fail(scope, 'the logbook panel did not render')
       if (!/boot/i.test(report.text)) fail(scope, 'the seeded logbook events did not render')
-      // The controller refuses its history registers, so nothing here may wait for solar data.
-      const solar = report.statsText.match(/solar|photovoltaic|\bpv\b|yield/i)
-      if (solar !== null) fail(scope, `a solar-shaped card rendered on Stats ("${solar[0]}")`)
+      // The controller serves its stored history over the 306b tunnel, so the page carries a card
+      // for it and states what a sweep costs — it holds the charger's one BLE connection.
+      if (!/the controller's stored history/i.test(report.statsText)) {
+        fail(scope, 'the solar history card did not render')
+      }
+      if (!/live solar readings stop/i.test(report.statsText)) {
+        fail(scope, 'the page did not say what a solar sweep costs')
+      }
       checkReadButton(scope, report)
+      checkSolarReadButton(scope, report)
     },
   },
   {
@@ -215,6 +221,7 @@ const PASSES = [
       }
       if (report.eventLabels.length > 0) fail(scope, 'the events card rendered with no ledger')
       checkReadButton(scope, report)
+      checkSolarReadButton(scope, report)
     },
   },
   {
@@ -241,6 +248,32 @@ function checkReadButton(scope, report) {
   if (!report.readStoredLog.disabled) fail(scope, 'the read button was live with no BMS connected')
   if (!/connect the bms first/i.test(report.statsText)) {
     fail(scope, 'the read button gave no reason for being disabled')
+  }
+}
+
+/**
+ * The solar sweep is manual by design — it holds the controller's one BLE connection and stops the
+ * advertisement feed — so what is checked here is that the button is present and says what it costs
+ * before it is pressed.
+ *
+ * It is deliberately *not* held to being disabled. A sweep opens its own chooser, so unlike the
+ * pack's read there is no prior connection to require, and the only honest refusal is a browser that
+ * cannot reach Bluetooth at all. Headless Chrome is not that browser: it carries
+ * `navigator.bluetooth` and answers `getAvailability()` with true on a machine with no radio, so an
+ * assertion that the button is disabled here cannot be satisfied by anything the page could check.
+ *
+ * The radio-switched-off refusal the page does implement is untested in both harnesses, and stays
+ * that way honestly rather than behind a case that passes for another reason: this one reports the
+ * adapter as present, and jsdom reports Web Bluetooth as absent, so neither can express a browser
+ * that has the API with the radio off.
+ */
+function checkSolarReadButton(scope, report) {
+  if (report.readSolarHistory === null) {
+    fail(scope, 'no solar-history read button rendered')
+    return
+  }
+  if (!/only one connection|live solar readings stop/i.test(report.statsText)) {
+    fail(scope, 'the solar read button did not say what a sweep costs')
   }
 }
 
@@ -699,8 +732,10 @@ function readPage(page) {
     // Read out of the DOM rather than off the page's text: the fired labels live in a collapsed
     // disclosure and under the chart cursor, neither of which `innerText` reaches.
     const fired = [...document.querySelectorAll('[data-testid="stats-events-per-day"] .fired')]
-    const readButton = [...document.querySelectorAll('[data-testid="stats-view"] button')].find(
-      (button) => /read stored log/i.test(button.textContent ?? ''),
+    const statsButtons = [...document.querySelectorAll('[data-testid="stats-view"] button')]
+    const readButton = statsButtons.find((button) => /read stored log/i.test(button.textContent ?? ''))
+    const sweepButton = statsButtons.find((button) =>
+      /read solar history/i.test(button.textContent ?? ''),
     )
 
     return {
@@ -723,6 +758,7 @@ function readPage(page) {
       emptyStates: document.querySelectorAll('[data-testid="stats-no-ring"]').length,
       eventLabels: fired.map((node) => node.textContent.replace(/\s+/g, ' ').trim()),
       readStoredLog: readButton === undefined ? null : { disabled: readButton.disabled },
+      readSolarHistory: sweepButton === undefined ? null : { disabled: sweepButton.disabled },
     }
   })
 }

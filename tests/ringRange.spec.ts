@@ -87,7 +87,15 @@ function capacities(from: number, readings: readonly number[]): RingRecordRow[] 
 }
 
 function ledgerOf(records: readonly RingRecordRow[], device: StoredRingLedger['device']): StoredRingLedger {
-  return { deviceKey: PACK_DEVICE_KEY, records, reads: [], device, retainedFromSeq: null }
+  return {
+    deviceKey: PACK_DEVICE_KEY,
+    records,
+    solarDays: [],
+    reads: [],
+    solarReads: [],
+    device,
+    retainedFromSeq: null,
+  }
 }
 
 /** The owner has answered both questions, so every record resolves exactly and to the second. */

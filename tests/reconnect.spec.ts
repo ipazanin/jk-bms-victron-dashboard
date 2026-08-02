@@ -8,7 +8,7 @@ import { createTelemetry } from '../src/application/telemetry'
 import type { Telemetry } from '../src/application/telemetry'
 import { rememberedSession } from './support/samples'
 import { MemoryHistoryStore } from './support/MemoryHistoryStore'
-import { fakeBmsLink, fakeSolarScan } from './support/fakeRadios'
+import { fakeBmsLink, fakeSolarHistoryLink, fakeSolarScan } from './support/fakeRadios'
 import type { FakeBmsLink } from './support/fakeRadios'
 
 // createTelemetry reads its capabilities from navigator.bluetooth, so canReconnect is only true when
@@ -37,8 +37,10 @@ function spawn(options: { deviceId?: string | null; deviceName?: string | null }
   const telemetry = createTelemetry({
     createBmsLink: bms.create,
     createSolarScan: solar.create,
+    createSolarHistoryLink: fakeSolarHistoryLink().create,
     historyStore: () => store,
     refreshRingLedger: async () => undefined,
+    refreshSolarLedger: async () => undefined,
     now: () => clock,
     monotonic: () => clock,
     newId: () => `session-${(ids += 1)}`,

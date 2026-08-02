@@ -6,14 +6,17 @@ import type { App } from 'vue'
 
 import { provideHistoryEnvironment } from '../src/application/history/historyBrowser'
 import StatsView from '../src/components/views/StatsView.vue'
+import { calendarDateNow } from '../src/domain/history/calendarDays'
 import { PACK_SAMPLING_PERIOD_SECONDS } from '../src/domain/history/ringClock'
 import { MemoryHistoryStore } from './support/MemoryHistoryStore'
 import { ringRecordBytes, ringSnapshot } from './support/samples'
+import { capturedSolarSnapshot, capturedTotals } from './support/solarHistoryFixture'
 
-// Stats is now a statement about what the devices themselves kept, and the ways it can lie are all
-// ways of *looking* right: a card waiting for solar the controller will never serve, a charge total
-// quietly inflated by the pack resetting its own counter, an energy figure printed as a total when
-// it is a floor. Those are assertions about painted text, so they are made where a reader meets it.
+// Stats is a statement about what the two devices themselves kept, and the ways it can lie are all
+// ways of *looking* right: a charge total quietly inflated by the pack resetting its own counter, a
+// pack energy figure printed as a total when it is a floor, a controller's day fabricated as zero
+// where the register was never written. Those are assertions about painted text, so they are made
+// where a reader meets it.
 
 const NOMINAL_CAPACITY_AH = 315
 /** The counter face of an instant, as the pack's RTC would have written it at UTC. */
@@ -73,30 +76,129 @@ async function ledgerOf(
   )
 }
 
-describe('what the Stats view paints off the pack’s own ring', () => {
-  it('says the log is still on the pack when this browser holds no ledger', async () => {
-    // The one empty state for the whole range section. A reader who has never read a log needs to
-    // be told the records exist and where, not shown six cards of em dashes.
+/**
+ * A controller's ledger holding the captured backlog, dated as if the sweep ran today, so the Week
+ * preset covers its newest days without any spec having to fix the clock.
+ */
+async function solarLedgerOf(store: MemoryHistoryStore): Promise<void> {
+  const at = Date.now()
+  await store.appendSolarHistory(
+    capturedSolarSnapshot({ observedAt: at, readOnDate: calendarDateNow(at) }),
+  )
+}
+
+describe('what the Stats view paints off the two devices’ own records', () => {
+  it('says the history is still on the devices when this browser holds no ledger', async () => {
+    // The one empty state for the whole page. A reader who has never read either device needs to be
+    // told the records exist and where, not shown six cards of em dashes.
     const text = await statsViewShowing(new MemoryHistoryStore())
 
-    expect(text).toContain('Nothing read from this pack yet')
+    expect(text).toContain('Nothing read from either device yet')
     expect(text).toContain('about a month of hourly snapshots')
+    expect(text).toContain('a month of daily totals of its own')
     expect(host.querySelector('[data-testid="stats-no-ring"]')).not.toBeNull()
   })
 
-  it('leaves no solar-shaped card behind, in either state', async () => {
-    // The controller answers its tunnel and refuses the history registers. A card, a strip or a
-    // disabled import sitting there waiting is a promise this app cannot keep.
-    const empty = await statsViewShowing(new MemoryHistoryStore())
-    expect(empty).not.toMatch(/solar|pv\b/i)
+  it('offers a solar read that says why it is disabled', async () => {
+    // jsdom has no Web Bluetooth, which is the disabled case the button has to explain rather than
+    // sit dead in. The live read is hardware-in-the-loop and stays there.
+    await statsViewShowing(new MemoryHistoryStore())
 
-    app?.unmount()
-    app = null
-    host.innerHTML = ''
+    const buttons = [...host.querySelectorAll('button')]
+    const read = buttons.find((button) => /read solar history/i.test(button.textContent ?? ''))
 
+    expect(read).toBeDefined()
+    expect(read?.disabled).toBe(true)
+    expect(host.textContent).toContain('This browser has no Web Bluetooth')
+  })
+
+  it('says a sweep costs the live feed, because that is why it never happens by itself', async () => {
+    // The controller takes one BLE client and changes its advertising while connected. An automatic
+    // sweep would silently kill the Instant Readout feed, so the page has to state the trade.
+    const text = await statsViewShowing(new MemoryHistoryStore())
+
+    expect(text).toContain("The controller's stored history")
+    expect(text).toMatch(/VictronConnect cannot reach it and the live solar readings stop/)
+  })
+
+  it('folds the controller’s own days into the solar cards', async () => {
+    const store = new MemoryHistoryStore()
+    await solarLedgerOf(store)
+
+    const text = await statsViewShowing(store)
+
+    expect(host.querySelector('[data-testid="stats-solar-yield"]')).not.toBeNull()
+    expect(host.querySelector('[data-testid="stats-solar-stages"]')).not.toBeNull()
+    expect(text).toContain('Solar yield per day')
+    expect(text).toContain('Time in each charge stage')
+    // The controller integrated these itself, second by second, so they are totals and the page
+    // must not carry the pack's hourly-floor caveat over onto them.
+    expect(text).toContain("From the controller's own daily registers")
+  })
+
+  it('prints the lifetime counters the totals register carried', async () => {
+    const store = new MemoryHistoryStore()
+    await solarLedgerOf(store)
+
+    const text = await statsViewShowing(store)
+
+    expect(text).toContain('System yield')
+    expect(text).toContain(`${capturedTotals.systemYieldKwh.toFixed(2)} kWh`)
+    expect(text).toContain(String(capturedTotals.daysAvailable))
+  })
+
+  it('keeps the receipt for a sweep the controller refused', async () => {
+    // A firmware that stops serving the history registers is only ever visible as a history of
+    // attempts, exactly as a pack that stops answering 0xA7 is.
+    const store = new MemoryHistoryStore()
+    const at = Date.now()
+    await store.appendSolarHistory(
+      capturedSolarSnapshot({
+        observedAt: at,
+        readOnDate: calendarDateNow(at),
+        outcome: 'refused',
+        totals: null,
+        days: [],
+      }),
+    )
+
+    const text = await statsViewShowing(store)
+
+    expect(text).toContain('answered the totals register with a status code')
+    expect(text).toContain('will not serve its stored history')
+  })
+
+  it('counts an unwritten register as nothing rather than as a day of no sun', async () => {
+    // A boat under cover produces recorded days of 0.14 kWh, so a fabricated zero would be
+    // indistinguishable from a real one. The receipt says how many registers were left alone.
+    const store = new MemoryHistoryStore()
+    const at = Date.now()
+    const swept = capturedSolarSnapshot({ observedAt: at, readOnDate: calendarDateNow(at) })
+    await store.appendSolarHistory({
+      ...swept,
+      days: swept.days.map((reading) =>
+        reading.daysAgo === 0 ? { ...reading, day: { recorded: false } } : reading,
+      ),
+    })
+
+    const text = await statsViewShowing(store)
+
+    expect(text).toContain('the controller has not written yet')
+    expect(text).toContain('rather than as a day of no sun')
+  })
+
+  it('keeps the pack selector free of the controller’s ledger', async () => {
+    // Both radios file into the same archive under their own keys. A controller offered in the pack
+    // picker would fold a 34-byte day record through a decoder written for a 24-byte ring record.
     const store = new MemoryHistoryStore()
     await ledgerOf(store, 48, (index) => 280 + index * 0.5)
-    expect(await statsViewShowing(store)).not.toMatch(/solar|pv\b/i)
+    await solarLedgerOf(store)
+
+    await statsViewShowing(store)
+
+    expect(host.querySelector('[data-testid="stats-pack-picker"]')).toBeNull()
+    expect(host.querySelector('[data-testid="stats-pack-name"]')).not.toBeNull()
+    expect(host.querySelector('[data-testid="stats-solar-yield"]')).not.toBeNull()
   })
 
   it('folds the range cards out of the stored records', async () => {

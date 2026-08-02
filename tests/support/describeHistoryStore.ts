@@ -49,6 +49,18 @@ import {
   solarSamples,
   warningRecord,
 } from './samples'
+import {
+  CAPTURED_DAYS,
+  CAPTURE_OBSERVED_AT,
+  CAPTURE_READ_ON_DATE,
+  SOLAR_DEVICE_KEY,
+  capturedDayBytes,
+  capturedSolarSnapshot,
+  dayReading,
+  laterSolarSnapshot,
+  unwrittenDayBytes,
+  withYield,
+} from './solarHistoryFixture'
 
 /** What a spec has to hand back so the suite can open a store and let go of it again. */
 export interface HistoryStoreHarness {
@@ -1064,6 +1076,184 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
         expect((await store.usage()).ringRecords).toBe(6)
         const [device] = (await store.listDevices()).filter((row) => row.key === PACK_DEVICE_KEY)
         expect(device.packUtcOffsetMinutes).toBe(60)
+      })
+    })
+
+    describe("the controller's own day records", () => {
+      async function daysOf(deviceKey: DeviceKey = SOLAR_DEVICE_KEY) {
+        return (await store.readRingLedger(deviceKey))?.solarDays ?? []
+      }
+
+      it('files a sweep under the controller’s own key, dated back from the day it ran', async () => {
+        const outcome = await store.appendSolarHistory(capturedSolarSnapshot())
+
+        expect(outcome.stored).toBe(true)
+        expect(outcome.appended).toBe(CAPTURED_DAYS)
+        expect(outcome.totalDays).toBe(CAPTURED_DAYS)
+        const days = await daysOf()
+        expect(days.map((day) => day.seq)).toEqual(days.map((_day, position) => position))
+        expect(days[days.length - 1].date).toBe(CAPTURE_READ_ON_DATE)
+        expect(days[0].day.recorded).toBe(true)
+      })
+
+      it('recognises a sweep it already holds and writes nothing', async () => {
+        await store.appendSolarHistory(capturedSolarSnapshot())
+        const filed = await daysOf()
+
+        const again = await store.appendSolarHistory(
+          capturedSolarSnapshot({ observedAt: CAPTURE_OBSERVED_AT + HOUR_MS }),
+        )
+
+        expect(again.appended).toBe(0)
+        expect(again.unchanged).toBe(CAPTURED_DAYS)
+        expect(await daysOf()).toEqual(filed)
+      })
+
+      it('replaces today in place and keeps its seq, as the day goes on', async () => {
+        await store.appendSolarHistory(capturedSolarSnapshot())
+        const wasToday = (await daysOf())[CAPTURED_DAYS - 1]
+        const laterInTheDay = CAPTURE_OBSERVED_AT + 4 * HOUR_MS
+
+        const outcome = await store.appendSolarHistory(
+          capturedSolarSnapshot({
+            observedAt: laterInTheDay,
+            days: [dayReading(0, withYield(capturedDayBytes(0), 990))],
+          }),
+        )
+
+        expect(outcome.revised).toBe(1)
+        expect(outcome.totalDays).toBe(CAPTURED_DAYS)
+        const revised = (await daysOf())[CAPTURED_DAYS - 1]
+        expect(revised.seq).toBe(wasToday.seq)
+        expect(revised.date).toBe(wasToday.date)
+        expect(revised.firstReadAt).toBe(wasToday.firstReadAt)
+        expect(revised.revisedAt).toBe(laterInTheDay)
+        expect(revised.day.recorded && revised.day.yieldKwh).toBe(9.9)
+      })
+
+      it('appends only the day the calendar has turned over onto', async () => {
+        await store.appendSolarHistory(capturedSolarSnapshot())
+
+        const outcome = await store.appendSolarHistory(laterSolarSnapshot(1))
+
+        expect(outcome.appended).toBe(1)
+        expect(outcome.unchanged).toBe(CAPTURED_DAYS - 1)
+        expect(outcome.totalDays).toBe(CAPTURED_DAYS + 1)
+      })
+
+      it('stores nothing for a register the controller has not written yet', async () => {
+        const outcome = await store.appendSolarHistory(
+          capturedSolarSnapshot({ days: [dayReading(0, unwrittenDayBytes(0)), dayReading(1)] }),
+        )
+
+        expect(outcome.unwritten).toBe(1)
+        expect(await daysOf()).toHaveLength(1)
+      })
+
+      it('journals exactly one receipt per sweep, whatever the sweep established', async () => {
+        // A controller that stops serving history after a firmware update is exactly what a stored
+        // history of attempts reveals, so a sweep that carried nothing is the one worth keeping.
+        await store.appendSolarHistory(
+          capturedSolarSnapshot({
+            outcome: 'refused',
+            totals: null,
+            days: [],
+            transport: { refusedRegisters: [0x104f] },
+          }),
+        )
+        await store.appendSolarHistory(
+          capturedSolarSnapshot({ observedAt: CAPTURE_OBSERVED_AT + HOUR_MS }),
+        )
+
+        const ledger = await store.readRingLedger(SOLAR_DEVICE_KEY)
+        expect(ledger?.solarReads.map((read) => read.outcome)).toEqual(['days-read', 'refused'])
+        const refused = ledger?.solarReads[1]
+        expect(refused?.daysReceived).toBe(0)
+        expect(refused?.totals).toBeNull()
+        expect(refused?.refusedRegisters).toEqual([0x104f])
+        expect(ledger?.solarReads[0].totals?.daysAvailable).toBeGreaterThan(0)
+        expect(ledger?.solarReads[0].readOnDate).toBe(CAPTURE_READ_ON_DATE)
+        // The pack's own journal is a different list and stays empty.
+        expect(ledger?.reads).toEqual([])
+      })
+
+      it('keeps a pack’s ledger and a controller’s apart inside one archive', async () => {
+        await store.appendRingSnapshot(ringRead(RING))
+        await store.appendSolarHistory(capturedSolarSnapshot())
+
+        const pack = await store.readRingLedger(PACK_DEVICE_KEY)
+        const controller = await store.readRingLedger(SOLAR_DEVICE_KEY)
+        expect(pack?.records).toHaveLength(RING.length)
+        expect(pack?.solarDays).toEqual([])
+        expect(controller?.solarDays).toHaveLength(CAPTURED_DAYS)
+        expect(controller?.records).toEqual([])
+        expect((await store.usage()).ringRecords).toBe(RING.length + CAPTURED_DAYS)
+      })
+
+      it('reads a row carrying no format at all as a pack record', async () => {
+        // Every pack row already on disk was written before the discriminator existed, and an
+        // upgrade may only add — so absence is what says "pack record", now and permanently.
+        await store.appendRingSnapshot(ringRead(RING))
+
+        const rows = (await store.readRingLedger(PACK_DEVICE_KEY))?.records ?? []
+        expect(rows).toHaveLength(RING.length)
+        for (const row of rows) expect('format' in row).toBe(false)
+      })
+
+      it('says which radio each ledger belongs to, off the rows themselves', async () => {
+        await store.appendRingSnapshot(ringRead(RING, { observedAt: FIRST_READ_AT }))
+        await store.appendSolarHistory(
+          capturedSolarSnapshot({ observedAt: FIRST_READ_AT + HOUR_MS }),
+        )
+
+        const summaries = await store.listRingLedgers()
+        const controller = summaries.find((row) => row.deviceKey === SOLAR_DEVICE_KEY)
+        const pack = summaries.find((row) => row.deviceKey === PACK_DEVICE_KEY)
+        expect(controller?.kind).toBe('solar')
+        expect(controller?.records).toBe(CAPTURED_DAYS)
+        // A controller keeps no clock face, so it reports none rather than inventing one.
+        expect(controller?.oldestPackClockSeconds).toBe(0)
+        expect(controller?.newestPackClockSeconds).toBe(0)
+        expect(pack?.kind).toBe('pack')
+        expect(pack?.newestPackClockSeconds).toBe(ringRecordCounter(RING[RING.length - 1]))
+      })
+
+      it('never moves the sample budget, in either direction', async () => {
+        await openWithRows(7)
+
+        await store.appendSolarHistory(capturedSolarSnapshot())
+
+        expect(await store.usage()).toEqual({
+          totalSamples: 7,
+          sessions: 1,
+          ringRecords: CAPTURED_DAYS,
+        })
+      })
+
+      it('takes the days and the journal together, and leaves the device row standing', async () => {
+        await store.upsertDevice(
+          deviceRecord({ key: SOLAR_DEVICE_KEY, kind: 'solar', userLabel: 'Coachroof panel' }),
+        )
+        await store.appendSolarHistory(capturedSolarSnapshot())
+
+        await store.deleteRingLedger(SOLAR_DEVICE_KEY)
+
+        expect(await store.readRingLedger(SOLAR_DEVICE_KEY)).toBeNull()
+        expect((await store.usage()).ringRecords).toBe(0)
+        const [device] = (await store.listDevices()).filter((row) => row.key === SOLAR_DEVICE_KEY)
+        expect(device.userLabel).toBe('Coachroof panel')
+      })
+
+      it('stores nothing on an archive that cannot hold one, and says why', async () => {
+        const refusing = unavailableHistoryStore('quota-exhausted')
+
+        const outcome = await refusing.appendSolarHistory(capturedSolarSnapshot())
+
+        expect(outcome.stored).toBe(false)
+        expect(outcome.failure).toBe('quota-exhausted')
+        expect(outcome.appended).toBe(0)
+        expect(outcome.totalDays).toBe(0)
+        expect(await refusing.readRingLedger(SOLAR_DEVICE_KEY)).toBeNull()
       })
     })
 

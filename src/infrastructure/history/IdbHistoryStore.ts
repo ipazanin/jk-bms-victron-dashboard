@@ -37,12 +37,29 @@ import type {
 import { MAX_RING_READS_PER_DEVICE, planRingPrune } from '../../domain/history/ringBudget'
 import type { RingDeviceExtent, RingEviction } from '../../domain/history/ringBudget'
 import { ALIGNMENT_TAIL_RECORDS, foldRingSnapshot } from '../../domain/history/ringLedger'
+import { foldSolarHistorySnapshot } from '../../domain/history/solarLedger'
+import {
+  isPackRecordRow,
+  isSolarDayRow,
+  isSolarReadRow,
+  packReadsIn,
+  packRecordsIn,
+  readClaimsStoredRows,
+  solarDaysIn,
+  solarReadsIn,
+} from '../../domain/history/storedRows'
+import { SOLAR_DAY_FORMAT } from '../../domain/history/StoredRowFormat'
 import type { RingLedgerTail } from '../../domain/history/RingLedgerTail'
 import type { RingMergeOutcome } from '../../domain/history/RingMergeOutcome'
 import type { RingReadRow } from '../../domain/history/RingReadRow'
 import type { RingRecordRow } from '../../domain/history/RingRecordRow'
 import type { RingSnapshot } from '../../domain/history/RingSnapshot'
+import type { SolarHistoryReadRow } from '../../domain/history/SolarHistoryReadRow'
+import type { SolarHistorySnapshot } from '../../domain/history/SolarHistorySnapshot'
+import type { SolarMergeOutcome } from '../../domain/history/SolarMergeOutcome'
 import type { StoredRingLedger } from '../../domain/history/StoredRingLedger'
+import type { StoredRingRead } from '../../domain/history/StoredRingRead'
+import type { StoredRingRecord } from '../../domain/history/StoredRingRecord'
 import { HEARTBEAT_STALE_MS, PACK_STREAM } from '../../domain/history/types'
 import type {
   DeviceKey,
@@ -69,6 +86,7 @@ import type {
   SessionClosure,
   SessionListing,
   SessionPatch,
+  SolarHistoryIngestOutcome,
   StoredSession,
 } from '../../application/history/port'
 import type { ArchiveChannel } from './archiveChannel'
@@ -148,9 +166,13 @@ export function applySchema(database: IDBDatabase, oldVersion: number): void {
     warnings.createIndex(BY_TIME, 'at')
   }
   if (oldVersion < 3) {
-    // Keyed by the pack's own write order, so one device's ledger is a contiguous ascending range
-    // and a row's key never changes. Indexed by device as well, so a whole-ledger delete cursors
-    // the index rather than a constructed compound range — the same reason evictSession does.
+    // Keyed by the order rows were first seen in, so one device's ledger is a contiguous ascending
+    // range and a row's key never changes. Indexed by device as well, so a whole-ledger delete
+    // cursors the index rather than a constructed compound range — the same reason evictSession does.
+    //
+    // Both radios file here. What wrote a row is a field on the row rather than a store of its own:
+    // a device key belongs to one radio, so the two never meet inside a ledger, and one store keeps
+    // them on one budget, one prune plan and one sweep.
     const records = database.createObjectStore(RING_RECORDS, { keyPath: ['deviceKey', 'seq'] })
     records.createIndex(BY_DEVICE, 'deviceKey')
 
@@ -439,7 +461,7 @@ export class IdbHistoryStore implements HistoryStore {
     return renamed
   }
 
-  // ── the pack's own ring ────────────────────────────────────────────────────
+  // ── what the devices themselves recorded ───────────────────────────────────
 
   async appendRingSnapshot(snapshot: RingSnapshot): Promise<RingIngestOutcome> {
     if (!this.connected) return refusedIngest(this.state.reason)
@@ -456,24 +478,42 @@ export class IdbHistoryStore implements HistoryStore {
     }
   }
 
+  async appendSolarHistory(snapshot: SolarHistorySnapshot): Promise<SolarHistoryIngestOutcome> {
+    if (!this.connected) return refusedSolarIngest(this.state.reason)
+    try {
+      const ingested = await this.mergeSolarHistory(snapshot)
+      this.channel.post('ring-read')
+      return ingested
+    } catch (error) {
+      // No retry and no room made, for the reason a refused ring merge gets neither: the two budgets
+      // cannot reach each other, and this write's own prune has already run inside the transaction
+      // that failed.
+      return refusedSolarIngest(classifyWriteFailure(error) === 'quota' ? 'quota-exhausted' : null)
+    }
+  }
+
   async readRingLedger(deviceKey: DeviceKey): Promise<StoredRingLedger | null> {
     if (!this.connected) return null
     return runTransaction(this.database, RING_STORES, 'readonly', async (transaction) => {
-      const records = await this.readRingRows(transaction, deviceKey)
-      const reads = await this.readRingJournal(transaction, deviceKey)
+      const rows = await this.readRingRows(transaction, deviceKey)
+      const journal = await this.readRingJournal(transaction, deviceKey)
       // A read that answered nothing still has a journal row, and that row is the only evidence
       // there is about it — so a ledger holding no record is still a ledger.
-      if (records.length === 0 && reads.length === 0) return null
+      if (rows.length === 0 && journal.length === 0) return null
 
       const device = await requestAsPromise<DeviceRecord | undefined>(
         transaction.objectStore(DEVICES).get(deviceKey),
       )
+      // Separated by what each row says it is, never by what the device key looks like: the format
+      // is on the row, and a key is a string somebody chose.
       return {
         deviceKey,
-        records,
-        reads,
+        records: packRecordsIn(rows),
+        solarDays: solarDaysIn(rows),
+        reads: packReadsIn(journal),
+        solarReads: solarReadsIn(journal),
         device: device ?? null,
-        retainedFromSeq: retainedFromSeqOf(records),
+        retainedFromSeq: retainedFromSeqOf(rows),
       }
     })
   }
@@ -488,15 +528,18 @@ export class IdbHistoryStore implements HistoryStore {
         )
         const oldest = await this.edgeRingRow(transaction, deviceKey, 'next')
         const newest = await this.edgeRingRow(transaction, deviceKey, 'prev')
+        const newestRead = await this.newestRingRead(transaction, deviceKey)
         summaries.push({
           deviceKey,
+          kind: ledgerKindOf(newest ?? oldest, newestRead),
           label: deviceLabel(device ?? null),
           records: await this.countRingRecords(transaction, deviceKey),
-          lastReadAt: await this.lastReadAtOf(transaction, deviceKey),
+          lastReadAt: newestRead?.observedAt ?? 0,
           // The pack's own clock face, not wall time, so this row is honest with no correction
-          // behind it. A ledger holding no record answers zero rather than inventing a face.
-          oldestPackClockSeconds: oldest?.packClockSeconds ?? 0,
-          newestPackClockSeconds: newest?.packClockSeconds ?? 0,
+          // behind it. A ledger holding no pack record answers zero rather than inventing a face,
+          // and a controller's ledger answers zero because it keeps no clock face at all.
+          oldestPackClockSeconds: packClockFaceOf(oldest),
+          newestPackClockSeconds: packClockFaceOf(newest),
         })
       }
       return summaries.sort((left, right) => right.lastReadAt - left.lastReadAt)
@@ -931,28 +974,67 @@ export class IdbHistoryStore implements HistoryStore {
   }
 
   /**
+   * The whole sweep as one write, shaped exactly like the ring merge above and sharing its stores,
+   * its journal cap and its prune.
+   *
+   * The fold is handed every day this ledger holds rather than a tail. A controller's ledger grows
+   * one row a day, so the whole of it is a few hundred rows where the pack's is twenty thousand —
+   * and matching a day by its sequence number needs a neighbourhood in DATE, which a tail cut by row
+   * count could only guess at.
+   */
+  private mergeSolarHistory(snapshot: SolarHistorySnapshot): Promise<SolarHistoryIngestOutcome> {
+    return runTransaction(this.database, RING_STORES, 'readwrite', async (transaction) => {
+      const records = transaction.objectStore(RING_RECORDS)
+      const stored = solarDaysIn(await this.readRingRows(transaction, snapshot.deviceKey))
+      // The sweep's own wall clock stamps the rows it creates and revises, for the reason a ring
+      // merge uses the read's: this store has no clock truer than the one the sweep arrived under.
+      const folded = foldSolarHistorySnapshot(stored, snapshot, snapshot.observedAt)
+      for (const row of folded.rows) await requestAsPromise(records.put(row))
+
+      await this.journalSolarSweep(transaction, snapshot, folded.merge)
+      const prunedRecords = await this.pruneRing(transaction)
+
+      return {
+        ...folded.merge,
+        stored: true,
+        // Every row under a controller's key is a day row, so the range count is the day count.
+        totalDays: await this.countRingRecords(transaction, snapshot.deviceKey),
+        prunedRecords,
+        failure: null,
+      }
+    })
+  }
+
+  /**
    * As much of the ledger's newest end as the merge needs to place a read against it.
    *
    * Read backwards from the head and turned round, because alignment only ever succeeds near the
    * head: the ring drops from its own tail, so a read can never reach further back than what the
    * pack still holds.
+   *
+   * `nextSeq` counts from the newest row of ANY format while the tail carries pack records only. A
+   * device key belongs to one radio, so the two can only coincide in a corrupt archive — and there
+   * the reading that hands out a seq nothing else holds is the one that cannot lose a row.
    */
   private async readRingTail(
     transaction: IDBTransaction,
     deviceKey: DeviceKey,
   ): Promise<RingLedgerTail> {
     const rows: RingRecordRow[] = []
+    let highestSeq: number | null = null
     const newestFirst = transaction
       .objectStore(RING_RECORDS)
       .openCursor(ringRangeOf(deviceKey), 'prev')
     await cursorEach(newestFirst, (cursor) => {
       if (rows.length >= ALIGNMENT_TAIL_RECORDS) return false
-      rows.push(cursor.value as RingRecordRow)
+      const row = cursor.value as StoredRingRecord
+      if (highestSeq === null) highestSeq = row.seq
+      if (isPackRecordRow(row)) rows.push(row)
     })
     rows.reverse()
     // A ledger whose head was pruned still hands out seq above everything it ever stored; one
     // emptied outright starts again at zero, because nothing is left to count from.
-    return { nextSeq: rows.length === 0 ? 0 : rows[rows.length - 1].seq + 1, rows }
+    return { nextSeq: highestSeq === null ? 0 : highestSeq + 1, rows }
   }
 
   /**
@@ -989,11 +1071,53 @@ export class IdbHistoryStore implements HistoryStore {
       elapsedMs: snapshot.transport.elapsedMs,
     }
     await requestAsPromise(reads.put(row))
+    await this.capRingJournal(transaction, snapshot.deviceKey)
+  }
 
-    const held = await requestAsPromise<number>(reads.count(ringRangeOf(snapshot.deviceKey)))
+  /**
+   * One journal row per sweep, whatever the sweep established, under the same cap and in the same
+   * store as a pack's.
+   */
+  private async journalSolarSweep(
+    transaction: IDBTransaction,
+    snapshot: SolarHistorySnapshot,
+    merge: SolarMergeOutcome,
+  ): Promise<void> {
+    const row: SolarHistoryReadRow = {
+      deviceKey: snapshot.deviceKey,
+      observedAt: snapshot.observedAt,
+      format: SOLAR_DAY_FORMAT,
+      outcome: snapshot.outcome,
+      readOnDate: snapshot.readOnDate,
+      totals: snapshot.totals,
+      daysReceived: snapshot.days.length,
+      daysAppended: merge.appended,
+      daysRevised: merge.revised,
+      daysUnchanged: merge.unchanged,
+      daysUnwritten: merge.unwritten,
+      daysRedated: merge.redated,
+      refusedRegisters: snapshot.transport.refusedRegisters,
+      notificationBytes: snapshot.transport.notificationBytes,
+      notificationCount: snapshot.transport.notificationCount,
+      controlNotificationCount: snapshot.transport.controlNotificationCount,
+      pduCount: snapshot.transport.pduCount,
+      unreadableReplyCount: snapshot.transport.unreadableReplyCount,
+      elapsedMs: snapshot.transport.elapsedMs,
+    }
+    await requestAsPromise(transaction.objectStore(RING_READS).put(row))
+    await this.capRingJournal(transaction, snapshot.deviceKey)
+  }
+
+  /** Keeps one device's journal to its newest few, oldest dropped first. */
+  private async capRingJournal(
+    transaction: IDBTransaction,
+    deviceKey: DeviceKey,
+  ): Promise<void> {
+    const reads = transaction.objectStore(RING_READS)
+    const held = await requestAsPromise<number>(reads.count(ringRangeOf(deviceKey)))
     let over = held - MAX_RING_READS_PER_DEVICE
     if (over <= 0) return
-    await cursorEach(reads.openKeyCursor(ringRangeOf(snapshot.deviceKey)), (cursor) => {
+    await cursorEach(reads.openKeyCursor(ringRangeOf(deviceKey)), (cursor) => {
       if (over <= 0) return false
       reads.delete(cursor.primaryKey)
       over -= 1
@@ -1045,14 +1169,16 @@ export class IdbHistoryStore implements HistoryStore {
       freed += 1
     })
 
-    // The survivor declares the break, exactly as `retainedFrom` does for a truncated session:
-    // what came before it is gone, and nothing may read the ledger as contiguous across it.
+    // The surviving pack record declares the break, exactly as `retainedFrom` does for a truncated
+    // session: what came before it is gone, and nothing may read the ledger as contiguous across it.
+    // A day record carries no such field and needs none — a calendar-keyed row states its own
+    // position, so a hole in a controller's ledger is visible as a missing date.
     const survivors = records.openCursor(
       IDBKeyRange.bound([eviction.deviceKey, eviction.fromSeq], [eviction.deviceKey, HIGHEST_SEQ]),
     )
     await cursorEach(survivors, (cursor) => {
-      const row = cursor.value as RingRecordRow
-      if (!row.followsGap) records.put({ ...row, followsGap: true })
+      const row = cursor.value as StoredRingRecord
+      if (isPackRecordRow(row) && !row.followsGap) records.put({ ...row, followsGap: true })
       return false
     })
     return freed
@@ -1073,7 +1199,7 @@ export class IdbHistoryStore implements HistoryStore {
       for (const deviceKey of await this.ringDeviceKeys(transaction)) {
         if ((await this.countRingRecords(transaction, deviceKey)) > 0) continue
         const journal = await this.readRingJournal(transaction, deviceKey)
-        if (!journal.some(claimsStoredRecords)) continue
+        if (!journal.some(readClaimsStoredRows)) continue
 
         await cursorEach(reads.openKeyCursor(ringRangeOf(deviceKey)), (cursor) => {
           reads.delete(cursor.primaryKey)
@@ -1089,11 +1215,11 @@ export class IdbHistoryStore implements HistoryStore {
   private async readRingRows(
     transaction: IDBTransaction,
     deviceKey: DeviceKey,
-  ): Promise<RingRecordRow[]> {
-    const rows: RingRecordRow[] = []
+  ): Promise<StoredRingRecord[]> {
+    const rows: StoredRingRecord[] = []
     const ascending = transaction.objectStore(RING_RECORDS).openCursor(ringRangeOf(deviceKey))
     await cursorEach(ascending, (cursor) => {
-      rows.push(cursor.value as RingRecordRow)
+      rows.push(cursor.value as StoredRingRecord)
     })
     return rows
   }
@@ -1102,16 +1228,32 @@ export class IdbHistoryStore implements HistoryStore {
   private async readRingJournal(
     transaction: IDBTransaction,
     deviceKey: DeviceKey,
-  ): Promise<RingReadRow[]> {
-    const reads: RingReadRow[] = []
+  ): Promise<StoredRingRead[]> {
+    const reads: StoredRingRead[] = []
     const newestFirst = transaction
       .objectStore(RING_READS)
       .openCursor(ringRangeOf(deviceKey), 'prev')
     await cursorEach(newestFirst, (cursor) => {
       if (reads.length >= MAX_RING_READS_PER_DEVICE) return false
-      reads.push(cursor.value as RingReadRow)
+      reads.push(cursor.value as StoredRingRead)
     })
     return reads
+  }
+
+  /** The newest receipt filed against one device, whichever radio it was against. */
+  private async newestRingRead(
+    transaction: IDBTransaction,
+    deviceKey: DeviceKey,
+  ): Promise<StoredRingRead | null> {
+    let found: StoredRingRead | null = null
+    const newestFirst = transaction
+      .objectStore(RING_READS)
+      .openCursor(ringRangeOf(deviceKey), 'prev')
+    await cursorEach(newestFirst, (cursor) => {
+      found = cursor.value as StoredRingRead
+      return false
+    })
+    return found
   }
 
   /** Every pack with a ledger or a journal, which is every pack a read was ever filed against. */
@@ -1141,13 +1283,13 @@ export class IdbHistoryStore implements HistoryStore {
     transaction: IDBTransaction,
     deviceKey: DeviceKey,
     direction: IDBCursorDirection,
-  ): Promise<RingRecordRow | null> {
-    let found: RingRecordRow | null = null
+  ): Promise<StoredRingRecord | null> {
+    let found: StoredRingRecord | null = null
     const cursor = transaction
       .objectStore(RING_RECORDS)
       .openCursor(ringRangeOf(deviceKey), direction)
     await cursorEach(cursor, (each) => {
-      found = each.value as RingRecordRow
+      found = each.value as StoredRingRecord
       return false
     })
     return found
@@ -1293,14 +1435,25 @@ function ringRangeOf(deviceKey: DeviceKey): IDBKeyRange {
  * there. So an oldest row above zero is exactly what pruning left behind, and there is no separate
  * marker to keep in step with the rows it describes.
  */
-function retainedFromSeqOf(records: readonly RingRecordRow[]): number | null {
+function retainedFromSeqOf(records: readonly StoredRingRecord[]): number | null {
   const oldest = records[0]
   return oldest === undefined || oldest.seq === 0 ? null : oldest.seq
 }
 
-/** Whether this read said it put rows in a ledger that no longer holds any. */
-function claimsStoredRecords(read: RingReadRow): boolean {
-  return read.recordsAppended > 0 || read.overlap > 0
+/** Which radio a ledger belongs to, read off a row it holds rather than off a device row it may
+ *  outlive. A ledger with neither a row nor a receipt does not list at all. */
+function ledgerKindOf(
+  row: StoredRingRecord | null,
+  read: StoredRingRead | null,
+): DeviceRecord['kind'] {
+  if (row !== null) return isSolarDayRow(row) ? 'solar' : 'pack'
+  if (read !== null && isSolarReadRow(read)) return 'solar'
+  return 'pack'
+}
+
+/** The pack clock a row carries, or zero for a row that keeps no clock face. */
+function packClockFaceOf(row: StoredRingRecord | null): number {
+  return row !== null && isPackRecordRow(row) ? row.packClockSeconds : 0
 }
 
 function refusedIngest(failure: HistoryUnavailableReason | null): RingIngestOutcome {
@@ -1312,6 +1465,20 @@ function refusedIngest(failure: HistoryUnavailableReason | null): RingIngestOutc
     gapDeclared: false,
     runsDiscarded: 0,
     totalRecords: 0,
+    prunedRecords: 0,
+    failure,
+  }
+}
+
+function refusedSolarIngest(failure: HistoryUnavailableReason | null): SolarHistoryIngestOutcome {
+  return {
+    stored: false,
+    appended: 0,
+    revised: 0,
+    unchanged: 0,
+    unwritten: 0,
+    redated: 0,
+    totalDays: 0,
     prunedRecords: 0,
     failure,
   }

@@ -17,7 +17,7 @@
  */
 
 import { computed, ref, shallowRef } from 'vue'
-import type { ComputedRef, Ref } from 'vue'
+import type { ComputedRef, Ref, ShallowRef } from 'vue'
 
 import { MAX_TOTAL_SAMPLES, PRUNE_TARGET_RATIO } from '../../domain/history/budget'
 import { decodePackChunk, decodeSolarChunk, isReadableLayout } from '../../domain/history/columns'
@@ -147,12 +147,20 @@ export interface HistoryBrowser {
    * most recent few — the view falls back to `warnings` only while this is null.
    */
   readonly windowWarnings: Readonly<Ref<readonly WarningRecord[] | null>>
-  /** Every pack this browser has read a ring from, most recently read first. Refreshed with the
-   *  session list, so a foreign tab's read moves it here without a dedicated subscription. */
+  /** Every device this browser has read stored history from, most recently read first. Refreshed
+   *  with the session list, so a foreign tab's read moves it here without a dedicated
+   *  subscription. Packs and controllers are both in it; `kind` says which. */
   readonly ringLedgers: Readonly<Ref<readonly RingLedgerSummary[]>>
-  /** The one ledger currently on screen, or null before it is asked for. */
+  /** The pack ledger currently on screen, or null before it is asked for. */
   readonly ringLedger: Readonly<Ref<StoredRingLedger | null>>
   readonly ringLoading: Readonly<Ref<boolean>>
+  /**
+   * The controller's ledger currently on screen, held apart from the pack's rather than sharing
+   * one slot. The Stats page shows both at once and a device key belongs to one radio or the
+   * other, so a single slot would make the two halves of that page evict each other.
+   */
+  readonly solarLedger: Readonly<Ref<StoredRingLedger | null>>
+  readonly solarLoading: Readonly<Ref<boolean>>
 
   refresh(): Promise<void>
   loadSession(id: SessionId, window?: TimeWindow): Promise<void>
@@ -162,12 +170,16 @@ export interface HistoryBrowser {
   /** Reads one pack's whole ledger and holds it as `ringLedger`. Latest wins by token, the same as
    *  `loadWindowWarnings`, so switching packs quickly supersedes a read still in flight. */
   loadRingLedger(deviceKey: DeviceKey): Promise<void>
+  /** The same read into the solar slot. */
+  loadSolarLedger(deviceKey: DeviceKey): Promise<void>
   /**
-   * Re-reads the ledger this tab just wrote to, in place. Filing a ring snapshot posts no
+   * Re-reads the ledger this tab just wrote to, in place. Filing a snapshot posts no
    * BroadcastChannel message this tab receives — the channel never delivers to its own poster —
    * so the writer re-reads its own write explicitly, the same way `renameDevice` does.
    */
   refreshRingLedger(deviceKey: DeviceKey): Promise<void>
+  /** The same re-read into the solar slot, for a controller's history sweep. */
+  refreshSolarLedger(deviceKey: DeviceKey): Promise<void>
   /** Read-and-write in one step, shaped like `renameDevice`. */
   setPackClock(
     deviceKey: DeviceKey,
@@ -206,6 +218,31 @@ export function sessionDurationMs(record: SessionRecord, now: number): number {
   return Math.max(record.packSamples, record.solarSamples) * SAMPLE_INTERVAL_MS
 }
 
+/**
+ * One device's ledger as a screen holds it: the rows, whether a read is in flight, and the key it
+ * is tracking so a foreign tab's write can be re-read against the right one.
+ *
+ * Two of these exist. The Stats page shows a pack's stored log and the controller's stored history
+ * on the same screen, and a device key belongs to one radio or the other, so a single slot would
+ * make the two evict each other on every refresh.
+ */
+interface LedgerSlot {
+  readonly held: ShallowRef<StoredRingLedger | null>
+  readonly loading: Ref<boolean>
+  key: DeviceKey | null
+  /** Latest read wins; a bump also abandons whatever is in flight. */
+  token: number
+}
+
+function emptyLedgerSlot(): LedgerSlot {
+  return {
+    held: shallowRef<StoredRingLedger | null>(null),
+    loading: ref(false),
+    key: null,
+    token: 0,
+  }
+}
+
 export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   const sessions = shallowRef<readonly SessionListing[]>([])
   const devices = shallowRef<readonly DeviceRecord[]>([])
@@ -220,8 +257,8 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   const exportState = ref<ExportState>('idle')
   const windowWarnings = shallowRef<readonly WarningRecord[] | null>(null)
   const ringLedgers = shallowRef<readonly RingLedgerSummary[]>([])
-  const ringLedger = shallowRef<StoredRingLedger | null>(null)
-  const ringLoading = ref(false)
+  const ringSlot = emptyLedgerSlot()
+  const solarSlot = emptyLedgerSlot()
   /** Frozen at each refresh so the durations below are a pure function of reactive state; a
    *  component that wants a live figure calls sessionDurationMs with its own ticking clock. */
   const listedAt = ref(0)
@@ -231,13 +268,9 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   /** A request the probe was not ready for, replayed once a store exists. Never a request that
    *  was attempted and answered — a session that is genuinely gone must not be asked for again. */
   let deferredId: SessionId | null = null
-  /** The pack `ringLedger` is currently tracking, so a foreign tab's write re-reads the right key
-   *  rather than a stale one and `refresh()` has something to re-read at all. */
-  let ringLedgerKey: DeviceKey | null = null
   let listToken = 0
   let loadToken = 0
   let windowWarningsToken = 0
-  let ringLedgerToken = 0
   let unsubscribe: (() => void) | null = null
   let subscribedTo: HistoryStore | null = null
 
@@ -341,9 +374,11 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
 
     // A session deep-linked before the probe answered was held rather than reported missing.
     if (deferredId !== null) await read()
-    // The channel never delivers a ring write to the tab that posted it, so the ledger this tab
-    // has open is re-read here whenever anything else about the archive changed too.
-    if (ringLedgerKey !== null) await refreshRingLedger(ringLedgerKey)
+    // The channel never delivers a ring write to the tab that posted it, so the ledgers this tab
+    // has open are re-read here whenever anything else about the archive changed too.
+    for (const slot of [ringSlot, solarSlot]) {
+      if (slot.key !== null) await refreshLedgerInto(slot, slot.key)
+    }
   }
 
   function loadSession(id: SessionId, window?: TimeWindow): Promise<void> {
@@ -403,52 +438,68 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   }
 
   /**
-   * Reads one pack's whole ledger. Latest wins by token, exactly as `loadWindowWarnings` does, so
-   * switching packs in the selector supersedes a read still in flight rather than letting a stale
-   * one land. Reset to null before the read: this is a different key from whatever was on screen,
-   * and its rows would misrepresent the new one.
+   * Reads one device's whole ledger into a slot. Latest wins by token, exactly as
+   * `loadWindowWarnings` does, so switching packs in the selector supersedes a read still in flight
+   * rather than letting a stale one land. Reset to null before the read: this is a different key
+   * from whatever was on screen, and its rows would misrepresent the new one.
    */
-  async function loadRingLedger(deviceKey: DeviceKey): Promise<void> {
-    ringLedgerKey = deviceKey
+  async function loadLedgerInto(slot: LedgerSlot, deviceKey: DeviceKey): Promise<void> {
+    slot.key = deviceKey
     const store = activeStore()
     if (!store) {
-      ringLedger.value = null
+      slot.held.value = null
       return
     }
 
-    const token = (ringLedgerToken += 1)
-    ringLedger.value = null
-    ringLoading.value = true
+    const token = (slot.token += 1)
+    slot.held.value = null
+    slot.loading.value = true
     try {
       const found = await store.readRingLedger(deviceKey)
-      if (token !== ringLedgerToken) return
-      ringLedger.value = found
+      if (token !== slot.token) return
+      slot.held.value = found
     } catch {
       // A ledger that could not be read is honestly none held. Kept off the shared failure line
       // for the same reason as loadWindowWarnings: a Stats read must not alarm the Log.
-      if (token === ringLedgerToken) ringLedger.value = null
+      if (token === slot.token) slot.held.value = null
     } finally {
-      if (token === ringLedgerToken) ringLoading.value = false
+      if (token === slot.token) slot.loading.value = false
     }
   }
 
   /**
-   * Re-reads a ledger already on screen, in place. Never clears `ringLedger` first — the rows
-   * already shown for this key stay put until the fresh answer lands.
+   * Re-reads a ledger already on screen, in place. Never clears the slot first — the rows already
+   * shown for this key stay put until the fresh answer lands.
    */
-  async function refreshRingLedger(deviceKey: DeviceKey): Promise<void> {
-    ringLedgerKey = deviceKey
+  async function refreshLedgerInto(slot: LedgerSlot, deviceKey: DeviceKey): Promise<void> {
+    slot.key = deviceKey
     const store = activeStore()
     if (!store) return
 
-    const token = (ringLedgerToken += 1)
+    const token = (slot.token += 1)
     try {
       const found = await store.readRingLedger(deviceKey)
-      if (token !== ringLedgerToken) return
-      ringLedger.value = found
+      if (token !== slot.token) return
+      slot.held.value = found
     } catch {
       // As above: a failed re-read leaves whatever was already shown rather than blanking it.
     }
+  }
+
+  function loadRingLedger(deviceKey: DeviceKey): Promise<void> {
+    return loadLedgerInto(ringSlot, deviceKey)
+  }
+
+  function loadSolarLedger(deviceKey: DeviceKey): Promise<void> {
+    return loadLedgerInto(solarSlot, deviceKey)
+  }
+
+  function refreshRingLedger(deviceKey: DeviceKey): Promise<void> {
+    return refreshLedgerInto(ringSlot, deviceKey)
+  }
+
+  function refreshSolarLedger(deviceKey: DeviceKey): Promise<void> {
+    return refreshLedgerInto(solarSlot, deviceKey)
   }
 
   async function setPackClock(
@@ -479,10 +530,11 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
       failure.value = describeFailure(error)
       return
     }
-    if (ringLedgerKey === deviceKey) {
-      ringLedgerKey = null
-      ringLedgerToken += 1
-      ringLedger.value = null
+    for (const slot of [ringSlot, solarSlot]) {
+      if (slot.key !== deviceKey) continue
+      slot.key = null
+      slot.token += 1
+      slot.held.value = null
     }
     await refresh()
   }
@@ -569,7 +621,8 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     subscribedTo = null
     listToken += 1
     loadToken += 1
-    ringLedgerToken += 1
+    ringSlot.token += 1
+    solarSlot.token += 1
   }
 
   async function read(): Promise<void> {
@@ -674,14 +727,18 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     exportState,
     windowWarnings,
     ringLedgers,
-    ringLedger,
-    ringLoading,
+    ringLedger: ringSlot.held,
+    ringLoading: ringSlot.loading,
+    solarLedger: solarSlot.held,
+    solarLoading: solarSlot.loading,
     refresh,
     loadSession,
     unloadSession,
     loadWindowWarnings,
     loadRingLedger,
+    loadSolarLedger,
     refreshRingLedger,
+    refreshSolarLedger,
     setPackClock,
     deleteRingLedger,
     select,

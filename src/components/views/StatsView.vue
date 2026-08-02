@@ -1,14 +1,18 @@
 <script setup lang="ts">
 /**
- * The pack's own history, scoped to a range the reader chooses.
+ * What the two devices kept for themselves, scoped to a range the reader chooses.
  *
- * Every figure on this page comes out of the ring the BMS keeps for itself — one snapshot an hour,
- * held on the device until a read brings it here, then merged into a per-device ledger that only
- * ever grows. Sessions are the Log tab's subject and never this one's, so nothing here is folded
+ * Every figure on this page comes off one device's own memory. The BMS keeps a ring — one snapshot
+ * an hour, held on the pack until a read brings it here — and the SmartSolar keeps a daily register
+ * per day for about a month, fetched over its 306b tunnel. Both merge into per-device ledgers that
+ * only ever grow. Sessions are the Log tab's subject and never this one's, so nothing here is folded
  * from a recording and nothing here waits for one.
  *
- * The solar controller has no counterpart. It answers its tunnel and refuses the history registers,
- * so there is no PV or house series to re-source and none is left waiting behind an empty card.
+ * The two halves of the page are not symmetrical, and the asymmetry is the point. A pack record is
+ * an instant on a clock face this browser can only bound, so everything above it carries a
+ * correction and an uncertainty. A Victron record is a calendar day the controller had already
+ * closed, integrated by the charger itself second by second — so it needs no correction, carries no
+ * uncertainty, and its energy figures are totals where the pack's are floors.
  *
  * Wall time is derived rather than stored, and it arrives with the uncertainty that produced it. The
  * provenance line above the cards states that once for the whole page, because every record on one
@@ -32,12 +36,22 @@ import {
   ringTrack,
 } from '../../application/history/ringRange'
 import type { UnattributedStep } from '../../application/history/ringRange'
+import {
+  solarHistoryDaysBehind,
+  solarHistoryReadIsDue,
+} from '../../application/history/solarHistoryIngest'
+import {
+  solarChargeStagesPerDay,
+  solarRangeSummary,
+  solarYieldPerDay,
+} from '../../application/history/solarRange'
 import { bucketUnitFor, windowFor } from '../../application/history/statsRange'
 import type { RangeKind } from '../../application/history/statsRange'
 import { eventWallTime } from '../../application/logbook'
 import { hashOf } from '../../application/route'
 import { useTelemetry } from '../../application/telemetry'
 import type { DetailLogOutcome } from '../../domain/bms/DetailLogOutcome'
+import { calendarDateNow } from '../../domain/history/calendarDays'
 import {
   PACK_SAMPLING_PERIOD_SECONDS,
   clockErrorOf,
@@ -45,25 +59,36 @@ import {
   resolveRingInstant,
   ringClockContextOf,
 } from '../../domain/history/ringClock'
-import type { DeviceKey, TimeWindow } from '../../domain/history/types'
+import type { DeviceKey, SolarDayWindow, TimeWindow } from '../../domain/history/types'
+import type { SolarHistoryFetchOutcome } from '../../domain/solar/SolarHistoryFetchOutcome'
 import EnergyInOut from '../stats/EnergyInOut.vue'
 import EventsPerDay from '../stats/EventsPerDay.vue'
 import PackTimeline from '../stats/PackTimeline.vue'
 import RangeFilter from '../stats/RangeFilter.vue'
+import SolarChargeStages from '../stats/SolarChargeStages.vue'
+import SolarYieldPerDay from '../stats/SolarYieldPerDay.vue'
 import SummaryTiles from '../stats/SummaryTiles.vue'
 
 const telemetry = useTelemetry()
 const {
+  adapterOn,
   battery,
   bmsState,
+  capabilities,
   detailLog,
   detailLogError,
   detailLogReading,
   device,
   logbook,
   readDetailLog,
+  readSolarHistory,
   ringFilingNote,
   ringIngest,
+  solarHistory,
+  solarHistoryError,
+  solarHistoryFilingNote,
+  solarHistoryIngest,
+  solarHistoryReading,
   source,
 } = telemetry
 const browser = useHistoryBrowser()
@@ -103,19 +128,39 @@ function selectCustom(window: TimeWindow): void {
   now.value = Date.now()
 }
 
-// ── which pack ──────────────────────────────────────────────────────────────
+// ── which device ────────────────────────────────────────────────────────────
 
+/**
+ * Both radios file their stored history in the same archive, so the one list carries both and each
+ * row says which wrote it. They are split here because the two halves of this page fold different
+ * row types out of different devices — the pack selector must never offer a controller, and the
+ * solar cards must never be handed a pack's ring.
+ */
 const ledgers = computed(() => browser.ringLedgers.value)
+const packLedgers = computed(() => ledgers.value.filter((row) => row.kind === 'pack'))
+const solarLedgers = computed(() => ledgers.value.filter((row) => row.kind === 'solar'))
+
 const packKey = ref<DeviceKey | null>(null)
+const solarKey = ref<DeviceKey | null>(null)
 
 /** The list arrives most recently read first, which is the default this page wants. A key that no
  *  longer lists — a ledger deleted here or in another tab — falls back to the same rule. */
 watch(
-  ledgers,
+  packLedgers,
   (rows) => {
     const held = packKey.value
     if (held !== null && rows.some((row) => row.deviceKey === held)) return
     packKey.value = rows[0]?.deviceKey ?? null
+  },
+  { immediate: true },
+)
+
+watch(
+  solarLedgers,
+  (rows) => {
+    const held = solarKey.value
+    if (held !== null && rows.some((row) => row.deviceKey === held)) return
+    solarKey.value = rows[0]?.deviceKey ?? null
   },
   { immediate: true },
 )
@@ -128,8 +173,20 @@ watch(
   { immediate: true },
 )
 
+watch(
+  solarKey,
+  (key) => {
+    if (key !== null) void browser.loadSolarLedger(key).catch(() => undefined)
+  },
+  { immediate: true },
+)
+
 /** A read that landed is new data and a new clock measurement, so the frozen window is re-taken. */
 watch(detailLog, () => {
+  now.value = Date.now()
+})
+
+watch(solarHistory, () => {
   now.value = Date.now()
 })
 
@@ -186,6 +243,49 @@ const track = computed(() =>
  * hundred pixels and the bars are the honest instrument.
  */
 const showTrace = computed(() => bucketUnit.value === 'day')
+
+// ── the controller's own days ───────────────────────────────────────────────
+
+const solarLedger = computed(() => browser.solarLedger.value)
+const solarDays = computed(() => solarLedger.value?.solarDays ?? [])
+
+/** The oldest day the controller's ledger holds, which is what the All range spans on this side. */
+const oldestSolarDate = computed(() => {
+  let oldest: string | null = null
+  for (const row of solarDays.value) {
+    if (oldest === null || row.date < oldest) oldest = row.date
+  }
+  return oldest
+})
+
+/**
+ * The same range the pack's cards use, said in calendar days.
+ *
+ * A Victron record names a day and never an instant, so the window it is folded over has to be a
+ * pair of dates rather than a pair of milliseconds — and the conversion happens once, here, at the
+ * boundary where a reader's chosen range meets a device that counts in days.
+ *
+ * All is the one range that cannot be shared: it spans a ledger, and these are two ledgers with two
+ * backlogs. The pack's is bounded by a ring the BMS overwrites; the controller's by thirty-one
+ * registers. Reaching for `oldestDatedAt` here would size the solar cards by the wrong device.
+ */
+const solarWindow = computed<SolarDayWindow>(() => {
+  const window = rangeWindow.value
+  const to = calendarDateNow(window.to)
+  if (range.value !== 'all') return { from: calendarDateNow(window.from), to }
+  return { from: oldestSolarDate.value ?? to, to }
+})
+
+const solarYieldDays = computed(() => solarYieldPerDay(solarDays.value, solarWindow.value))
+const solarStageDays = computed(() => solarChargeStagesPerDay(solarDays.value, solarWindow.value))
+const solarSummary = computed(() => solarRangeSummary(solarDays.value, solarWindow.value))
+
+/** Days on which the charger logged a fault of its own — its error history, not this app's. */
+const solarErrorNote = computed(() => {
+  const days = solarSummary.value.daysWithError
+  if (days === 0) return null
+  return `The charger logged an error of its own on ${days} day${days === 1 ? '' : 's'} in this range. Its codes are in the day records; nothing here interprets them.`
+})
 
 // ── what the page says about its own clock ──────────────────────────────────
 
@@ -493,6 +593,189 @@ const staleness = computed(() => {
   return `Last read ${relativeAge(answered.observedAt, now.value)} — about ${since} record${since === 1 ? '' : 's'} since.`
 })
 
+// ── the controller's read receipt ────────────────────────────────────────────
+
+/**
+ * Reading the controller's history is a manual act and stays one.
+ *
+ * A sweep opens a GATT connection, and the SmartSolar accepts exactly one BLE client at a time and
+ * changes its advertising while connected — so for as long as the tunnel is open, VictronConnect
+ * cannot reach the charger and the Instant Readout advertisements the dashboard's live solar figures
+ * come from stop arriving. There is no automatic counterpart to the pack's stale-log check for that
+ * reason, and the button says what it costs.
+ */
+// `canConnect` only says the API exists. A desktop with its radio switched off passes that and
+// fails at the chooser, so the adapter is asked too — `null` is a browser that will not say, and a
+// button withheld on a maybe would be worse than one that tries.
+const canReadSolar = computed(
+  () => capabilities.canConnect && adapterOn.value !== false && !solarHistoryReading.value,
+)
+
+const solarDisabledReason = computed(() => {
+  if (!capabilities.canConnect) {
+    return 'This browser has no Web Bluetooth, so the controller cannot be reached. Chrome or Edge on desktop or Android can read it.'
+  }
+  if (adapterOn.value === false) {
+    return 'No Bluetooth radio is available, so the controller cannot be reached. Switch Bluetooth on and try again.'
+  }
+  if (solarHistoryReading.value) {
+    return 'Sweeping the controller. It has up to forty-five seconds, and ends early once the replies go quiet.'
+  }
+  return null
+})
+
+/** Everything the outcome sentence needs, from either a live sweep or a stored journal row. */
+interface SolarTransportFigures {
+  readonly outcome: SolarHistoryFetchOutcome
+  readonly elapsedMs: number
+  readonly notificationBytes: number
+  readonly notificationCount: number
+  readonly pduCount: number
+  readonly daysReceived: number
+}
+
+/**
+ * The newest sweep, preferring the one this tab just took. A transfer dies on navigation and the
+ * journal does not, which is what makes the receipt worth reopening the page for.
+ */
+const solarLastRead = computed<{
+  readonly at: number | null
+  readonly figures: SolarTransportFigures
+} | null>(() => {
+  const transfer = solarHistory.value
+  if (transfer !== null) {
+    return {
+      at: null,
+      figures: {
+        outcome: transfer.outcome,
+        elapsedMs: transfer.elapsedMs,
+        notificationBytes: transfer.notificationBytes,
+        notificationCount: transfer.notificationCount,
+        pduCount: transfer.pduCount,
+        daysReceived: transfer.days.length,
+      },
+    }
+  }
+  const journaled = solarLedger.value?.solarReads[0]
+  if (journaled === undefined) return null
+  return {
+    at: journaled.observedAt,
+    figures: {
+      outcome: journaled.outcome,
+      elapsedMs: journaled.elapsedMs,
+      notificationBytes: journaled.notificationBytes,
+      notificationCount: journaled.notificationCount,
+      pduCount: journaled.pduCount,
+      daysReceived: journaled.daysReceived,
+    },
+  }
+})
+
+const solarOutcomeSentence = computed(() =>
+  solarLastRead.value === null ? null : describeSolarOutcome(solarLastRead.value.figures),
+)
+
+function describeSolarOutcome(figures: SolarTransportFigures): string {
+  const seconds = (figures.elapsedMs / MS_PER_SECOND).toFixed(1)
+  if (figures.outcome === 'no-answer') {
+    return `The tunnel opened and then nothing came back — not one byte in ${seconds} s. The controller ignored the history registers.`
+  }
+  if (figures.outcome === 'torn-stream') {
+    return `${figures.notificationBytes} bytes arrived across ${figures.notificationCount} notifications and not one reply parsed out of them. The controller answered; the reply was torn up in transit.`
+  }
+  if (figures.outcome === 'stalled') {
+    return `The tunnel was live for ${seconds} s and never answered about the registers asked for.`
+  }
+  if (figures.outcome === 'refused') {
+    return 'The controller answered the totals register with a status code instead of a value. This firmware will not serve its stored history.'
+  }
+  if (figures.outcome === 'empty-history') {
+    return 'The controller answered, and reports no stored days at all. There is nothing yet to read.'
+  }
+  return `${figures.daysReceived} days and the lifetime totals, ${figures.notificationBytes} bytes in ${seconds} s.`
+}
+
+/** What filing that sweep did, from this tab's own merge when it has one, else from the journal. */
+const solarFilingSentence = computed(() => {
+  const merged = solarHistoryIngest.value
+  const journaled = solarLedger.value?.solarReads[0]
+  const figures =
+    merged !== null
+      ? merged
+      : journaled === undefined
+        ? null
+        : {
+            appended: journaled.daysAppended,
+            revised: journaled.daysRevised,
+            unchanged: journaled.daysUnchanged,
+            unwritten: journaled.daysUnwritten,
+            redated: journaled.daysRedated,
+          }
+  if (figures === null) return null
+
+  const parts: string[] = []
+  if (figures.appended > 0) parts.push(`${figures.appended} new day${figures.appended === 1 ? '' : 's'} filed.`)
+  if (figures.revised > 0) {
+    parts.push(
+      `${figures.revised} day${figures.revised === 1 ? ' was' : 's were'} already held and had changed — today's record is still being written.`,
+    )
+  }
+  if (figures.unchanged > 0) parts.push(`${figures.unchanged} were already held, unchanged.`)
+  if (figures.unwritten > 0) {
+    parts.push(
+      `${figures.unwritten} register${figures.unwritten === 1 ? '' : 's'} the controller has not written yet, stored as nothing rather than as a day of no sun.`,
+    )
+  }
+  if (figures.redated > 0) {
+    parts.push(
+      `${figures.redated} day${figures.redated === 1 ? "'s" : "s'"} stored date disagrees with the one this sweep computed. The stored date stands.`,
+    )
+  }
+  return parts.length === 0 ? null : parts.join(' ')
+})
+
+/** Why a sweep is not in the archive: the controller could not be named, or the archive refused. */
+const solarFilingFailure = computed(() => {
+  const note = solarHistoryFilingNote.value
+  if (note !== null) return note
+  const failure = solarHistoryIngest.value?.failure ?? null
+  return failure === null ? null : `The archive could not keep this sweep: ${failure}.`
+})
+
+/**
+ * How current this browser's copy is, and what another sweep would buy.
+ *
+ * The staleness test is the one the pack's auto-read uses, asked here for a sentence rather than for
+ * a decision: this side never fetches by itself, so the only thing the answer can do is tell the
+ * owner whether pressing the button is worth the interruption.
+ */
+const solarStaleness = computed(() => {
+  const held = solarLedger.value
+  const answered = held?.solarReads.find((read) => read.daysReceived > 0)
+  if (answered === undefined) return 'No history has been read off the controller into this browser yet.'
+
+  const behind = solarHistoryDaysBehind(held)
+  const missing =
+    behind === 0
+      ? ' This browser is level with what the controller holds.'
+      : ` ${behind} day${behind === 1 ? '' : 's'} of its backlog ${behind === 1 ? 'is' : 'are'} not here yet.`
+  const due = solarHistoryReadIsDue(held, now.value) ? ' Worth another sweep.' : ''
+  return `Last swept ${relativeAge(answered.observedAt, now.value)}.${missing}${due}`
+})
+
+/** The lifetime counters the totals register carries, from the newest sweep that returned them. */
+const solarTotals = computed(
+  () => solarHistory.value?.totals ?? solarLedger.value?.solarReads.find((read) => read.totals !== null)?.totals ?? null,
+)
+
+/** How far back this browser's copy of the controller's backlog goes. */
+const solarHeld = computed(() => {
+  const rows = solarDays.value
+  if (rows.length === 0) return null
+  const dates = rows.map((row) => row.date).sort()
+  return { days: rows.length, from: dates[0], to: dates[dates.length - 1] }
+})
+
 // ── the clock panel ──────────────────────────────────────────────────────────
 
 const zoneLine = computed(() => {
@@ -629,23 +912,27 @@ function utcLabel(offsetMinutes: number): string {
     <header class="head">
       <h2 class="head-title">Stats &amp; history</h2>
       <p class="copy head-sub">
-        The pack's own hourly record — charge, voltage, cell spread and what it logged — scoped to a
-        range you choose.
+        What the pack and the solar controller each kept for themselves — the pack's hourly
+        snapshots, the charger's daily totals — scoped to a range you choose.
       </p>
     </header>
 
     <div class="body">
-      <!-- One panel for the whole range section when this browser has never read a ring. There is
-           deliberately no per-card empty state and nothing solar-shaped: the controller refuses its
-           history registers, so a placeholder there would wait for data that cannot arrive. -->
+      <!-- One panel for the whole page when this browser holds nothing from either device. Both
+           keep their history on the device until something reads it, and this says where it is. -->
       <section v-if="ledgers.length === 0" class="card" data-testid="stats-no-ring">
         <header class="card-head">
-          <h3 class="plate">Nothing read from this pack yet</h3>
+          <h3 class="plate">Nothing read from either device yet</h3>
         </header>
         <p class="copy state">
           The pack keeps its own log — about a month of hourly snapshots — and it stays on the pack
           until it is read. <a :href="connectHref">Connect the BMS</a> and read the stored log; every
           read adds whatever is new since the last one.
+        </p>
+        <p class="copy state">
+          The solar controller keeps a month of daily totals of its own — yield, peak power, and how
+          long it spent in each charge stage — and serves them over its own tunnel. Reading them
+          takes a moment and interrupts the live solar feed, so it happens only when you ask.
         </p>
         <div class="actions">
           <button
@@ -657,41 +944,80 @@ function utcLabel(offsetMinutes: number): string {
           </button>
           <span v-if="bmsState !== 'live'" class="muted">Connect the BMS first.</span>
         </div>
+        <div class="actions">
+          <button type="button" :disabled="!canReadSolar" @click="readSolarHistory()">
+            {{ solarHistoryReading ? 'Sweeping…' : 'Read solar history' }}
+          </button>
+          <span v-if="solarDisabledReason" class="muted">{{ solarDisabledReason }}</span>
+        </div>
       </section>
 
       <template v-else>
-        <!-- One filter row scopes every card below it: which pack, and which window of its log. -->
+        <!-- One filter row scopes every card below it: which pack, and which window of both
+             devices' history. -->
         <RangeFilter
           :model-value="range"
           :custom="customWindow"
-          :ledgers="ledgers"
+          :ledgers="packLedgers"
           :pack="packKey"
           @update:model-value="selectRange"
           @update:custom="selectCustom"
           @update:pack="packKey = $event"
         />
 
-        <!-- One statement for the whole page: every record on a ledger shares one correction. -->
-        <p v-if="provenance" class="copy provenance">{{ provenance }}</p>
-
-        <SummaryTiles v-if="summary" :summary="summary" />
-
-        <div v-if="summary" class="caveats">
-          <p class="muted">
-            Charge and discharge that cancel inside one hour are invisible at this cadence, so every
-            energy figure here is a floor rather than a total.
+        <!-- The pack's half of the page, absent until a ring has been read into this browser. -->
+        <section v-if="packLedgers.length === 0" class="card" data-testid="stats-no-ring">
+          <header class="card-head">
+            <h3 class="plate">Nothing read from this pack yet</h3>
+          </header>
+          <p class="copy state">
+            The pack keeps its own log — about a month of hourly snapshots — and it stays on the pack
+            until it is read. <a :href="connectHref">Connect the BMS</a> and read the stored log;
+            every read adds whatever is new since the last one.
           </p>
-          <p v-for="refusal in refusals" :key="refusal.kind" class="muted">{{ refusal.text }}</p>
-          <p v-if="undatedNote" class="muted">{{ undatedNote }}</p>
-          <p v-if="unpairedNote" class="muted">{{ unpairedNote }}</p>
-          <p v-if="ledgerStart" class="muted">{{ ledgerStart }}</p>
-        </div>
+          <div class="actions">
+            <button
+              type="button"
+              :disabled="bmsState !== 'live' || detailLogReading"
+              @click="readDetailLog()"
+            >
+              {{ detailLogReading ? 'Reading…' : 'Read stored log' }}
+            </button>
+            <span v-if="bmsState !== 'live'" class="muted">Connect the BMS first.</span>
+          </div>
+        </section>
 
-        <PackTimeline v-if="showTrace" :track="track" :loading="browser.ringLoading.value" />
+        <template v-else>
+          <!-- One statement for the pack's cards: every record on a ledger shares one correction. -->
+          <p v-if="provenance" class="copy provenance">{{ provenance }}</p>
 
-        <EnergyInOut :buckets="energyBuckets" :unit="bucketUnit" :estimated="true" />
+          <SummaryTiles v-if="summary" :summary="summary" />
 
-        <EventsPerDay :days="eventDays" :range="range" />
+          <div v-if="summary" class="caveats">
+            <p class="muted">
+              Charge and discharge that cancel inside one hour are invisible at this cadence, so
+              every energy figure here is a floor rather than a total.
+            </p>
+            <p v-for="refusal in refusals" :key="refusal.kind" class="muted">{{ refusal.text }}</p>
+            <p v-if="undatedNote" class="muted">{{ undatedNote }}</p>
+            <p v-if="unpairedNote" class="muted">{{ unpairedNote }}</p>
+            <p v-if="ledgerStart" class="muted">{{ ledgerStart }}</p>
+          </div>
+
+          <PackTimeline v-if="showTrace" :track="track" :loading="browser.ringLoading.value" />
+
+          <EnergyInOut :buckets="energyBuckets" :unit="bucketUnit" :estimated="true" />
+
+          <EventsPerDay :days="eventDays" :range="range" />
+        </template>
+
+        <!-- The controller's half. Its figures are its own totals rather than our estimates, which
+             is why nothing here repeats the hourly-floor caveat above. -->
+        <SolarYieldPerDay :days="solarYieldDays" />
+
+        <SolarChargeStages :days="solarStageDays" />
+
+        <p v-if="solarErrorNote" class="muted caveat-line">{{ solarErrorNote }}</p>
       </template>
 
       <!-- Lifetime counters, straight off the pack. -->
@@ -899,6 +1225,93 @@ function utcLabel(offsetMinutes: number): string {
           </div>
         </div>
       </section>
+
+      <!-- The controller's own receipt: what the sweep carried, what filing it did, and the
+           lifetime counters that ride along on every totals record. -->
+      <section class="card" data-testid="stats-solar-receipt">
+        <header class="card-head">
+          <h3 class="plate">The controller's stored history</h3>
+          <p class="muted">
+            About a month of daily totals, kept on the charger and served over its own tunnel. Read
+            on your word and never by itself: a sweep holds the controller's one BLE connection, so
+            for those few seconds VictronConnect cannot reach it and the live solar readings stop.
+          </p>
+        </header>
+
+        <div class="actions">
+          <button type="button" :disabled="!canReadSolar" @click="readSolarHistory()">
+            {{ solarHistoryReading ? 'Sweeping…' : 'Read solar history' }}
+          </button>
+          <span v-if="solarDisabledReason" class="muted">{{ solarDisabledReason }}</span>
+          <span v-else class="muted">{{ solarStaleness }}</span>
+        </div>
+
+        <p v-if="solarHistoryError !== null" class="copy failure">{{ solarHistoryError }}</p>
+
+        <template v-if="solarLastRead !== null">
+          <p class="copy outcome">
+            <template v-if="solarLastRead.at !== null"
+              >Swept {{ stamp.format(solarLastRead.at) }}. </template
+            >{{ solarOutcomeSentence }}
+          </p>
+
+          <p v-if="solarFilingSentence" class="copy filed">{{ solarFilingSentence }}</p>
+          <p v-if="solarFilingFailure" class="copy failure">{{ solarFilingFailure }}</p>
+
+          <dl class="lifetime-tiles">
+            <div class="chip">
+              <dt>Raw bytes</dt>
+              <dd class="secondary-figure">{{ solarLastRead.figures.notificationBytes }}</dd>
+            </div>
+            <div class="chip">
+              <dt>Notifications</dt>
+              <dd class="secondary-figure">{{ solarLastRead.figures.notificationCount }}</dd>
+            </div>
+            <div class="chip">
+              <dt>Replies parsed</dt>
+              <dd class="secondary-figure">{{ solarLastRead.figures.pduCount }}</dd>
+            </div>
+            <div class="chip">
+              <dt>Elapsed</dt>
+              <dd class="secondary-figure">
+                {{ (solarLastRead.figures.elapsedMs / 1000).toFixed(1) }} s
+              </dd>
+            </div>
+          </dl>
+        </template>
+
+        <!-- The lifetime record, which is the one part of a sweep that is not a day. -->
+        <div v-if="solarTotals !== null" class="panel">
+          <h4 class="panel-title">Since the charger was commissioned</h4>
+          <dl class="lifetime-tiles">
+            <div class="chip">
+              <dt>System yield</dt>
+              <dd class="secondary-figure">{{ solarTotals.systemYieldKwh.toFixed(2) }} kWh</dd>
+            </div>
+            <div class="chip">
+              <dt>Since last reset</dt>
+              <dd class="secondary-figure">{{ solarTotals.resettableYieldKwh.toFixed(2) }} kWh</dd>
+            </div>
+            <div class="chip">
+              <dt>Highest PV voltage</dt>
+              <dd class="secondary-figure">{{ volts(solarTotals.maxPvVoltage, 2) }}</dd>
+            </div>
+            <div class="chip">
+              <dt>Days it holds</dt>
+              <dd class="secondary-figure">{{ solarTotals.daysAvailable }}</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div v-if="solarHeld !== null" class="panel">
+          <h4 class="panel-title">Kept here</h4>
+          <p class="copy">
+            {{ solarHeld.days }} day{{ solarHeld.days === 1 ? '' : 's' }} held for this controller,
+            {{ solarHeld.from }} to {{ solarHeld.to }}. They sit outside the recording budget, the
+            same as the pack's records: pruning a session can never take them.
+          </p>
+        </div>
+      </section>
     </div>
   </section>
 </template>
@@ -936,6 +1349,11 @@ function utcLabel(offsetMinutes: number): string {
 .provenance {
   margin: 0;
   color: var(--ink-secondary);
+}
+
+/* A single caveat that belongs to the card above it rather than to a group of them. */
+.caveat-line {
+  margin: 0;
 }
 
 /* What the fold refused and why, each on its own line under the tiles it is missing from. */

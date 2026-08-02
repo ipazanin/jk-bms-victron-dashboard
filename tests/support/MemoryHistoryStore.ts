@@ -39,6 +39,7 @@ import type {
   SessionClosure,
   SessionListing,
   SessionPatch,
+  SolarHistoryIngestOutcome,
   StoredRingLedger,
   StoredSession,
 } from '../../src/application/history/port'
@@ -50,11 +51,26 @@ import { deviceLabel } from '../../src/domain/history/identity'
 import { MAX_RING_READS_PER_DEVICE, planRingPrune } from '../../src/domain/history/ringBudget'
 import type { RingDeviceExtent } from '../../src/domain/history/ringBudget'
 import { ALIGNMENT_TAIL_RECORDS, foldRingSnapshot } from '../../src/domain/history/ringLedger'
+import { foldSolarHistorySnapshot } from '../../src/domain/history/solarLedger'
+import {
+  isPackRecordRow,
+  isSolarDayRow,
+  isSolarReadRow,
+  packReadsIn,
+  packRecordsIn,
+  solarDaysIn,
+  solarReadsIn,
+} from '../../src/domain/history/storedRows'
+import { SOLAR_DAY_FORMAT } from '../../src/domain/history/StoredRowFormat'
 import type { RingLedgerTail } from '../../src/domain/history/RingLedgerTail'
 import type { RingMergeOutcome } from '../../src/domain/history/RingMergeOutcome'
 import type { RingReadRow } from '../../src/domain/history/RingReadRow'
 import type { RingRecordRow } from '../../src/domain/history/RingRecordRow'
 import type { RingSnapshot } from '../../src/domain/history/RingSnapshot'
+import type { SolarHistorySnapshot } from '../../src/domain/history/SolarHistorySnapshot'
+import type { SolarMergeOutcome } from '../../src/domain/history/SolarMergeOutcome'
+import type { StoredRingRead } from '../../src/domain/history/StoredRingRead'
+import type { StoredRingRecord } from '../../src/domain/history/StoredRingRecord'
 import { HEARTBEAT_STALE_MS, PACK_STREAM, SOLAR_STREAM } from '../../src/domain/history/types'
 import type {
   ChunkKey,
@@ -99,10 +115,11 @@ export class MemoryHistoryStore implements HistoryStore {
   private readonly chunks = new Map<string, HistoryChunk>()
   private readonly devices = new Map<DeviceKey, DeviceRecord>()
   private readonly warnings = new Map<string, WarningRecord>()
-  /** Seq-ascending, dense. Its own Map, because ring rows and session rows share no budget. */
-  private readonly ringRows = new Map<DeviceKey, RingRecordRow[]>()
+  /** Seq-ascending, dense. Its own Map, because ring rows and session rows share no budget, and one
+   *  Map for both formats because the adapter keeps them in one store for the same reason. */
+  private readonly ringRows = new Map<DeviceKey, StoredRingRecord[]>()
   /** Ascending by observedAt, capped. Keyed on it too, as the adapter's [deviceKey, observedAt] is. */
-  private readonly ringReads = new Map<DeviceKey, RingReadRow[]>()
+  private readonly ringReads = new Map<DeviceKey, StoredRingRead[]>()
   private readonly ringRetainedFrom = new Map<DeviceKey, number>()
   private readonly watchers = new Set<() => void>()
   private readonly now: () => number
@@ -308,7 +325,7 @@ export class MemoryHistoryStore implements HistoryStore {
     return structuredClone(renamed)
   }
 
-  // ── the pack's own ring ────────────────────────────────────────────────────
+  // ── what the devices themselves recorded ───────────────────────────────────
 
   /**
    * Folds one read in and journals it, as the adapter does it in one ring-scoped transaction.
@@ -324,7 +341,7 @@ export class MemoryHistoryStore implements HistoryStore {
 
     const kept = [...stored, ...rows.map((row) => structuredClone(row))]
     this.ringRows.set(snapshot.deviceKey, kept)
-    this.journal(snapshot, merge, kept)
+    this.journal(snapshot, merge, packRecordsIn(kept))
     const prunedRecords = this.pruneRing()
 
     return {
@@ -336,17 +353,57 @@ export class MemoryHistoryStore implements HistoryStore {
     }
   }
 
-  async readRingLedger(deviceKey: DeviceKey): Promise<StoredRingLedger | null> {
-    const records = this.ringRows.get(deviceKey)
-    const reads = this.ringReads.get(deviceKey)
-    // A read that answered nothing still has a journal row, and that row is the only evidence there
-    // is about it — so a ledger holding no record is still a ledger.
-    if (records === undefined && reads === undefined) return null
+  /**
+   * Folds one sweep in and journals it, as the adapter does it in one ring-scoped transaction.
+   *
+   * The whole ledger goes to the fold rather than a tail, exactly as the adapter passes it: a day is
+   * matched by its sequence number inside a neighbourhood in date, which a tail cut by row count
+   * could not describe.
+   */
+  async appendSolarHistory(snapshot: SolarHistorySnapshot): Promise<SolarHistoryIngestOutcome> {
+    const stored = this.ringRows.get(snapshot.deviceKey) ?? []
+    const { rows, merge } = foldSolarHistorySnapshot(
+      solarDaysIn(stored),
+      snapshot,
+      snapshot.observedAt,
+    )
+
+    const written = new Map(rows.map((row) => [row.seq, structuredClone(row)]))
+    const kept = stored.map((row) => written.get(row.seq) ?? row)
+    for (const [seq, row] of written) {
+      if (!stored.some((held) => held.seq === seq)) kept.push(row)
+    }
+    kept.sort((left, right) => left.seq - right.seq)
+    this.ringRows.set(snapshot.deviceKey, kept)
+
+    this.journalSolarSweep(snapshot, merge)
+    const prunedRecords = this.pruneRing()
 
     return {
+      ...merge,
+      stored: true,
+      // Every row under a controller's key is a day row, so the ledger's length is the day count.
+      totalDays: (this.ringRows.get(snapshot.deviceKey) ?? []).length,
+      prunedRecords,
+      failure: null,
+    }
+  }
+
+  async readRingLedger(deviceKey: DeviceKey): Promise<StoredRingLedger | null> {
+    const rows = this.ringRows.get(deviceKey)
+    const journal = this.ringReads.get(deviceKey)
+    // A read that answered nothing still has a journal row, and that row is the only evidence there
+    // is about it — so a ledger holding no record is still a ledger.
+    if (rows === undefined && journal === undefined) return null
+
+    const held = (rows ?? []).map((row) => structuredClone(row))
+    const receipts = [...(journal ?? [])].reverse().map((read) => structuredClone(read))
+    return {
       deviceKey,
-      records: (records ?? []).map((row) => structuredClone(row)),
-      reads: [...(reads ?? [])].reverse().map((read) => structuredClone(read)),
+      records: packRecordsIn(held),
+      solarDays: solarDaysIn(held),
+      reads: packReadsIn(receipts),
+      solarReads: solarReadsIn(receipts),
       device: this.deviceOf(deviceKey),
       retainedFromSeq: this.ringRetainedFrom.get(deviceKey) ?? null,
     }
@@ -356,13 +413,16 @@ export class MemoryHistoryStore implements HistoryStore {
     return this.ringDeviceKeys()
       .map((deviceKey) => {
         const rows = this.ringRows.get(deviceKey) ?? []
+        const reads = this.ringReads.get(deviceKey) ?? []
+        const newest = rows[rows.length - 1] ?? null
         return {
           deviceKey,
+          kind: ledgerKindOf(newest, reads[reads.length - 1] ?? null),
           label: deviceLabel(this.devices.get(deviceKey) ?? null),
           records: rows.length,
           lastReadAt: this.lastReadAtOf(deviceKey),
-          oldestPackClockSeconds: rows[0]?.packClockSeconds ?? 0,
-          newestPackClockSeconds: rows[rows.length - 1]?.packClockSeconds ?? 0,
+          oldestPackClockSeconds: packClockFaceOf(rows[0] ?? null),
+          newestPackClockSeconds: packClockFaceOf(newest),
         }
       })
       .sort((left, right) => right.lastReadAt - left.lastReadAt)
@@ -644,13 +704,41 @@ export class MemoryHistoryStore implements HistoryStore {
       newestSampleSeq: anchor === null ? null : seqOfBytes(ledger, anchor),
       elapsedMs: snapshot.transport.elapsedMs,
     }
+    this.fileReceipt(row)
+  }
 
-    const kept = (this.ringReads.get(snapshot.deviceKey) ?? []).filter(
+  /** One journal row per sweep, in the same store and under the same cap as a pack's read. */
+  private journalSolarSweep(snapshot: SolarHistorySnapshot, merge: SolarMergeOutcome): void {
+    this.fileReceipt({
+      deviceKey: snapshot.deviceKey,
+      observedAt: snapshot.observedAt,
+      format: SOLAR_DAY_FORMAT,
+      outcome: snapshot.outcome,
+      readOnDate: snapshot.readOnDate,
+      totals: snapshot.totals,
+      daysReceived: snapshot.days.length,
+      daysAppended: merge.appended,
+      daysRevised: merge.revised,
+      daysUnchanged: merge.unchanged,
+      daysUnwritten: merge.unwritten,
+      daysRedated: merge.redated,
+      refusedRegisters: snapshot.transport.refusedRegisters,
+      notificationBytes: snapshot.transport.notificationBytes,
+      notificationCount: snapshot.transport.notificationCount,
+      controlNotificationCount: snapshot.transport.controlNotificationCount,
+      pduCount: snapshot.transport.pduCount,
+      unreadableReplyCount: snapshot.transport.unreadableReplyCount,
+      elapsedMs: snapshot.transport.elapsedMs,
+    })
+  }
+
+  private fileReceipt(row: StoredRingRead): void {
+    const kept = (this.ringReads.get(row.deviceKey) ?? []).filter(
       (read) => read.observedAt !== row.observedAt,
     )
     kept.push(structuredClone(row))
     kept.sort((left, right) => left.observedAt - right.observedAt)
-    this.ringReads.set(snapshot.deviceKey, kept.slice(-MAX_RING_READS_PER_DEVICE))
+    this.ringReads.set(row.deviceKey, kept.slice(-MAX_RING_READS_PER_DEVICE))
   }
 
   /** Carries out what `planRingPrune` decided, and answers with the rows it gave up. */
@@ -666,9 +754,14 @@ export class MemoryHistoryStore implements HistoryStore {
     for (const eviction of plan.trim) {
       const rows = this.ringRows.get(eviction.deviceKey) ?? []
       const kept = rows.filter((row) => row.seq >= eviction.fromSeq)
-      // The survivor declares the break, exactly as `retainedFrom` does for a truncated session:
-      // what came before it is gone, and nothing may read the ledger as contiguous across it.
-      if (kept.length > 0) kept[0] = { ...kept[0], followsGap: true }
+      // The surviving pack record declares the break, exactly as `retainedFrom` does for a truncated
+      // session: what came before it is gone, and nothing may read the ledger as contiguous across
+      // it. A day record carries no such field and needs none — a calendar-keyed row states its own
+      // position, so a hole in a controller's ledger is visible as a missing date.
+      const oldest = kept[0]
+      if (oldest !== undefined && isPackRecordRow(oldest)) {
+        kept[0] = { ...oldest, followsGap: true }
+      }
       freed += rows.length - kept.length
       this.ringRows.set(eviction.deviceKey, kept)
       this.ringRetainedFrom.set(eviction.deviceKey, eviction.fromSeq)
@@ -724,13 +817,29 @@ function keyOf(chunk: ChunkKey): string {
 const EVENT_CODE_BYTE = 4
 const SCHEDULED_SAMPLE = 0
 
-function tailOf(rows: readonly RingRecordRow[]): RingLedgerTail {
+/** The tail carries pack records only; the next seq counts from the newest row of any format, as
+ *  the adapter's does, so no two rows under one key can ever be handed the same one. */
+function tailOf(rows: readonly StoredRingRecord[]): RingLedgerTail {
+  const packRecords = packRecordsIn(rows)
   return {
     // A ledger whose head was pruned still hands out seq above everything it ever stored; one
     // emptied outright starts again at zero, because nothing is left to count from.
     nextSeq: rows.length === 0 ? 0 : rows[rows.length - 1].seq + 1,
-    rows: rows.slice(-ALIGNMENT_TAIL_RECORDS),
+    rows: packRecords.slice(-ALIGNMENT_TAIL_RECORDS),
   }
+}
+
+/** Which radio a ledger belongs to, read off a row it holds rather than off a device row it may
+ *  outlive. */
+function ledgerKindOf(row: StoredRingRecord | null, read: StoredRingRead | null): 'pack' | 'solar' {
+  if (row !== null) return isSolarDayRow(row) ? 'solar' : 'pack'
+  if (read !== null && isSolarReadRow(read)) return 'solar'
+  return 'pack'
+}
+
+/** The pack clock a row carries, or zero for a row that keeps no clock face. */
+function packClockFaceOf(row: StoredRingRecord | null): number {
+  return row !== null && isPackRecordRow(row) ? row.packClockSeconds : 0
 }
 
 function recordsReceivedIn(snapshot: RingSnapshot): number {

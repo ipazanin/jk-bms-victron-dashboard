@@ -10,8 +10,13 @@
 
 import type { DetailLogTransfer } from '../../src/domain/bms/DetailLogTransfer'
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../src/domain/bms/types'
+import type { SolarHistoryTransfer } from '../../src/domain/solar/SolarHistoryTransfer'
 import type { SolarReading } from '../../src/domain/solar/types'
 import type { BmsLink, DisconnectReason, JkBmsHandlers } from '../../src/infrastructure/ble/JkBmsClient'
+import type {
+  SolarHistoryHandlers,
+  SolarHistoryLink,
+} from '../../src/infrastructure/ble/VictronHistoryClient'
 import type { SolarScan, VictronHandlers } from '../../src/infrastructure/ble/VictronScanner'
 
 /**
@@ -213,6 +218,79 @@ export function fakeSolarScan(): FakeSolarScan {
     emitError: (error) => handlers.onError?.(error),
     failNextStartWith: (error) => {
       nextStartError = error
+    },
+  }
+}
+
+/**
+ * The controller's history tunnel, which is a one-shot errand rather than a link that stays up.
+ *
+ * There is no `connected` here for the same reason the real port has no `connect`: a sweep opens
+ * the tunnel, reads and closes it, so between sweeps there is nothing to be connected to.
+ */
+export interface FakeSolarHistoryLink {
+  /** Hand this to `createTelemetry` as `createSolarHistoryLink`. */
+  create(handlers: SolarHistoryHandlers): SolarHistoryLink
+  /** What the next sweep comes back with. Silence, until a spec says otherwise. */
+  answerNextSweepWith(transfer: SolarHistoryTransfer): void
+  /** How a dismissed chooser or a controller that will not connect reaches the app. */
+  failNextSweepWith(error: Error): void
+  /** How many sweeps the app asked for, so a spec can assert a guard actually guarded. */
+  readonly sweeps: number
+}
+
+const NO_TUNNEL_ANSWER: SolarHistoryTransfer = {
+  outcome: 'no-answer',
+  totals: null,
+  days: [],
+  refusedRegisters: [],
+  notificationBytes: 0,
+  notificationCount: 0,
+  controlNotificationCount: 4,
+  pduCount: 0,
+  unreadableReplyCount: 0,
+  elapsedMs: 9_000,
+}
+
+export function fakeSolarHistoryLink(options: { readonly deviceName?: string | null } = {}): FakeSolarHistoryLink {
+  let reading = false
+  let sweeps = 0
+  let nextTransfer: SolarHistoryTransfer = NO_TUNNEL_ANSWER
+  let nextError: Error | null = null
+
+  const link: SolarHistoryLink = {
+    get reading() {
+      return reading
+    },
+    get deviceName() {
+      return options.deviceName ?? 'SmartSolar HQ2'
+    },
+    async readStoredHistory() {
+      sweeps += 1
+      reading = true
+      try {
+        const failure = nextError
+        nextError = null
+        if (failure !== null) throw failure
+        return nextTransfer
+      } finally {
+        reading = false
+      }
+    },
+  }
+
+  return {
+    create() {
+      return link
+    },
+    answerNextSweepWith: (transfer) => {
+      nextTransfer = transfer
+    },
+    failNextSweepWith: (error) => {
+      nextError = error
+    },
+    get sweeps() {
+      return sweeps
     },
   }
 }

@@ -1,9 +1,9 @@
 /**
  * What a Victron SmartSolar tells anyone listening.
  *
- * Only what it is doing now. It keeps its stored days to itself: asked for them over its own
- * VE.Direct tunnel it does answer, and the answer is that the register is not supported. So a day's
- * history reaches this boat through an export from the vendor app and never through the radio.
+ * Only what it is doing now. An Instant Readout advertisement is one instant and carries no series
+ * at all, so nothing here stands in for the controller's stored days: those come off the same radio
+ * by a different route, the 306b GATT tunnel in `tunnel/`, decoded by `history.ts`.
  */
 
 export const VICTRON_COMPANY_ID = 0x02e1

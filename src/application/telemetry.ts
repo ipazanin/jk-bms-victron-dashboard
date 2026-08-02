@@ -27,10 +27,13 @@ import { reconcile } from '../domain/dcBus'
 import { packDeviceKeyFor, solarDeviceKeyFor } from '../domain/history/identity'
 import type { DeviceKey, SessionEndReason, SessionRecord, WarningSnapshot } from '../domain/history/types'
 import { SNAPSHOT_SCHEMA_VERSION } from '../domain/schemaVersion'
+import type { SolarHistoryTransfer } from '../domain/solar/SolarHistoryTransfer'
 import type { SolarReading } from '../domain/solar/types'
 import { adapterAvailable, detectCapabilities, watchAdapter } from '../infrastructure/ble/capabilities'
 import { JkBmsClient } from '../infrastructure/ble/JkBmsClient'
 import type { BmsLink, JkBmsHandlers } from '../infrastructure/ble/JkBmsClient'
+import { VictronHistoryClient } from '../infrastructure/ble/VictronHistoryClient'
+import type { SolarHistoryHandlers, SolarHistoryLink } from '../infrastructure/ble/VictronHistoryClient'
 import { VictronScanner } from '../infrastructure/ble/VictronScanner'
 import type { SolarScan, VictronHandlers } from '../infrastructure/ble/VictronScanner'
 import { BridgeSolarScan } from '../infrastructure/ble/BridgeSolarScan'
@@ -39,8 +42,9 @@ import { browserStandardUtcOffsetMinutes } from './browserZone'
 import { describeConnectError, describeScanError } from './errors'
 import { amps } from './format'
 import { useHistoryBrowser } from './history/historyBrowser'
-import type { HistoryStore, RingIngestOutcome } from './history/port'
+import type { HistoryStore, RingIngestOutcome, SolarHistoryIngestOutcome } from './history/port'
 import { ringReadIsDue, ringSnapshotOf } from './history/ringIngest'
+import { readOnDateFor, solarHistorySnapshotOf } from './history/solarHistoryIngest'
 import { SessionRecorder } from './history/SessionRecorder'
 import type { PackStreamEndReason, RecorderState } from './history/SessionRecorder'
 import { createObservations } from './observations'
@@ -57,7 +61,7 @@ import { loadLastDevice, saveLastDevice } from './lastDevice'
 import type { LastDevice } from './lastDevice'
 import { loadLogbook, saveLogbook } from './logbook'
 import type { StoredLogbook } from './logbook'
-import { saveAdvertisementKey } from './storage'
+import { loadAdvertisementKey, saveAdvertisementKey } from './storage'
 
 export type LinkState = 'idle' | 'connecting' | 'listening' | 'live' | 'error'
 
@@ -85,6 +89,12 @@ export interface TelemetryDeps {
   /** Factories, not instances: the handlers have to be bound before the radio exists. */
   readonly createBmsLink: (handlers: JkBmsHandlers) => BmsLink
   readonly createSolarScan: (handlers: VictronHandlers) => SolarScan
+  /**
+   * The controller's stored history comes off the same radio by a different route, so it is its own
+   * port rather than a method on the scan: one listens to advertisements and never connects, the
+   * other connects and cannot listen.
+   */
+  readonly createSolarHistoryLink: (handlers: SolarHistoryHandlers) => SolarHistoryLink
   /** Lazy: the archive is probed asynchronously and may answer that it cannot be had. */
   readonly historyStore: () => HistoryStore | null
   /**
@@ -93,6 +103,8 @@ export interface TelemetryDeps {
    * archive's own announcement never reaches.
    */
   readonly refreshRingLedger: (deviceKey: DeviceKey) => Promise<void>
+  /** The same, for the controller's own ledger, which the read model holds in its own slot. */
+  readonly refreshSolarLedger: (deviceKey: DeviceKey) => Promise<void>
   readonly now: () => number
   readonly monotonic: () => number
   readonly newId: () => string
@@ -120,6 +132,14 @@ const PACK_LOST_BANNER = 'Lost the BMS. Move closer to the boat’s panel and re
 /** Said on the receipt, because a read that cannot be filed still has to explain itself. */
 const UNNAMEABLE_PACK_NOTE =
   'This pack gave neither a serial nor a name, so its records cannot be filed against a device.'
+
+/**
+ * The controller's counterpart. Its key is a digest of the advertisement key, because a unit we
+ * never listen to is a unit this browser has no per-unit constant for — the tunnel hands over a
+ * BLE device name that a marina full of SmartSolars would share.
+ */
+const UNNAMEABLE_CONTROLLER_NOTE =
+  'No advertisement key is stored, so this controller cannot be named and its history cannot be filed. Enter the key on the Connect page first.'
 
 export function createTelemetry(deps: TelemetryDeps) {
   const now = deps.now
@@ -805,6 +825,96 @@ export function createTelemetry(deps: TelemetryDeps) {
     await readDetailLog()
   }
 
+  // ── the controller's stored history ────────────────────────────────────────
+
+  /**
+   * The last history sweep, on the same terms as the pack's stored log: what came back, and what
+   * filing it did to the controller's ledger.
+   */
+  const solarHistory = shallowRef<SolarHistoryTransfer | null>(null)
+  const solarHistoryReading = ref(false)
+  const solarHistoryError = ref<string | null>(null)
+  const solarHistoryIngest = shallowRef<SolarHistoryIngestOutcome | null>(null)
+  /** Why a sweep was not filed, when the reason is the controller rather than the archive. */
+  const solarHistoryFilingNote = ref<string | null>(null)
+
+  const solarHistoryLink = deps.createSolarHistoryLink({
+    onError: (error) => (solarHistoryError.value = error.message),
+  })
+
+  /**
+   * Sweeps the controller's stored history, on the user's word and never on the app's.
+   *
+   * There is deliberately no counterpart to `considerAutoDetailLogRead` here. Reading this history
+   * means opening a GATT connection, and the controller accepts exactly one BLE client at a time and
+   * changes its advertising while connected: an automatic sweep would lock VictronConnect out and
+   * silently stop the Instant Readout advertisements every live solar reading on the dashboard comes
+   * from. So the cost of a sweep is a thing the owner chooses to pay, at a moment they pick.
+   *
+   * Called from a click for a second reason: `requestDevice` needs the transient activation, and
+   * nothing on this path may await before it.
+   */
+  async function readSolarHistory(showAllDevices = false): Promise<void> {
+    if (solarHistoryReading.value) return
+    solarHistoryReading.value = true
+    solarHistoryError.value = null
+    try {
+      const transfer = await solarHistoryLink.readStoredHistory(showAllDevices)
+      solarHistory.value = transfer
+      await fileSolarHistory(transfer)
+    } catch (error) {
+      solarHistoryError.value = (error as Error).message
+    } finally {
+      solarHistoryReading.value = false
+    }
+  }
+
+  /**
+   * Files what came back, whatever came back, exactly as `fileDetailLog` does — a sweep that carried
+   * no day is the one whose receipt is the only evidence it happened.
+   *
+   * A controller the archive cannot name is not filed under an invented key, for the reason the pack
+   * is not: one key would merge every SmartSolar this browser ever meets into a single ledger, and
+   * the first sweep would be the one that made it unrecoverable.
+   */
+  async function fileSolarHistory(transfer: SolarHistoryTransfer): Promise<void> {
+    solarHistoryIngest.value = null
+    solarHistoryFilingNote.value = null
+
+    const deviceKey = await storedSolarDeviceKey()
+    if (deviceKey === null) {
+      solarHistoryFilingNote.value = UNNAMEABLE_CONTROLLER_NOTE
+      return
+    }
+    const store = deps.historyStore()
+    if (store === null) return
+
+    const at = now()
+    solarHistoryIngest.value = await store.appendSolarHistory(
+      solarHistorySnapshotOf(transfer, deviceKey, at, readOnDateFor(at)),
+    )
+    await deps.refreshSolarLedger(deviceKey)
+  }
+
+  /**
+   * The controller's key, from the advertisement key this browser has kept.
+   *
+   * The live `solarDeviceKey` is not used: it exists only while a scan is running, and a sweep is
+   * the one thing that cannot happen while one is. The stored key digests to the same value, so a
+   * sweep and a recording file under one ledger.
+   */
+  async function storedSolarDeviceKey(): Promise<DeviceKey | null> {
+    if (solarDeviceKey !== null) return solarDeviceKey
+    const stored = loadAdvertisementKey()
+    if (stored === '') return null
+    try {
+      return await solarDeviceKeyFor(stored)
+    } catch {
+      // A key that will not parse names nothing, which is the same finding as holding none.
+      return null
+    }
+  }
+
   async function startSolar(key: string): Promise<void> {
     solarError.value = null
     foreignDeviceSeen.value = false
@@ -932,6 +1042,11 @@ export function createTelemetry(deps: TelemetryDeps) {
     detailLogError: readonly(detailLogError),
     ringIngest,
     ringFilingNote: readonly(ringFilingNote),
+    solarHistory,
+    solarHistoryReading: readonly(solarHistoryReading),
+    solarHistoryError: readonly(solarHistoryError),
+    solarHistoryIngest,
+    solarHistoryFilingNote: readonly(solarHistoryFilingNote),
     packReach: observations.packReach,
     solarReach: observations.solarReach,
     cellReach: observations.cellReach,
@@ -942,6 +1057,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     reconnectBms,
     disconnectBms,
     readDetailLog,
+    readSolarHistory,
     startSolar,
     stopSolar,
     browseSession,
@@ -975,8 +1091,12 @@ function browserDeps(): TelemetryDeps {
     createSolarScan: bridgeUrl
       ? (handlers) => new BridgeSolarScan(bridgeUrl, handlers)
       : (handlers) => new VictronScanner(handlers),
+    // Not bridged. The bridge exists because macOS Chrome never delivers an advertisement to
+    // requestLEScan; a GATT connect is unaffected, so the tunnel is the browser's own radio either way.
+    createSolarHistoryLink: (handlers) => new VictronHistoryClient(handlers),
     historyStore: () => attachedStore,
     refreshRingLedger: (deviceKey) => useHistoryBrowser().refreshRingLedger(deviceKey),
+    refreshSolarLedger: (deviceKey) => useHistoryBrowser().refreshSolarLedger(deviceKey),
     now: () => Date.now(),
     // Not derived from the wall clock: the whole point of a monotonic reading is that a clock
     // step cannot move it.

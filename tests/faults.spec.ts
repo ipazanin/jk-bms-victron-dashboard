@@ -8,7 +8,7 @@ import { MOSFET_CRITICAL, MOSFET_SERIOUS, MOSFET_WARNING } from '../src/applicat
 import type { BatterySnapshot } from '../src/domain/bms/types'
 import { STEP_EXCLUSION_A } from '../src/domain/cellBalance'
 import { battery as capturedBattery, solarReading } from './support/samples'
-import { fakeBmsLink, fakeSolarScan } from './support/fakeRadios'
+import { fakeBmsLink, fakeSolarHistoryLink, fakeSolarScan } from './support/fakeRadios'
 import type { FakeBmsLink, FakeSolarScan } from './support/fakeRadios'
 
 // The annunciator's whole value is that its thresholds are exactly where they claim to be, so
@@ -96,8 +96,10 @@ function deps(): TelemetryDeps {
   return {
     createBmsLink: bms.create,
     createSolarScan: solar.create,
+    createSolarHistoryLink: fakeSolarHistoryLink().create,
     historyStore: () => null,
     refreshRingLedger: async () => undefined,
+    refreshSolarLedger: async () => undefined,
     now: () => clock,
     monotonic: () => clock,
     newId: () => 'session',

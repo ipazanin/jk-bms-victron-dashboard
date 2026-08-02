@@ -28,7 +28,7 @@ import {
   sessionRecord,
   solarReading,
 } from './support/samples'
-import { fakeBmsLink, fakeSolarScan } from './support/fakeRadios'
+import { fakeBmsLink, fakeSolarHistoryLink, fakeSolarScan } from './support/fakeRadios'
 import type { FakeBmsLink, FakeSolarScan } from './support/fakeRadios'
 
 // Each case builds its own telemetry and throws it away, so nothing leaks between them: the
@@ -47,8 +47,10 @@ function radioDeps(): TelemetryDeps {
   return {
     createBmsLink: (handlers) => new JkBmsClient(handlers),
     createSolarScan: (handlers) => new VictronScanner(handlers),
+    createSolarHistoryLink: fakeSolarHistoryLink().create,
     historyStore: () => null,
     refreshRingLedger: async () => undefined,
+    refreshSolarLedger: async () => undefined,
     now: () => Date.now(),
     monotonic: () => performance.now(),
     newId: () => crypto.randomUUID(),
@@ -232,8 +234,10 @@ describe('what reaches the archive is raw', () => {
     telemetry = createTelemetry({
       createBmsLink: bms.create,
       createSolarScan: solar.create,
+      createSolarHistoryLink: fakeSolarHistoryLink().create,
       historyStore: () => null,
       refreshRingLedger: async () => undefined,
+      refreshSolarLedger: async () => undefined,
       now: () => clock,
       monotonic: () => clock,
       newId: () => 'session',
@@ -308,8 +312,10 @@ describe('browsing a stored session', () => {
     telemetry = createTelemetry({
       createBmsLink: bms.create,
       createSolarScan: solar.create,
+      createSolarHistoryLink: fakeSolarHistoryLink().create,
       historyStore: () => null,
       refreshRingLedger: async () => undefined,
+      refreshSolarLedger: async () => undefined,
       now: () => Date.now(),
       monotonic: () => performance.now(),
       newId: () => 'session',
@@ -373,8 +379,10 @@ describe('reading the pack’s stored detail log', () => {
     return createTelemetry({
       createBmsLink: bms.create,
       createSolarScan: solar.create,
+      createSolarHistoryLink: fakeSolarHistoryLink().create,
       historyStore: () => null,
       refreshRingLedger: async () => undefined,
+      refreshSolarLedger: async () => undefined,
       now,
       monotonic: () => performance.now(),
       newId: () => 'session',
@@ -466,10 +474,12 @@ describe('filing a stored-log read against the pack that answered it', () => {
     return createTelemetry({
       createBmsLink: bms.create,
       createSolarScan: solar.create,
+      createSolarHistoryLink: fakeSolarHistoryLink().create,
       historyStore,
       refreshRingLedger: async (deviceKey) => {
         refreshed.push(deviceKey)
       },
+      refreshSolarLedger: async () => undefined,
       now: () => clock,
       monotonic: () => clock,
       newId: () => 'session',
@@ -635,8 +645,10 @@ describe('fetching a stale stored log without being asked', () => {
     telemetry = createTelemetry({
       createBmsLink: bms.create,
       createSolarScan: solar.create,
+      createSolarHistoryLink: fakeSolarHistoryLink().create,
       historyStore: () => store,
       refreshRingLedger: async () => undefined,
+      refreshSolarLedger: async () => undefined,
       now: () => clock,
       monotonic: () => clock,
       newId: () => 'session',
@@ -726,8 +738,10 @@ describe('the windows never outlive the pack they describe', () => {
     telemetry = createTelemetry({
       createBmsLink: bms.create,
       createSolarScan: solar.create,
+      createSolarHistoryLink: fakeSolarHistoryLink().create,
       historyStore: () => null,
       refreshRingLedger: async () => undefined,
+      refreshSolarLedger: async () => undefined,
       now: () => clock,
       monotonic: () => clock,
       newId: () => 'session',

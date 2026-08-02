@@ -10,9 +10,17 @@ import type { DeviceKey } from './types'
  *
  * No resolved timestamp is stored. `recordedAt` is a function of a zone the pack never states and of
  * a clock error this browser only ever bounds; storing it would bake today's guess into the archive.
+ *
+ * The store it lives in also holds the controller's day records, and this row is the format that
+ * says nothing about itself: every pack row written before that was true is still on disk, so
+ * absence has to mean "pack record" whatever else is decided. `format` is therefore declared present
+ * and undefined rather than left off — the type checker then refuses a pack row that carries one,
+ * and `storedRows.ts` states the default in the one place it is read.
  */
 export interface RingRecordRow {
   readonly deviceKey: DeviceKey
+  /** Never written. See `StoredRowFormat`. */
+  readonly format?: undefined
   /** Monotone per device, assigned when the record is first seen. A row's seq never changes. */
   readonly seq: number
   /** The pack's RTC counter, seconds. Invariant: equals the little-endian uint32 at bytes[0..3].

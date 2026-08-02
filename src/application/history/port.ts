@@ -23,6 +23,8 @@
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../domain/bms/types'
 import type { RingMergeOutcome } from '../../domain/history/RingMergeOutcome'
 import type { RingSnapshot } from '../../domain/history/RingSnapshot'
+import type { SolarHistorySnapshot } from '../../domain/history/SolarHistorySnapshot'
+import type { SolarMergeOutcome } from '../../domain/history/SolarMergeOutcome'
 import type { StoredRingLedger } from '../../domain/history/StoredRingLedger'
 import type {
   CoverageRun,
@@ -103,14 +105,36 @@ export interface RingIngestOutcome extends RingMergeOutcome {
 }
 
 /**
- * The list row for the pack selector: one line per ledger, carrying no record.
+ * What one history sweep did to the controller's ledger.
+ *
+ * The fold's own five figures, widened with the four only a store can answer — the same split, for
+ * the same reason, as `RingIngestOutcome`: the fold stays a pure function over records with no
+ * notion of storage, availability or budget.
+ */
+export interface SolarHistoryIngestOutcome extends SolarMergeOutcome {
+  readonly stored: boolean
+  /** Days this controller's ledger holds after the write. */
+  readonly totalDays: number
+  /** Rows the prune this write ran gave up — from this ledger, and from any dropped whole. */
+  readonly prunedRecords: number
+  readonly failure: HistoryUnavailableReason | null
+}
+
+/**
+ * The list row for the device selector: one line per ledger, carrying no record.
  *
  * The two counters are the pack's own clock face and not wall time, so this row is honest without
- * a clock context behind it. A ledger holding no record — a pack read once that answered nothing —
+ * a clock context behind it. A ledger holding no record — a device read once that answered nothing —
  * still lists, with zeroes, so the receipt for that read is reachable.
+ *
+ * `kind` is derived from the rows themselves rather than from the device row, which a ledger can
+ * outlive: what wrote a row is a property of the row, and it is the one thing a caller must know
+ * before it decides which fold to reach for. A controller's ledger reports zero for both clock
+ * counters, because it keeps no clock face at all.
  */
 export interface RingLedgerSummary {
   readonly deviceKey: DeviceKey
+  readonly kind: DeviceRecord['kind']
   readonly label: string
   readonly records: number
   readonly lastReadAt: number
@@ -272,14 +296,25 @@ export interface HistoryStore {
    */
   appendRingSnapshot(snapshot: RingSnapshot): Promise<RingIngestOutcome>
   /**
-   * One pack's whole ledger, seq-ascending, with its journal and device row. Null when this browser
+   * Folds one history sweep into the controller's own ledger and journals it, as one write, into the
+   * same two stores a pack's ring lives in. Idempotent for the same reason and by a different route:
+   * a Victron day carries a sequence number, so a sweep filed twice recognises every day it already
+   * holds without comparing a byte.
+   *
+   * Reusing the ring stores is what keeps the two device histories on one budget, one prune plan and
+   * one sweep. A device key belongs to a pack or to a controller and never to both, so the two never
+   * meet inside a ledger; the row's own format is what says which fold may read it.
+   */
+  appendSolarHistory(snapshot: SolarHistorySnapshot): Promise<SolarHistoryIngestOutcome>
+  /**
+   * One device's whole ledger, seq-ascending, with its journal and device row. Null when this browser
    * has neither stored a record for the key nor journalled a read against it.
    *
    * Whole rather than windowed: wall time is derived through a correction that can change, so an
    * index over wall time would freeze today's correction into the archive.
    */
   readRingLedger(deviceKey: DeviceKey): Promise<StoredRingLedger | null>
-  /** Every pack this browser has read a ring from, most recently read first. */
+  /** Every device this browser has read stored history from, most recently read first. */
   listRingLedgers(): Promise<readonly RingLedgerSummary[]>
   /**
    * Read-and-write in one transaction, shaped like renameDevice, so two tabs cannot interleave into
@@ -376,6 +411,17 @@ export function unavailableHistoryStore(reason: HistoryUnavailableReason): Histo
       gapDeclared: false,
       runsDiscarded: 0,
       totalRecords: 0,
+      prunedRecords: 0,
+      failure: reason,
+    }),
+    appendSolarHistory: async () => ({
+      stored: false,
+      appended: 0,
+      revised: 0,
+      unchanged: 0,
+      unwritten: 0,
+      redated: 0,
+      totalDays: 0,
       prunedRecords: 0,
       failure: reason,
     }),

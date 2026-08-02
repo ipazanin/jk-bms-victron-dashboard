@@ -11,6 +11,8 @@ import type { DeviceKey } from './types'
  */
 export interface RingReadRow {
   readonly deviceKey: DeviceKey
+  /** Never written: absence is what marks a receipt as a pack read. See `StoredRowFormat`. */
+  readonly format?: undefined
   readonly observedAt: number
   readonly outcome: DetailLogOutcome
   readonly notificationBytes: number

@@ -6,7 +6,7 @@ import { createTelemetry } from '../src/application/telemetry'
 import type { Telemetry } from '../src/application/telemetry'
 import { battery, solarReading } from './support/samples'
 import { MemoryHistoryStore } from './support/MemoryHistoryStore'
-import { fakeBmsLink, fakeSolarScan } from './support/fakeRadios'
+import { fakeBmsLink, fakeSolarHistoryLink, fakeSolarScan } from './support/fakeRadios'
 import type { FakeBmsLink, FakeSolarScan } from './support/fakeRadios'
 
 // The warning path from end to end: a live fault, the recorder writing it once with the readings
@@ -31,8 +31,10 @@ beforeEach(() => {
   telemetry = createTelemetry({
     createBmsLink: bms.create,
     createSolarScan: solar.create,
+    createSolarHistoryLink: fakeSolarHistoryLink().create,
     historyStore: () => store,
     refreshRingLedger: async () => undefined,
+    refreshSolarLedger: async () => undefined,
     now: () => clock,
     monotonic: () => clock,
     newId: () => `session-${(session += 1)}`,

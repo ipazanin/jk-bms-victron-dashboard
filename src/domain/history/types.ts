@@ -17,6 +17,7 @@
 
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../bms/types'
 import type { ChargeState, SolarReading } from '../solar/types'
+import type { CalendarDate } from './CalendarDate'
 
 export type SessionId = string
 export type DeviceKey = string
@@ -371,4 +372,16 @@ export interface HistoryMeta {
 export interface TimeWindow {
   readonly from: number
   readonly to: number
+}
+
+/**
+ * A span of whole calendar days, inclusive at both ends.
+ *
+ * Beside `TimeWindow` rather than derived from it, because the two are not convertible without a
+ * zone: an instant window asks "between these two moments", and a day window asks "on these days" —
+ * a question the controller's records answer and no instant is needed to state.
+ */
+export interface SolarDayWindow {
+  readonly from: CalendarDate
+  readonly to: CalendarDate
 }
