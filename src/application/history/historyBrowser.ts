@@ -42,10 +42,14 @@ import type {
   TimeWindow,
   WarningRecord,
 } from '../../domain/history/types'
-import type { HistoryAvailability, HistoryStore, SessionListing, StoredSession } from './port'
-import { POWER_COLUMNS, powerTracks } from './statsRange'
-import type { PowerTracks, SessionSamples } from './statsRange'
-
+import type {
+  HistoryAvailability,
+  HistoryStore,
+  RingLedgerSummary,
+  SessionListing,
+  StoredRingLedger,
+  StoredSession,
+} from './port'
 /** The standalone warnings log reads this many at most, most recent first. */
 const WARNING_LIST_LIMIT = 500
 
@@ -80,6 +84,8 @@ export interface ArchiveUsage {
   readonly usedRatio: number
   /** At the pruning target, so the warning appears before the first eviction rather than after. */
   readonly nearCapacity: boolean
+  /** On its own line: the ring budget cannot evict, or be evicted by, the sample budget above. */
+  readonly ringRecords: number
 }
 
 /**
@@ -105,23 +111,6 @@ export interface LoadedSession {
 export interface ExportSize {
   readonly rows: number
   readonly bytes: number
-}
-
-/**
- * The per-sample power trace for a range window, read across every session that overlaps it.
- *
- * Kept apart from `loaded`: the Stats power chart and the Session view read different spans for
- * different reasons, and a shared slot would have them evicting each other's work. A window here is
- * never protected from pruning — it is a scan of what is on disk, and a pruned session simply yields
- * an honest gap rather than being held back.
- */
-export interface WindowPower {
-  readonly window: TimeWindow
-  readonly tracks: PowerTracks
-  /** Overlapping sessions actually read; a skipped or vanished one does not count. */
-  readonly sessions: number
-  /** Any session read hit `MAX_RENDER_WINDOW_MS`. Never fires for hour or day, both ≤ 24 h. */
-  readonly clamped: boolean
 }
 
 /**
@@ -152,25 +141,39 @@ export interface HistoryBrowser {
   readonly account: ComputedRef<SessionAccount | null>
   readonly exportSize: ComputedRef<ExportSize | null>
   readonly exportState: Readonly<Ref<ExportState>>
-  /** The per-sample power trace for the last loaded range window, or null when none is loaded. */
-  readonly windowPower: Readonly<Ref<WindowPower | null>>
-  readonly powerLoading: Readonly<Ref<boolean>>
   /**
    * Every warning inside the last range window read, or null until that read resolves. Kept apart
    * from the capped `warnings` list so a Stats range tally counts the whole window rather than the
    * most recent few — the view falls back to `warnings` only while this is null.
    */
   readonly windowWarnings: Readonly<Ref<readonly WarningRecord[] | null>>
+  /** Every pack this browser has read a ring from, most recently read first. Refreshed with the
+   *  session list, so a foreign tab's read moves it here without a dedicated subscription. */
+  readonly ringLedgers: Readonly<Ref<readonly RingLedgerSummary[]>>
+  /** The one ledger currently on screen, or null before it is asked for. */
+  readonly ringLedger: Readonly<Ref<StoredRingLedger | null>>
+  readonly ringLoading: Readonly<Ref<boolean>>
 
   refresh(): Promise<void>
   loadSession(id: SessionId, window?: TimeWindow): Promise<void>
   unloadSession(): void
-  /** Reads every session overlapping `window` and derives a downsampled power trace across them. */
-  loadWindowPower(window: TimeWindow, columns?: number): Promise<void>
-  /** Releases the loaded window and supersedes any read in flight. */
-  clearWindowPower(): void
   /** Reads every warning inside `window`, uncapped, for an honest range tally. Latest wins. */
   loadWindowWarnings(window: TimeWindow): Promise<void>
+  /** Reads one pack's whole ledger and holds it as `ringLedger`. Latest wins by token, the same as
+   *  `loadWindowWarnings`, so switching packs quickly supersedes a read still in flight. */
+  loadRingLedger(deviceKey: DeviceKey): Promise<void>
+  /**
+   * Re-reads the ledger this tab just wrote to, in place. Filing a ring snapshot posts no
+   * BroadcastChannel message this tab receives — the channel never delivers to its own poster —
+   * so the writer re-reads its own write explicitly, the same way `renameDevice` does.
+   */
+  refreshRingLedger(deviceKey: DeviceKey): Promise<void>
+  /** Read-and-write in one step, shaped like `renameDevice`. */
+  setPackClock(
+    deviceKey: DeviceKey,
+    clock: { readonly utcOffsetMinutes: number | null; readonly aheadSeconds: number | null },
+  ): Promise<void>
+  deleteRingLedger(deviceKey: DeviceKey): Promise<void>
   select(window: TimeWindow | null): void
   renameDevice(key: DeviceKey, label: string | null): Promise<void>
   deleteSession(id: SessionId): Promise<void>
@@ -215,9 +218,10 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   const failure = ref<string | null>(null)
   const selection = shallowRef<TimeWindow | null>(null)
   const exportState = ref<ExportState>('idle')
-  const windowPower = shallowRef<WindowPower | null>(null)
-  const powerLoading = ref(false)
   const windowWarnings = shallowRef<readonly WarningRecord[] | null>(null)
+  const ringLedgers = shallowRef<readonly RingLedgerSummary[]>([])
+  const ringLedger = shallowRef<StoredRingLedger | null>(null)
+  const ringLoading = ref(false)
   /** Frozen at each refresh so the durations below are a pure function of reactive state; a
    *  component that wants a live figure calls sessionDurationMs with its own ticking clock. */
   const listedAt = ref(0)
@@ -227,10 +231,13 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   /** A request the probe was not ready for, replayed once a store exists. Never a request that
    *  was attempted and answered — a session that is genuinely gone must not be asked for again. */
   let deferredId: SessionId | null = null
+  /** The pack `ringLedger` is currently tracking, so a foreign tab's write re-reads the right key
+   *  rather than a stale one and `refresh()` has something to re-read at all. */
+  let ringLedgerKey: DeviceKey | null = null
   let listToken = 0
   let loadToken = 0
-  let powerToken = 0
   let windowWarningsToken = 0
+  let ringLedgerToken = 0
   let unsubscribe: (() => void) | null = null
   let subscribedTo: HistoryStore | null = null
 
@@ -311,17 +318,19 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     const token = (listToken += 1)
     refreshing.value = true
     try {
-      const [listed, known, totals, warned] = await Promise.all([
+      const [listed, known, totals, warned, ledgers] = await Promise.all([
         store.listSessions(),
         store.listDevices(),
         store.usage(),
         store.listWarnings(WARNING_LIST_LIMIT),
+        store.listRingLedgers(),
       ])
       if (token !== listToken) return
       sessions.value = listed
       devices.value = known
       warnings.value = warned
-      usage.value = usageOf(totals.totalSamples, totals.sessions)
+      ringLedgers.value = ledgers
+      usage.value = usageOf(totals.totalSamples, totals.sessions, totals.ringRecords)
       listedAt.value = deps.now()
       failure.value = null
     } catch (error) {
@@ -332,6 +341,9 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
 
     // A session deep-linked before the probe answered was held rather than reported missing.
     if (deferredId !== null) await read()
+    // The channel never delivers a ring write to the tab that posted it, so the ledger this tab
+    // has open is re-read here whenever anything else about the archive changed too.
+    if (ringLedgerKey !== null) await refreshRingLedger(ringLedgerKey)
   }
 
   function loadSession(id: SessionId, window?: TimeWindow): Promise<void> {
@@ -365,68 +377,9 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   }
 
   /**
-   * Reads every session overlapping the window and derives one downsampled power trace across them.
-   *
-   * The overlapping sessions are found in the cached list, so no chunk is read to discover them;
-   * each is then read for the window alone (clamped to 24 h in the port, harmless for hour and day),
-   * decoded, and handed to `powerTracks`. Latest wins by token, so switching ranges quickly
-   * supersedes a read still in flight rather than letting a stale one land.
-   */
-  async function loadWindowPower(window: TimeWindow, columns = POWER_COLUMNS): Promise<void> {
-    const store = activeStore()
-    if (!store) {
-      windowPower.value = null
-      return
-    }
-
-    const token = (powerToken += 1)
-    powerLoading.value = true
-    try {
-      const overlapping = sessions.value
-        .filter(
-          (listing) =>
-            listing.record.startedAt <= window.to &&
-            (listing.record.endedAt ?? listing.record.heartbeatAt) >= window.from,
-        )
-        .slice()
-        .sort((left, right) => left.record.startedAt - right.record.startedAt)
-
-      const runs: SessionSamples[] = []
-      let clamped = false
-      for (const listing of overlapping) {
-        const stored = await store.readSession(listing.record.id, window)
-        if (token !== powerToken) return
-        if (stored === null) continue
-        if (stored.windowClamped) clamped = true
-        const { pack, solar } = decodeStored(stored)
-        runs.push({ pack, solar })
-      }
-
-      windowPower.value = {
-        window,
-        tracks: powerTracks(runs, window, columns),
-        sessions: runs.length,
-        clamped,
-      }
-    } catch {
-      // A window that could not be read is honestly no per-sample data, which the chart already
-      // draws as such. Kept off the shared failure line so a Stats read cannot alarm the Log.
-      if (token === powerToken) windowPower.value = null
-    } finally {
-      if (token === powerToken) powerLoading.value = false
-    }
-  }
-
-  function clearWindowPower(): void {
-    powerToken += 1
-    powerLoading.value = false
-    windowPower.value = null
-  }
-
-  /**
    * Reads every warning inside the window, uncapped, so a range tally counts the whole window
-   * rather than the most recent few the standalone log caps at. Isolated like `loadWindowPower`:
-   * latest wins by token, and it never touches the shared `warnings` list or `failure` line. Reset
+   * rather than the most recent few the standalone log caps at. Isolated: latest wins by token,
+   * and it never touches the shared `warnings` list or `failure` line. Reset
    * to null before the read so the capped list stands in until this window's own answer lands.
    */
   async function loadWindowWarnings(window: TimeWindow): Promise<void> {
@@ -447,6 +400,91 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
       // capped list. Kept off the shared failure line so a Stats read cannot alarm the Log.
       if (token === windowWarningsToken) windowWarnings.value = null
     }
+  }
+
+  /**
+   * Reads one pack's whole ledger. Latest wins by token, exactly as `loadWindowWarnings` does, so
+   * switching packs in the selector supersedes a read still in flight rather than letting a stale
+   * one land. Reset to null before the read: this is a different key from whatever was on screen,
+   * and its rows would misrepresent the new one.
+   */
+  async function loadRingLedger(deviceKey: DeviceKey): Promise<void> {
+    ringLedgerKey = deviceKey
+    const store = activeStore()
+    if (!store) {
+      ringLedger.value = null
+      return
+    }
+
+    const token = (ringLedgerToken += 1)
+    ringLedger.value = null
+    ringLoading.value = true
+    try {
+      const found = await store.readRingLedger(deviceKey)
+      if (token !== ringLedgerToken) return
+      ringLedger.value = found
+    } catch {
+      // A ledger that could not be read is honestly none held. Kept off the shared failure line
+      // for the same reason as loadWindowWarnings: a Stats read must not alarm the Log.
+      if (token === ringLedgerToken) ringLedger.value = null
+    } finally {
+      if (token === ringLedgerToken) ringLoading.value = false
+    }
+  }
+
+  /**
+   * Re-reads a ledger already on screen, in place. Never clears `ringLedger` first — the rows
+   * already shown for this key stay put until the fresh answer lands.
+   */
+  async function refreshRingLedger(deviceKey: DeviceKey): Promise<void> {
+    ringLedgerKey = deviceKey
+    const store = activeStore()
+    if (!store) return
+
+    const token = (ringLedgerToken += 1)
+    try {
+      const found = await store.readRingLedger(deviceKey)
+      if (token !== ringLedgerToken) return
+      ringLedger.value = found
+    } catch {
+      // As above: a failed re-read leaves whatever was already shown rather than blanking it.
+    }
+  }
+
+  async function setPackClock(
+    deviceKey: DeviceKey,
+    clock: { readonly utcOffsetMinutes: number | null; readonly aheadSeconds: number | null },
+  ): Promise<void> {
+    const store = deps.store()
+    if (!store) return
+
+    try {
+      await store.setPackClock(deviceKey, clock)
+    } catch (error) {
+      failure.value = describeFailure(error)
+      return
+    }
+    // No BroadcastChannel message reaches this tab for its own write, the same gap `renameDevice`
+    // fills the same way.
+    await refresh()
+  }
+
+  async function deleteRingLedger(deviceKey: DeviceKey): Promise<void> {
+    const store = deps.store()
+    if (!store) return
+
+    try {
+      await store.deleteRingLedger(deviceKey)
+    } catch (error) {
+      failure.value = describeFailure(error)
+      return
+    }
+    if (ringLedgerKey === deviceKey) {
+      ringLedgerKey = null
+      ringLedgerToken += 1
+      ringLedger.value = null
+    }
+    await refresh()
   }
 
   function select(window: TimeWindow | null): void {
@@ -531,6 +569,7 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     subscribedTo = null
     listToken += 1
     loadToken += 1
+    ringLedgerToken += 1
   }
 
   async function read(): Promise<void> {
@@ -605,13 +644,14 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     }
   }
 
-  function usageOf(totalSamples: number, sessionCount: number): ArchiveUsage {
+  function usageOf(totalSamples: number, sessionCount: number, ringRecords: number): ArchiveUsage {
     return {
       totalSamples,
       sessions: sessionCount,
       capacitySamples: MAX_TOTAL_SAMPLES,
       usedRatio: totalSamples / MAX_TOTAL_SAMPLES,
       nearCapacity: totalSamples >= MAX_TOTAL_SAMPLES * PRUNE_TARGET_RATIO,
+      ringRecords,
     }
   }
 
@@ -632,15 +672,18 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     account,
     exportSize,
     exportState,
-    windowPower,
-    powerLoading,
     windowWarnings,
+    ringLedgers,
+    ringLedger,
+    ringLoading,
     refresh,
     loadSession,
     unloadSession,
-    loadWindowPower,
-    clearWindowPower,
     loadWindowWarnings,
+    loadRingLedger,
+    refreshRingLedger,
+    setPackClock,
+    deleteRingLedger,
     select,
     renameDevice,
     deleteSession,

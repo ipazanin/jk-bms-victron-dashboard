@@ -24,7 +24,7 @@ import type { DetailLogTransfer } from '../domain/bms/DetailLogTransfer'
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../domain/bms/types'
 import { JOINT_SERIOUS, JOINT_WARNING } from '../domain/cellBalance'
 import { reconcile } from '../domain/dcBus'
-import { solarDeviceKeyFor } from '../domain/history/identity'
+import { packDeviceKeyFor, solarDeviceKeyFor } from '../domain/history/identity'
 import type { DeviceKey, SessionEndReason, SessionRecord, WarningSnapshot } from '../domain/history/types'
 import { SNAPSHOT_SCHEMA_VERSION } from '../domain/schemaVersion'
 import type { SolarReading } from '../domain/solar/types'
@@ -38,7 +38,9 @@ import { resolveSolarBridgeUrl } from '../infrastructure/ble/solarBridge'
 import { browserStandardUtcOffsetMinutes } from './browserZone'
 import { describeConnectError, describeScanError } from './errors'
 import { amps } from './format'
-import type { HistoryStore } from './history/port'
+import { useHistoryBrowser } from './history/historyBrowser'
+import type { HistoryStore, RingIngestOutcome } from './history/port'
+import { ringReadIsDue, ringSnapshotOf } from './history/ringIngest'
 import { SessionRecorder } from './history/SessionRecorder'
 import type { PackStreamEndReason, RecorderState } from './history/SessionRecorder'
 import { createObservations } from './observations'
@@ -85,6 +87,12 @@ export interface TelemetryDeps {
   readonly createSolarScan: (handlers: VictronHandlers) => SolarScan
   /** Lazy: the archive is probed asynchronously and may answer that it cannot be had. */
   readonly historyStore: () => HistoryStore | null
+  /**
+   * Tells the read model to pick up a ring this tab has just written. BroadcastChannel does not
+   * deliver a message back to whoever posted it, so the tab that filed a read is the one tab the
+   * archive's own announcement never reaches.
+   */
+  readonly refreshRingLedger: (deviceKey: DeviceKey) => Promise<void>
   readonly now: () => number
   readonly monotonic: () => number
   readonly newId: () => string
@@ -108,6 +116,10 @@ const WRITE_THROTTLE_MS = 15_000
  * the text rather than a copy of it.
  */
 const PACK_LOST_BANNER = 'Lost the BMS. Move closer to the boat’s panel and reconnect.'
+
+/** Said on the receipt, because a read that cannot be filed still has to explain itself. */
+const UNNAMEABLE_PACK_NOTE =
+  'This pack gave neither a serial nor a name, so its records cannot be filed against a device.'
 
 export function createTelemetry(deps: TelemetryDeps) {
   const now = deps.now
@@ -159,6 +171,9 @@ export function createTelemetry(deps: TelemetryDeps) {
   /** The controller's identity, learned across two events that arrive in either order. */
   let solarDeviceKey: DeviceKey | null = null
   let solarModelId: number | null = null
+
+  /** Set for the life of one connection once the stale-log check has had its single chance. */
+  let ringAutoReadConsidered = false
 
   const observations = createObservations()
   const faults = shallowRef<Fault[]>([])
@@ -377,6 +392,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     if (source.value === 'live') {
       recorder.notePack(snapshot)
       noteWarnings(at)
+      considerAutoDetailLogRead()
     }
   }
 
@@ -628,6 +644,7 @@ export function createTelemetry(deps: TelemetryDeps) {
       await bmsLink.connect(showAllDevices)
       bmsState.value = 'live'
       source.value = 'live'
+      ringAutoReadConsidered = false
       rememberConnectedDevice()
     } catch (error) {
       bmsState.value = 'idle'
@@ -660,6 +677,7 @@ export function createTelemetry(deps: TelemetryDeps) {
       else if (source.value === 'history') leaveHistory()
       bmsState.value = 'live'
       source.value = 'live'
+      ringAutoReadConsidered = false
       rememberConnectedDevice()
     } catch (error) {
       bmsState.value = 'idle'
@@ -685,36 +703,106 @@ export function createTelemetry(deps: TelemetryDeps) {
   }
 
   /**
-   * The last stored-log read and how it went. A diagnostic and nothing more: it is not persisted,
-   * not recorded, and no instrument reads it — the only consumer is the card that shows it.
+   * The last stored-log read: what came back over the wire, and what filing it did to the pack's
+   * ledger. The transfer itself is still a measurement rather than a data model — the archive keeps
+   * the bytes it carried and nothing else about it — so the card is the only consumer of either.
    */
   const detailLog = shallowRef<DetailLogTransfer | null>(null)
   const detailLogReading = ref(false)
   const detailLogError = ref<string | null>(null)
+  const ringIngest = shallowRef<RingIngestOutcome | null>(null)
+  /** Why a read was not filed, when the reason is the pack rather than the archive. */
+  const ringFilingNote = ref<string | null>(null)
 
   /**
-   * The pack never states which zone it was installed in, so this browser's zone stands in for it.
-   * That assumption holds while the boat is browsed from the country it sits in and breaks the
-   * moment it is browsed from another one, where every stored timestamp lands out by the distance
-   * between the two zones.
+   * The pack never states which zone it was installed in, so the owner's answer stands, and this
+   * browser's zone stands in until there is one. That guess holds while the boat is browsed from
+   * the country it sits in and breaks the moment it is browsed from another one, where every
+   * resolved timestamp lands out by the distance between the two zones.
    *
    * What the decoder is given is that zone's STANDARD offset, not the offset in force right now:
    * the counter runs from the instant that was local midnight on 2020-01-01, so summer time never
-   * entered it and must not enter the subtraction that resolves it. It moves each record's
-   * `recordedAt` and nothing else; the raw counter is carried through whatever we guess here.
+   * entered it and must not enter the subtraction that resolves it.
+   *
+   * It moves what the receipt prints and nothing else. Stored rows keep the pack's raw counter and
+   * the bytes around it, so a wrong guess here corrects itself the moment the owner answers.
    */
+  async function packDecodeOffsetMinutes(deviceKey: DeviceKey | null): Promise<number> {
+    const browserGuess = browserStandardUtcOffsetMinutes(now())
+    const store = deps.historyStore()
+    if (deviceKey === null || store === null) return browserGuess
+    const ledger = await store.readRingLedger(deviceKey)
+    return ledger?.device?.packUtcOffsetMinutes ?? browserGuess
+  }
+
   async function readDetailLog(): Promise<void> {
     if (bmsState.value !== 'live' || detailLogReading.value) return
     detailLogReading.value = true
     detailLogError.value = null
+    const deviceKey = packDeviceKeyFor(device.value, bmsLink.deviceName)
     try {
-      const packUtcOffsetMinutes = browserStandardUtcOffsetMinutes(now())
-      detailLog.value = await bmsLink.readDetailLog({ packUtcOffsetMinutes })
+      const packUtcOffsetMinutes = await packDecodeOffsetMinutes(deviceKey)
+      const transfer = await bmsLink.readDetailLog({ packUtcOffsetMinutes })
+      detailLog.value = transfer
+      await fileDetailLog(transfer, deviceKey)
     } catch (error) {
       detailLogError.value = (error as Error).message
     } finally {
       detailLogReading.value = false
     }
+  }
+
+  /**
+   * Files what came back, whatever came back. A read that carried no record still journals: a pack
+   * that has stopped answering 0xA7 is only visible as a history of attempts.
+   *
+   * A pack the archive cannot name is not filed under an invented key. One would merge every
+   * unnamed pack this browser ever meets into a single ledger, and the first read would be the one
+   * that made it unrecoverable.
+   *
+   * Both refs are cleared here rather than when the read starts, so a read the link refused leaves
+   * the last one's transfer and the last one's merge figures standing together.
+   */
+  async function fileDetailLog(transfer: DetailLogTransfer, deviceKey: DeviceKey | null): Promise<void> {
+    ringIngest.value = null
+    ringFilingNote.value = null
+    if (deviceKey === null) {
+      ringFilingNote.value = UNNAMEABLE_PACK_NOTE
+      return
+    }
+    const store = deps.historyStore()
+    if (store === null) return
+
+    ringIngest.value = await store.appendRingSnapshot(ringSnapshotOf(transfer, deviceKey, now()))
+    await deps.refreshRingLedger(deviceKey)
+  }
+
+  /**
+   * Fetches the stored log once a connection, and only when this browser's copy of the ring has
+   * fallen a day behind the pack's.
+   *
+   * It waits for a cell frame rather than firing on the link going live, because a GATT connection
+   * is not yet a pack that is answering: 0xA7 goes out over a link the handshake has proved.
+   *
+   * A failure is left as the receipt's business and is not retried. The read is a convenience,
+   * nothing about the connection depends on it having worked, and a pack that refuses the opcode
+   * would otherwise be asked again on every frame it sends.
+   */
+  function considerAutoDetailLogRead(): void {
+    if (ringAutoReadConsidered || bmsState.value !== 'live' || detailLogReading.value) return
+    // The archive is probed after first paint. Until it answers there is nothing to keep current,
+    // so the connection's one chance is not spent on a store that has yet to arrive.
+    const store = deps.historyStore()
+    if (store === null) return
+    ringAutoReadConsidered = true
+    void readDetailLogIfStale(store).catch(() => undefined)
+  }
+
+  async function readDetailLogIfStale(store: HistoryStore): Promise<void> {
+    const deviceKey = packDeviceKeyFor(device.value, bmsLink.deviceName)
+    const ledger = deviceKey === null ? null : await store.readRingLedger(deviceKey)
+    if (!ringReadIsDue(ledger, now())) return
+    await readDetailLog()
   }
 
   async function startSolar(key: string): Promise<void> {
@@ -842,6 +930,8 @@ export function createTelemetry(deps: TelemetryDeps) {
     detailLog,
     detailLogReading: readonly(detailLogReading),
     detailLogError: readonly(detailLogError),
+    ringIngest,
+    ringFilingNote: readonly(ringFilingNote),
     packReach: observations.packReach,
     solarReach: observations.solarReach,
     cellReach: observations.cellReach,
@@ -886,6 +976,7 @@ function browserDeps(): TelemetryDeps {
       ? (handlers) => new BridgeSolarScan(bridgeUrl, handlers)
       : (handlers) => new VictronScanner(handlers),
     historyStore: () => attachedStore,
+    refreshRingLedger: (deviceKey) => useHistoryBrowser().refreshRingLedger(deviceKey),
     now: () => Date.now(),
     // Not derived from the wall clock: the whole point of a monotonic reading is that a clock
     // step cannot move it.

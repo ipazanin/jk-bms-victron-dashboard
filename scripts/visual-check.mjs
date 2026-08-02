@@ -21,6 +21,12 @@
  *   tests/fixtures/storedSession.json       { device, session, chunks[], meta } — one row for each
  *                                           store of `shunt.log`. Chunk columns arrive as plain
  *                                           arrays and are widened to typed arrays here.
+ *   tests/fixtures/ringLedger.json          { device, reads[], records[] } — one pack's stored ring,
+ *                                           record bytes as hex. The whole ledger is slid onto today
+ *                                           below, for the same reason and by the same rule.
+ *
+ * `tests/visualCheckSchema.spec.ts` holds the schema literals below to what `applySchema` builds, so
+ * a store this file forgets to add fails a spec rather than quietly seeding nothing.
  */
 
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -87,6 +93,9 @@ const HEIGHT_SAMPLE_MS = 250
 /** Fresh enough that the loader keeps it, old enough that the banner reads as memory. */
 const REMEMBERED_AGE_MS = 3 * 60_000
 
+/** Recent enough that the staleness hint reads as a read just taken, not as a stale copy. */
+const RING_READ_AGE_MS = 20 * 60_000
+
 const seeds = readSeeds()
 
 const failures = []
@@ -95,7 +104,7 @@ function fail(scope, message) {
   failures.push(`[${scope}] ${message}`)
 }
 
-// ── the four states the page can be in with no radios attached ────────────────
+// ── the states the page can be in with no radios attached ─────────────────────
 
 const PASSES = [
   {
@@ -162,13 +171,50 @@ const PASSES = [
   {
     name: 'stats',
     archive: true,
+    ring: true,
     remembered: true,
     hash: '#/stats',
-    ready: '[data-testid="stats-view"]',
+    ready: '[data-testid="stats-summary"]',
     check(scope, report) {
-      if (!/energy/i.test(report.text)) fail(scope, 'the energy panel did not render')
+      // The range cards, all six figures of them folded from the pack's own coulomb counter.
+      if (!/charged/i.test(report.statsText)) fail(scope, 'the charged tile did not render')
+      if (!/drawn/i.test(report.statsText)) fail(scope, 'the drawn tile did not render')
+      // The ring's cadence, which is why every energy figure on this page is a floor.
+      if (!/hourly/i.test(report.statsText)) fail(scope, 'the hourly cadence went unstated')
+      // The clock panel, which is the only place the derived wall time is accounted for.
+      if (!/clock/i.test(report.statsText)) fail(scope, 'the pack clock panel did not render')
+      if (!report.eventLabels.some((label) => label.startsWith(seeds.ringEventLabel))) {
+        fail(scope, `the seeded ring event "${seeds.ringEventLabel}" did not render`)
+      }
       if (!/device logbook/i.test(report.text)) fail(scope, 'the logbook panel did not render')
       if (!/boot/i.test(report.text)) fail(scope, 'the seeded logbook events did not render')
+      // The controller refuses its history registers, so nothing here may wait for solar data.
+      const solar = report.statsText.match(/solar|photovoltaic|\bpv\b|yield/i)
+      if (solar !== null) fail(scope, `a solar-shaped card rendered on Stats ("${solar[0]}")`)
+      checkReadButton(scope, report)
+    },
+  },
+  {
+    name: 'stats-no-ring',
+    /** Sessions on disk and no ring read yet: the state every owner starts Stats in. */
+    archive: true,
+    ring: false,
+    remembered: true,
+    hash: '#/stats',
+    ready: '[data-testid="stats-no-ring"]',
+    check(scope, report) {
+      if (report.emptyStates !== 1) {
+        fail(scope, `${report.emptyStates} empty-state panels rendered; the range section shares one`)
+      }
+      if (!/stays on the pack until it is read/i.test(report.statsText)) {
+        fail(scope, 'the empty-state sentence did not render')
+      }
+      // No axis over nothing: an empty chart asks the reader to decode a blank grid for no data.
+      if (report.statsCharts > 0) {
+        fail(scope, `${report.statsCharts} charts rendered with no ledger to draw`)
+      }
+      if (report.eventLabels.length > 0) fail(scope, 'the events card rendered with no ledger')
+      checkReadButton(scope, report)
     },
   },
   {
@@ -182,6 +228,21 @@ const PASSES = [
     },
   },
 ]
+
+/**
+ * Reads are manual with no radio attached, so the button is held to its refusal rather than driven:
+ * disabled, and saying which link is missing. A live read is hardware-in-the-loop and stays there.
+ */
+function checkReadButton(scope, report) {
+  if (report.readStoredLog === null) {
+    fail(scope, 'no stored-log read button rendered')
+    return
+  }
+  if (!report.readStoredLog.disabled) fail(scope, 'the read button was live with no BMS connected')
+  if (!/connect the bms first/i.test(report.statsText)) {
+    fail(scope, 'the read button gave no reason for being disabled')
+  }
+}
 
 mkdirSync(SCREENSHOT_DIR, { recursive: true })
 
@@ -423,8 +484,45 @@ async function seedOrigin(page, pass) {
     seedStores,
     pass.remembered ? { ...seeds.remembered, capturedAt: Date.now() - REMEMBERED_AGE_MS } : null,
     pass.archive ? seeds.archive : null,
+    pass.ring ? slideRingOntoToday(seeds.ring) : null,
   )
   if (pass.hash) await page.evaluate((hash) => (window.location.hash = hash), pass.hash)
+}
+
+/**
+ * Moves the whole ledger — the read's wall clock and the pack's own counters together — so it ends
+ * on the day the check runs.
+ *
+ * A fixed stamp would fall out of every range preset within a week and leave the cards printing em
+ * dashes, which is the same reason `capturedAt` is restamped. The counters travel with it because
+ * the page derives wall time from the gap between them and the read: shift only one and the receipt
+ * reports a pack whose clock runs a year fast. Shifting both leaves the pack exactly the 7 h it was
+ * measured at, and leaves every stored row's counter still the little-endian uint32 in its bytes.
+ */
+function slideRingOntoToday(ring) {
+  const shiftSeconds = Math.round((Date.now() - RING_READ_AGE_MS - ring.reads[0].observedAt) / 1000)
+  const shiftMs = shiftSeconds * 1000
+
+  return {
+    ...ring,
+    reads: ring.reads.map((read) => ({
+      ...read,
+      observedAt: read.observedAt + shiftMs,
+      newestSampleCounter:
+        read.newestSampleCounter === null ? null : read.newestSampleCounter + shiftSeconds,
+    })),
+    records: ring.records.map((record) => {
+      const counter = record.packClockSeconds + shiftSeconds
+      const head = Buffer.alloc(4)
+      head.writeUInt32LE(counter)
+      return {
+        ...record,
+        packClockSeconds: counter,
+        bytes: head.toString('hex') + record.bytes.slice(8),
+        firstReadAt: record.firstReadAt + shiftMs,
+      }
+    }),
+  }
 }
 
 /**
@@ -432,10 +530,10 @@ async function seedOrigin(page, pass) {
  * on the app having opened the database first; it is deliberately the same shape the adapter
  * builds, and a drift between the two shows up as a Log that lists nothing.
  */
-async function seedStores(remembered, archive) {
+async function seedStores(remembered, archive, ring) {
   const DATABASE = 'shunt.log'
-  const VERSION = 2
-  const STORES = ['sessions', 'chunks', 'devices', 'meta', 'warnings']
+  const VERSION = 5
+  const STORES = ['sessions', 'chunks', 'devices', 'meta', 'warnings', 'ringRecords', 'ringReads']
 
   // JSON carries no typed arrays. Each column is widened back to the width the archive stores it
   // at, so what the page reads back is byte-for-byte what a recording would have left behind.
@@ -503,6 +601,16 @@ async function seedStores(remembered, archive) {
 
       const warnings = created.createObjectStore('warnings', { keyPath: ['sessionId', 'seq'] })
       warnings.createIndex('byTime', 'at')
+
+      const ringRecords = created.createObjectStore('ringRecords', {
+        keyPath: ['deviceKey', 'seq'],
+      })
+      ringRecords.createIndex('byDevice', 'deviceKey')
+
+      const ringReads = created.createObjectStore('ringReads', {
+        keyPath: ['deviceKey', 'observedAt'],
+      })
+      ringReads.createIndex('byDevice', 'deviceKey')
     }
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
@@ -514,7 +622,10 @@ async function seedStores(remembered, archive) {
     transaction.onerror = () => reject(transaction.error)
     transaction.onabort = () => reject(transaction.error)
 
-    transaction.objectStore('devices').put(archive.device)
+    // One pack, named once: the ledger files under the same device key the sessions group by, so
+    // the ring's device row is the archive's with the owner's two clock answers written onto it.
+    const device = ring === null ? archive.device : { ...archive.device, ...ring.device }
+    transaction.objectStore('devices').put(device)
     transaction.objectStore('sessions').put(archive.session)
     transaction.objectStore('meta').put(archive.meta)
     // One warning tied to the seeded session, so the Warnings view renders a row with its readings.
@@ -554,6 +665,18 @@ async function seedStores(remembered, archive) {
       }
       transaction.objectStore('chunks').put(widened)
     }
+
+    if (ring === null) return
+    for (const read of ring.reads) transaction.objectStore('ringReads').put(read)
+    // JSON carries no typed arrays here either: a record's 24 bytes arrive as hex and are widened
+    // back to the Uint8Array the adapter stores, which is what the page's decoder reads.
+    for (const record of ring.records) {
+      const bytes = new Uint8Array(record.bytes.length / 2)
+      for (let at = 0; at < bytes.length; at += 1) {
+        bytes[at] = parseInt(record.bytes.slice(at * 2, at * 2 + 2), 16)
+      }
+      transaction.objectStore('ringRecords').put({ ...record, bytes })
+    }
   })
   database.close()
 }
@@ -572,6 +695,14 @@ function readPage(page) {
     const ribbon = document.querySelector('[data-testid="session-ribbon"] path.trace.pack')
     const figures = [...document.querySelectorAll('[data-testid="shunt-ledger"] text.value')]
 
+    const stats = document.querySelector('[data-testid="stats-view"]')
+    // Read out of the DOM rather than off the page's text: the fired labels live in a collapsed
+    // disclosure and under the chart cursor, neither of which `innerText` reaches.
+    const fired = [...document.querySelectorAll('[data-testid="stats-events-per-day"] .fired')]
+    const readButton = [...document.querySelectorAll('[data-testid="stats-view"] button')].find(
+      (button) => /read stored log/i.test(button.textContent ?? ''),
+    )
+
     return {
       scrollWidth: doc.scrollWidth,
       clientWidth: doc.clientWidth,
@@ -587,6 +718,11 @@ function readPage(page) {
       sessionRows: document.querySelectorAll('a[href^="#/log/"]').length,
       ledgerFigures: figures.map((node) => node.textContent.trim()).filter(Boolean),
       ribbonPath: ribbon?.getAttribute('d')?.trim() ?? '',
+      statsText: stats?.innerText ?? '',
+      statsCharts: document.querySelectorAll('[data-testid="stats-view"] svg').length,
+      emptyStates: document.querySelectorAll('[data-testid="stats-no-ring"]').length,
+      eventLabels: fired.map((node) => node.textContent.replace(/\s+/g, ' ').trim()),
+      readStoredLog: readButton === undefined ? null : { disabled: readButton.disabled },
     }
   })
 }
@@ -594,6 +730,7 @@ function readPage(page) {
 function readSeeds() {
   const remembered = readFixture('rememberedSession.json')
   const archive = readFixture('storedSession.json')
+  const ring = readFixture('ringLedger.json')
 
   for (const key of ['device', 'session', 'chunks', 'meta']) {
     if (archive[key] === undefined) {
@@ -608,12 +745,23 @@ function readSeeds() {
     console.error(`storedSession.json has a chunk for "${stray.sessionId}", not "${archive.session.id}".`)
     process.exit(1)
   }
+  // Sessions and a ring ledger are the same pack seen two ways, so they file under one device key.
+  // Two keys would seed a second boat, and Stats would open a pack selector over it.
+  const foreign = ring.records.find((record) => record.deviceKey !== archive.device.key)
+  if (ring.deviceKey !== archive.device.key || foreign !== undefined) {
+    console.error(
+      `ringLedger.json files under "${foreign?.deviceKey ?? ring.deviceKey}", not "${archive.device.key}".`,
+    )
+    process.exit(1)
+  }
 
   return {
     remembered,
     archive,
+    ring,
     sessionId: archive.session.id,
     deviceName: archive.device.userLabel ?? archive.device.defaultLabel,
+    ringEventLabel: ring.expected.eventLabel,
   }
 }
 

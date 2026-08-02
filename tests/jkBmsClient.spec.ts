@@ -536,6 +536,38 @@ describe('JkBmsClient stored detail log', () => {
     await client.disconnect()
   })
 
+  /**
+   * The archive files the bytes, and it reads the receipt's decoded records off the same positions.
+   * The two lists drifting apart by so much as one record would file a burst under ring indices it
+   * never occupied, which the merge would then align on and store as real history.
+   */
+  it('carries each record’s own bytes alongside the reading it made of them', async () => {
+    vi.useFakeTimers()
+    const client = await liveClient()
+    const firstPage = detailLogFrame(0, 730, [
+      { rtcSeconds: 1_000, packVoltage: 13.42, current: -8.2 },
+      { rtcSeconds: 4_601, packVoltage: 13.38, current: 20.8 },
+    ])
+    const secondPage = detailLogFrame(1, 732, [{ rtcSeconds: 8_202, packVoltage: 13.51, current: 0 }])
+
+    const reading = client.readDetailLog(PACK_CLOCK)
+    mock.notify(concat(firstPage, secondPage))
+    await vi.advanceTimersByTimeAsync(2_100)
+    const transfer = await reading
+
+    expect(transfer.rawRecords).toHaveLength(transfer.records.length)
+    transfer.rawRecords.forEach((raw, position) => {
+      expect(raw.index).toBe(transfer.records[position].index)
+      expect(raw.bytes).toHaveLength(24)
+      // Byte 0..3 is the pack's own counter, which is what the decoder read the instant off.
+      expect(new DataView(raw.bytes.buffer, raw.bytes.byteOffset).getUint32(0, true)).toBe(
+        (transfer.records[position].packClockMs - Date.UTC(2020, 0, 1)) / 1_000,
+      )
+    })
+
+    await client.disconnect()
+  })
+
   it('joins a second press to the read already running rather than starting a rival one', async () => {
     vi.useFakeTimers()
     const client = await liveClient()

@@ -1,20 +1,21 @@
 <script setup lang="ts">
 /**
- * Energy in against energy out, per bucket, as paired bars over one shared time axis.
+ * Charge into the pack against charge out of it, per bucket, as paired bars over one shared time
+ * axis.
  *
- * Two series only — solar delivered (IN) and house drawn (OUT) — so they share a single watt-hour
- * axis and stand side by side in each bucket, the reading the eye is meant to make being the gap
- * between the two bars. The bucket is the range's own: a week reads day-by-day, a year week-by-week,
- * the whole archive month-by-month. A bucket no session fell in carries no bars — a gap in the
- * timeline, never a fabricated zero.
+ * Two series only, so they share a single watt-hour axis and stand side by side in each bucket, the
+ * reading the eye is meant to make being the gap between the two bars. The bucket is the range's
+ * own: a week reads day-by-day, a year week-by-week, the whole ledger month-by-month. A bucket the
+ * ring never covered carries no bars — a gap in the timeline, never a fabricated zero.
  *
- * Out is exact; in is solar amp-hours valued at the pack's voltage, so the caption says "estimated"
- * whenever the estimate is on rather than letting a derived figure pass for a measured one.
+ * Both series come from the pack's own coulomb counter, valued at the mean pack voltage across each
+ * interval. The counter is sampled hourly, so charge and discharge that cancel inside one hour are
+ * invisible to it and every bar is a floor rather than a total. The caption says so whenever the
+ * `estimated` flag is on, rather than letting a derived figure pass for a measured one.
  */
 import { computed, ref } from 'vue'
 
 import type { BucketUnit, EnergyBucket } from '../../application/history/statsRange'
-import { hashOf } from '../../application/route'
 import { useMeasuredWidth } from '../../application/useMeasuredWidth'
 import { extentOf, linearScale, maxMagnitudeOf, positionOn, signedAxis } from '../../domain/history/geometry'
 
@@ -39,8 +40,6 @@ const CORNER = 4
 const COLUMN_MIN_PX = 26
 const KWH_THRESHOLD_WH = 1000
 const DAY_MS = 86_400_000
-
-const logHref = hashOf({ name: 'log' })
 
 const plot = ref<Element | null>(null)
 const plotWidth = useMeasuredWidth(plot)
@@ -296,21 +295,21 @@ const XLABEL_HEIGHT = XLABEL_H
   <section class="card" data-testid="stats-energy-inout">
     <header class="head">
       <div class="titles">
-        <h3 class="plate">Energy in vs out</h3>
+        <h3 class="plate">Charge in vs out</h3>
         <p class="muted">
-          Solar delivered against boat drawn, per {{ unit }}.<template v-if="estimated"> Solar energy
-          estimated from amp-hours at pack voltage.</template>
+          Into the pack against out of it, per {{ unit }}, from the pack's own counter at the
+          interval's mean voltage.<template v-if="estimated"> Sampled hourly, so each bar is an
+          hourly floor.</template>
         </p>
       </div>
       <div class="legend" aria-hidden="true">
-        <span class="key"><i class="sw solar" />In</span>
-        <span class="key"><i class="sw house" />Out</span>
+        <span class="key"><i class="sw charge" />In</span>
+        <span class="key"><i class="sw draw" />Out</span>
       </div>
     </header>
 
     <p v-if="recordedCount === 0" class="state copy">
-      No energy recorded in this range. Days appear as you record sessions in the
-      <a :href="logHref">log</a>.
+      Nothing on record in this range. Buckets fill as the pack's stored log is read.
     </p>
 
     <template v-else>
@@ -320,7 +319,7 @@ const XLABEL_HEIGHT = XLABEL_H
             :viewBox="`0 0 ${plotWidth} ${PLOT_HEIGHT}`"
             preserveAspectRatio="none"
             role="img"
-            :aria-label="`Energy in versus out per ${unit}, in ${unitLabel}. Solar in and boat out as paired bars.`"
+            :aria-label="`Charge into the pack versus out of it per ${unit}, in ${unitLabel}, as paired bars.`"
           >
             <rect
               v-if="activeIndex !== null"
@@ -338,8 +337,8 @@ const XLABEL_HEIGHT = XLABEL_H
             </template>
 
             <template v-for="bar in view.bars" :key="bar.index">
-              <path v-if="bar.inPath" :d="bar.inPath" class="col solar" />
-              <path v-if="bar.outPath" :d="bar.outPath" class="col house" />
+              <path v-if="bar.inPath" :d="bar.inPath" class="col charge" />
+              <path v-if="bar.outPath" :d="bar.outPath" class="col draw" />
             </template>
           </svg>
 
@@ -381,12 +380,12 @@ const XLABEL_HEIGHT = XLABEL_H
         <template v-if="active">
           <span class="when">{{ active.when }}</span>
           <template v-if="active.recorded">
-            <span class="cue"><i class="sw solar" /><b>{{ active.inEnergy }}</b> <em>in</em></span>
-            <span class="cue"><i class="sw house" /><b>{{ active.outEnergy }}</b> <em>out</em></span>
+            <span class="cue"><i class="sw charge" /><b>{{ active.inEnergy }}</b> <em>in</em></span>
+            <span class="cue"><i class="sw draw" /><b>{{ active.outEnergy }}</b> <em>out</em></span>
           </template>
           <span v-else class="hint">nothing recorded</span>
         </template>
-        <span v-else class="hint">Hover or focus a {{ unit }} for its energy in and out.</span>
+        <span v-else class="hint">Hover or focus a {{ unit }} for its charge in and out.</span>
       </p>
     </template>
 
@@ -465,19 +464,15 @@ const XLABEL_HEIGHT = XLABEL_H
   flex: none;
 }
 
-.sw.solar {
-  background: var(--solar);
+.sw.charge {
+  background: var(--pack);
 }
-.sw.house {
+.sw.draw {
   background: var(--house);
 }
 
 .state {
   margin: 0.5rem 0 0;
-}
-
-.state a {
-  color: var(--pack-ink);
 }
 
 /* The wide case scrolls inside this box; the page body never does. */
@@ -516,10 +511,10 @@ const XLABEL_HEIGHT = XLABEL_H
 }
 
 /* Solid identity: the hue is the whole mark, no fill wash. */
-.col.solar {
-  fill: var(--solar);
+.col.charge {
+  fill: var(--pack);
 }
-.col.house {
+.col.draw {
   fill: var(--house);
 }
 

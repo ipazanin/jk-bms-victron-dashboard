@@ -21,6 +21,9 @@
  */
 
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../domain/bms/types'
+import type { RingMergeOutcome } from '../../domain/history/RingMergeOutcome'
+import type { RingSnapshot } from '../../domain/history/RingSnapshot'
+import type { StoredRingLedger } from '../../domain/history/StoredRingLedger'
 import type {
   CoverageRun,
   DeviceKey,
@@ -38,6 +41,15 @@ import type {
   WarningRecord,
 } from '../../domain/history/types'
 import type { SolarReading } from '../../domain/solar/types'
+
+/**
+ * The whole ledger of one pack, as the archive hands it over.
+ *
+ * Declared in the domain because `ringClockContextOf` takes it and every member of it is a domain
+ * shape; re-exported here because the port is the seam every caller above reaches it through, and a
+ * second import path for one type is a second place for the two to drift.
+ */
+export type { StoredRingLedger }
 
 export type HistoryUnavailableReason =
   /** The API is absent: Safari private browsing, and several in-app browsers. */
@@ -68,6 +80,42 @@ export interface CommitOutcome {
   /** Wall clock of the first row that survived a truncation, or null when nothing was cut. */
   readonly truncatedFrom: number | null
   readonly failure: HistoryUnavailableReason | null
+}
+
+/**
+ * What one stored-log read did to the pack's ledger.
+ *
+ * The fold's own five figures, widened with the four only a store can answer: whether the write
+ * happened at all, what the ledger holds afterwards, what the budget took, and the reason when the
+ * archive was unusable. Keeping the two apart is what lets the fold stay a pure function over bytes
+ * with no notion of storage, availability or budget.
+ *
+ * A read that carried no record still ingests: the journal row is the evidence, and a pack that
+ * stopped answering 0xA7 is exactly what a stored history of attempts reveals.
+ */
+export interface RingIngestOutcome extends RingMergeOutcome {
+  readonly stored: boolean
+  /** Rows this pack's ledger holds after the write. */
+  readonly totalRecords: number
+  /** Rows the prune this write ran gave up — from this ledger, and from any dropped whole. */
+  readonly prunedRecords: number
+  readonly failure: HistoryUnavailableReason | null
+}
+
+/**
+ * The list row for the pack selector: one line per ledger, carrying no record.
+ *
+ * The two counters are the pack's own clock face and not wall time, so this row is honest without
+ * a clock context behind it. A ledger holding no record — a pack read once that answered nothing —
+ * still lists, with zeroes, so the receipt for that read is reachable.
+ */
+export interface RingLedgerSummary {
+  readonly deviceKey: DeviceKey
+  readonly label: string
+  readonly records: number
+  readonly lastReadAt: number
+  readonly oldestPackClockSeconds: number
+  readonly newestPackClockSeconds: number
 }
 
 /**
@@ -213,12 +261,53 @@ export interface HistoryStore {
   renameDevice(key: DeviceKey, label: string | null): Promise<DeviceRecord | null>
 
   /**
+   * Folds one stored-log read into the pack's own ledger and journals it, as one write. Idempotent:
+   * a read filed twice appends nothing the second time, because the fold recognises what it already
+   * holds. Never throws — a refused write comes back as `stored: false` with its reason.
+   *
+   * Ring rows sit outside the sample budget entirely. This moves neither `HistoryMeta.totalSamples`
+   * nor any session's `sealedSamples`, and session pruning never sees a ring row. The two budgets
+   * cannot evict each other, which is the whole reason the ledger is its own store rather than a
+   * session dressed up as one.
+   */
+  appendRingSnapshot(snapshot: RingSnapshot): Promise<RingIngestOutcome>
+  /**
+   * One pack's whole ledger, seq-ascending, with its journal and device row. Null when this browser
+   * has neither stored a record for the key nor journalled a read against it.
+   *
+   * Whole rather than windowed: wall time is derived through a correction that can change, so an
+   * index over wall time would freeze today's correction into the archive.
+   */
+  readRingLedger(deviceKey: DeviceKey): Promise<StoredRingLedger | null>
+  /** Every pack this browser has read a ring from, most recently read first. */
+  listRingLedgers(): Promise<readonly RingLedgerSummary[]>
+  /**
+   * Read-and-write in one transaction, shaped like renameDevice, so two tabs cannot interleave into
+   * a lost update. Null when no device row exists — a ledger can outlive one, and there is nothing
+   * to hang the owner's answer on until the pack is seen again.
+   */
+  setPackClock(
+    deviceKey: DeviceKey,
+    clock: {
+      readonly utcOffsetMinutes: number | null
+      readonly aheadSeconds: number | null
+    },
+  ): Promise<DeviceRecord | null>
+  /** Rows and journal die together. The device row survives: it is the label, and the owner's. */
+  deleteRingLedger(deviceKey: DeviceKey): Promise<void>
+
+  /**
    * Runs once on open. Closes sessions a killed tab left open, deletes the ones that recorded
    * nothing, and sweeps chunks whose session row is gone. Never destructive to a session that
    * still holds rows — a merely frozen tab must find its work intact when it thaws.
    */
   recover(now: number): Promise<{ readonly closed: number; readonly orphansRemoved: number }>
-  usage(): Promise<{ readonly totalSamples: number; readonly sessions: number }>
+  /** Ring rows are reported on their own line because they are on their own budget. */
+  usage(): Promise<{
+    readonly totalSamples: number
+    readonly sessions: number
+    readonly ringRecords: number
+  }>
   /**
    * Fires when another tab changed the archive. Returns an unsubscribe, like watchAdapter.
    *
@@ -279,8 +368,23 @@ export function unavailableHistoryStore(reason: HistoryUnavailableReason): Histo
     // The row it was handed, so a caller may still name the device on screen for this page load.
     upsertDevice: async (record: DeviceRecord) => record,
     renameDevice: async () => null,
+    appendRingSnapshot: async () => ({
+      stored: false,
+      appended: 0,
+      overlap: 0,
+      ringShift: null,
+      gapDeclared: false,
+      runsDiscarded: 0,
+      totalRecords: 0,
+      prunedRecords: 0,
+      failure: reason,
+    }),
+    readRingLedger: async () => null,
+    listRingLedgers: async () => [],
+    setPackClock: async () => null,
+    deleteRingLedger: async () => undefined,
     recover: async () => ({ closed: 0, orphansRemoved: 0 }),
-    usage: async () => ({ totalSamples: 0, sessions: 0 }),
+    usage: async () => ({ totalSamples: 0, sessions: 0, ringRecords: 0 }),
     watch: () => () => undefined,
     close: () => undefined,
   }

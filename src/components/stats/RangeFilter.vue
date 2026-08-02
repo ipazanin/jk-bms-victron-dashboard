@@ -1,29 +1,38 @@
 <script setup lang="ts">
 /**
- * The one filter row that scopes every card below it on the Stats page.
+ * The one filter row that scopes every card below it on the Stats page: which pack, and which
+ * window of its stored log.
  *
  * A radio group, not a tab list: the segments narrow the SAME data to a different window — they
  * never swap in a different panel — which is exactly the distinction ARIA draws between `radiogroup`
  * and `tablist`. Roving tabindex keeps only the checked segment on the Tab order, so arrowing
  * between the options behaves like a native `<input type="radio">` group.
  *
+ * There is no Hour preset. The pack writes at most one record an hour, so an hour would be empty by
+ * construction and would read on screen as a bug rather than as an empty hour; Custom covers a short
+ * span for anyone who wants one.
+ *
+ * The pack selector appears only when this browser holds more than one ledger. With one it prints
+ * the pack's name, because a control with a single option is a control that cannot be used.
+ *
  * 'Custom' reveals two date inputs; the window they define is owned by the parent (StatsView), so the
- * filter stays a pure control — it announces a range and a pair of dates, it holds no state of its own.
+ * filter stays a pure control — it announces a range, a pair of dates and a pack, and holds no state
+ * of its own.
  */
 import { computed } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
 
+import type { RingLedgerSummary } from '../../application/history/port'
 import type { RangeKind } from '../../application/history/statsRange'
-import type { TimeWindow } from '../../domain/history/types'
+import type { DeviceKey, TimeWindow } from '../../domain/history/types'
 
 interface RangeOption {
   readonly kind: RangeKind
   readonly label: string
 }
 
-/** Fixed order; the presets roll back from now, then All spans the archive, then Custom opens dates. */
+/** Fixed order; the presets roll back from now, then All spans the ledger, then Custom opens dates. */
 const OPTIONS: readonly RangeOption[] = [
-  { kind: 'hour', label: 'Hour' },
   { kind: 'day', label: 'Day' },
   { kind: 'week', label: 'Week' },
   { kind: 'month', label: 'Month' },
@@ -31,8 +40,26 @@ const OPTIONS: readonly RangeOption[] = [
   { kind: 'custom', label: 'Custom' },
 ]
 
-const props = defineProps<{ modelValue: RangeKind; custom: TimeWindow }>()
-const emit = defineEmits<{ 'update:modelValue': [RangeKind]; 'update:custom': [TimeWindow] }>()
+const props = defineProps<{
+  modelValue: RangeKind
+  custom: TimeWindow
+  /** Every pack this browser has read a ring from, most recently read first. */
+  ledgers: readonly RingLedgerSummary[]
+  /** The ledger the cards below are folding, or null before one has been chosen. */
+  pack: DeviceKey | null
+}>()
+const emit = defineEmits<{
+  'update:modelValue': [RangeKind]
+  'update:custom': [TimeWindow]
+  'update:pack': [DeviceKey]
+}>()
+
+const onlyPack = computed(() => (props.ledgers.length === 1 ? props.ledgers[0] : null))
+const hasChoice = computed(() => props.ledgers.length > 1)
+
+function onPack(event: Event): void {
+  emit('update:pack', (event.target as HTMLSelectElement).value as DeviceKey)
+}
 
 /** Imperative focus targets for the roving-tabindex keyboard handler below; not reactive state. */
 const buttons: (HTMLButtonElement | null)[] = []
@@ -114,6 +141,18 @@ function onTo(event: Event): void {
 
 <template>
   <div class="filter">
+    <div v-if="hasChoice" class="pack-picker" data-testid="stats-pack-picker">
+      <label class="pack-label" for="stats-pack">Pack</label>
+      <select id="stats-pack" class="pack-select" :value="pack ?? ''" @change="onPack">
+        <option v-for="ledger in ledgers" :key="ledger.deviceKey" :value="ledger.deviceKey">
+          {{ ledger.label }}
+        </option>
+      </select>
+    </div>
+    <p v-else-if="onlyPack" class="pack-name muted" data-testid="stats-pack-name">
+      {{ onlyPack.label }}
+    </p>
+
     <div
       class="range-filter"
       role="radiogroup"
@@ -157,6 +196,45 @@ function onTo(event: Event): void {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+/* Which pack, above the window that scopes it. */
+.pack-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.pack-label {
+  font-family: var(--font-label);
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+.pack-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--tap);
+  padding: 0 0.6rem;
+  background: var(--raised);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-sm);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 0.875rem;
+}
+
+.pack-select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.pack-name {
+  margin: 0;
+  font-family: var(--font-label);
+  letter-spacing: 0.03em;
 }
 
 .range-filter {

@@ -49,6 +49,7 @@
  * record drifts a second per sample.
  */
 
+import type { RingRecordBytes } from '../history/RingRecordBytes'
 import type { DetailLogFrameHeader } from './DetailLogFrameHeader'
 import type { DetailLogOutcome } from './DetailLogOutcome'
 import { logbookLabel } from './logbook'
@@ -67,7 +68,7 @@ const RECORD_STRIDE = 24
 const MAX_RECORDS_PER_FRAME = 12
 
 /** Where the pack's RTC counter starts, as a fixed instant so that no host clock can move it. */
-const RTC_EPOCH_UTC_MS = Date.UTC(2020, 0, 1)
+export const RTC_EPOCH_UTC_MS = Date.UTC(2020, 0, 1)
 
 const MILLISECONDS_PER_MINUTE = 60_000
 
@@ -143,6 +144,17 @@ function eventLabelFor(code: number): string | null {
   return logbookLabel(code)
 }
 
+function packUtcOffsetMsOf(packUtcOffsetMinutes: number): number {
+  if (
+    !Number.isFinite(packUtcOffsetMinutes) ||
+    packUtcOffsetMinutes < LOWEST_REAL_UTC_OFFSET_MINUTES ||
+    packUtcOffsetMinutes > HIGHEST_REAL_UTC_OFFSET_MINUTES
+  ) {
+    throw new Error(`pack UTC offset of ${packUtcOffsetMinutes} minutes is not an offset any zone uses`)
+  }
+  return packUtcOffsetMinutes * MILLISECONDS_PER_MINUTE
+}
+
 function readRecord(data: DataView, base: number, index: number, packUtcOffsetMs: number): DetailLogRecord {
   const statusBits = data.getUint8(base + STATUS_BITS)
   const eventCode = data.getUint8(base + EVENT_CODE)
@@ -175,6 +187,58 @@ function readRecord(data: DataView, base: number, index: number, packUtcOffsetMs
 }
 
 /**
+ * One 24-byte record, decoded. `decodeDetailLog` is this function in a loop.
+ *
+ * It exists as its own entry point because the archive stores a record as the bytes the frame
+ * carried rather than as decoded fields, and reads them back one at a time. Storing bytes and
+ * decoding here is what keeps a correction to any offset above reinterpreting rows already on disk.
+ *
+ * `index` is carried through untouched: the caller knows where the record sat, and nothing in the
+ * 24 bytes says.
+ */
+export function decodeDetailLogRecord(
+  bytes: Uint8Array,
+  index: number,
+  { packUtcOffsetMinutes }: { readonly packUtcOffsetMinutes: number },
+): DetailLogRecord {
+  const packUtcOffsetMs = packUtcOffsetMsOf(packUtcOffsetMinutes)
+  if (bytes.length < RECORD_STRIDE) {
+    throw new Error(`a detail log record is ${RECORD_STRIDE} bytes; got ${bytes.length}`)
+  }
+
+  const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  return readRecord(data, 0, index, packUtcOffsetMs)
+}
+
+/**
+ * Where each of a frame's records sits and what it is made of, without decoding a byte.
+ *
+ * The slices are copies rather than views onto the frame. A view keeps the whole 300-byte frame
+ * alive behind every 24-byte record, and structured-cloning one into the archive clones that frame
+ * rather than the record — so a copy here is what keeps a stored row the size it claims to be.
+ *
+ * `decodeDetailLog` is this function put through the record decoder, which is what makes the two
+ * lists a caller keeps in lockstep exactly as long as each other whatever a frame's paging says.
+ */
+export function readDetailLogRecordBytes(frame: Uint8Array): RingRecordBytes[] {
+  const data = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
+  const firstIndex = data.getUint16(FIRST_RECORD_INDEX, true)
+  const declared = data.getUint8(RECORD_COUNT)
+  if (declared > MAX_RECORDS_PER_FRAME) {
+    throw new Error(`detail log frame claims ${declared} records; a frame holds at most ${MAX_RECORDS_PER_FRAME}`)
+  }
+
+  const records: RingRecordBytes[] = []
+  for (let position = 0; position < declared; position += 1) {
+    const base = RECORD_BASE + position * RECORD_STRIDE
+    // Never read into the trailing checksum or past a short frame.
+    if (base + RECORD_STRIDE > frame.length - 1) break
+    records.push({ index: firstIndex + position, bytes: frame.slice(base, base + RECORD_STRIDE) })
+  }
+  return records
+}
+
+/**
  * Reads the records one frame carries, keyed by their position in the device's ring.
  *
  * `packUtcOffsetMinutes` is signed the way a zone is written rather than the way JavaScript reports
@@ -191,30 +255,11 @@ export function decodeDetailLog(
   frame: Uint8Array,
   { packUtcOffsetMinutes }: { readonly packUtcOffsetMinutes: number },
 ): DetailLogRecord[] {
-  if (
-    !Number.isFinite(packUtcOffsetMinutes) ||
-    packUtcOffsetMinutes < LOWEST_REAL_UTC_OFFSET_MINUTES ||
-    packUtcOffsetMinutes > HIGHEST_REAL_UTC_OFFSET_MINUTES
-  ) {
-    throw new Error(`pack UTC offset of ${packUtcOffsetMinutes} minutes is not an offset any zone uses`)
-  }
+  packUtcOffsetMsOf(packUtcOffsetMinutes)
 
-  const data = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
-  const firstIndex = data.getUint16(FIRST_RECORD_INDEX, true)
-  const declared = data.getUint8(RECORD_COUNT)
-  if (declared > MAX_RECORDS_PER_FRAME) {
-    throw new Error(`detail log frame claims ${declared} records; a frame holds at most ${MAX_RECORDS_PER_FRAME}`)
-  }
-
-  const packUtcOffsetMs = packUtcOffsetMinutes * MILLISECONDS_PER_MINUTE
-  const records: DetailLogRecord[] = []
-  for (let position = 0; position < declared; position += 1) {
-    const base = RECORD_BASE + position * RECORD_STRIDE
-    // Never read into the trailing checksum or past a short frame.
-    if (base + RECORD_STRIDE > frame.length - 1) break
-    records.push(readRecord(data, base, firstIndex + position, packUtcOffsetMs))
-  }
-  return records
+  return readDetailLogRecordBytes(frame).map((record) =>
+    decodeDetailLogRecord(record.bytes, record.index, { packUtcOffsetMinutes }),
+  )
 }
 
 /**

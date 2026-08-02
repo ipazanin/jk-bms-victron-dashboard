@@ -2,78 +2,74 @@
 /**
  * The active range's headline figures — six tiles, no plot, so no hover layer.
  *
- * A range that recorded nothing is not the same claim as a range that recorded exactly zero: the
- * energy, pack-net and recorded-time figures fall back to an em dash rather than asserting a flat
- * reading nobody took. Deepest SoC carries its own null independently of that gate, because a
- * session can run with no plausible SoC sample even inside a range that otherwise recorded plenty.
- * The warnings total is likewise independent: it is tallied from the warnings inside the precise
- * window and is exact whether or not any day-bucket landed, so it prints the real count rather than
- * an em dash even when no energy was recorded.
+ * Every figure is the pack's own. A range the ring never covered is not the same claim as a range
+ * that covered zero, so the three figures folded across records fall back to an em dash rather than
+ * asserting a reading nobody took. The three extremes carry their own nulls independently of that
+ * gate: a window can hold records whose cell extremes never separated. The event total is exact
+ * whether or not anything else landed, so it prints its real count — including zero.
  */
 import { computed } from 'vue'
 
-import { ampHours, hours, kilowattHours } from '../../application/format'
-import type { RangeSummary } from '../../application/history/statsRange'
+import { ampHours, hours } from '../../application/format'
+import type { RingRangeSummary } from '../../application/history/ringRange'
 
-const props = defineProps<{ summary: RangeSummary }>()
+const props = defineProps<{ summary: RingRangeSummary }>()
 
-/** `days` counts recorded buckets, not calendar days spanned — zero of them is the honest "nothing
- *  on record for this window" the other sums cannot distinguish from their own zero. */
-const isEmpty = computed(() => props.summary.days === 0)
+const MS_PER_HOUR = 3_600_000
 
-const energyIn = computed(() => (isEmpty.value ? '—' : ampHours(props.summary.solarAh, 0)))
-const energyOut = computed(() => (isEmpty.value ? '—' : kilowattHours(props.summary.houseWh / 1000)))
-const packNet = computed(() => (isEmpty.value ? '—' : signedAmpHours(props.summary.packAh)))
+/** No record in the window is the honest "the ring covered nothing here" the sums cannot express. */
+const isEmpty = computed(() => props.summary.records === 0)
 
-const deepestSoc = computed(() => {
-  const soc = props.summary.deepestSoc
-  return soc === null ? '—' : `${soc}%`
+const onRecord = computed(() =>
+  isEmpty.value ? '—' : hours(props.summary.coveredMs / MS_PER_HOUR),
+)
+const charged = computed(() => (isEmpty.value ? '—' : ampHours(props.summary.chargedAh, 0)))
+const drawn = computed(() => (isEmpty.value ? '—' : ampHours(props.summary.drawnAh, 0)))
+
+const deepestCharge = computed(() => {
+  const ratio = props.summary.deepestChargeRatio
+  return ratio === null ? '—' : `${Math.round(ratio * 100)}%`
 })
 
-const warningsTotal = computed(() => props.summary.errors.total)
-const warnings = computed(() => `${warningsTotal.value}`)
-const hasWarnings = computed(() => warningsTotal.value > 0)
+const cellSpread = computed(() => {
+  const spread = props.summary.widestCellSpreadMv
+  return spread === null ? '—' : `${spread} mV`
+})
 
-const recorded = computed(() => (isEmpty.value ? '—' : hours(props.summary.recordedMs / 3_600_000)))
-
-/** Signed amp-hours at whole precision, the sign decided after rounding so a net that rounds flat
- *  reads '0 Ah' rather than the meaningless '−0 Ah'. */
-function signedAmpHours(value: number): string {
-  const rounded = Math.round(value)
-  return `${rounded === 0 ? 0 : rounded} Ah`
-}
+const events = computed(() => `${props.summary.events}`)
+const hasEvents = computed(() => props.summary.events > 0)
 </script>
 
 <template>
   <dl class="tiles" data-testid="stats-summary" aria-label="Range summary">
     <div class="tile">
-      <dt class="label"><i class="dot solar" aria-hidden="true" />Energy in</dt>
-      <dd class="figure secondary-figure">{{ energyIn }}</dd>
+      <dt class="label">Hours on record</dt>
+      <dd class="figure secondary-figure">{{ onRecord }}</dd>
     </div>
 
     <div class="tile">
-      <dt class="label"><i class="dot house" aria-hidden="true" />Energy out</dt>
-      <dd class="figure secondary-figure">{{ energyOut }}</dd>
+      <dt class="label"><i class="dot charge" aria-hidden="true" />Charged</dt>
+      <dd class="figure secondary-figure">{{ charged }}</dd>
     </div>
 
     <div class="tile">
-      <dt class="label"><i class="dot pack" aria-hidden="true" />Pack net</dt>
-      <dd class="figure ledger-figure">{{ packNet }}</dd>
+      <dt class="label"><i class="dot draw" aria-hidden="true" />Drawn</dt>
+      <dd class="figure secondary-figure">{{ drawn }}</dd>
     </div>
 
     <div class="tile">
-      <dt class="label">Deepest SoC</dt>
-      <dd class="figure secondary-figure">{{ deepestSoc }}</dd>
+      <dt class="label">Deepest charge</dt>
+      <dd class="figure secondary-figure">{{ deepestCharge }}</dd>
     </div>
 
     <div class="tile">
-      <dt class="label"><i v-if="hasWarnings" class="dot warning" aria-hidden="true" />Warnings</dt>
-      <dd class="figure secondary-figure">{{ warnings }}</dd>
+      <dt class="label">Widest cell spread</dt>
+      <dd class="figure secondary-figure">{{ cellSpread }}</dd>
     </div>
 
     <div class="tile">
-      <dt class="label">Recorded</dt>
-      <dd class="figure secondary-figure">{{ recorded }}</dd>
+      <dt class="label"><i v-if="hasEvents" class="dot event" aria-hidden="true" />Events</dt>
+      <dd class="figure secondary-figure">{{ events }}</dd>
     </div>
   </dl>
 </template>
@@ -118,16 +114,13 @@ function signedAmpHours(value: number): string {
   border-radius: 50%;
 }
 
-.dot.solar {
-  background: var(--solar);
-}
-.dot.house {
-  background: var(--house);
-}
-.dot.pack {
+.dot.charge {
   background: var(--pack);
 }
-.dot.warning {
+.dot.draw {
+  background: var(--house);
+}
+.dot.event {
   background: var(--status-warning);
 }
 

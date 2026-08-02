@@ -1,24 +1,28 @@
 <script setup lang="ts">
 /**
- * Warnings per day, stacked by severity on one day-category axis.
+ * Events the pack itself logged, per day, on one day-category axis.
  *
- * Escalation reads upward: warning at the baseline, then serious, then critical at the cap, and the
- * order never follows the counts — a day where criticals outnumber warnings still stacks warning
- * below, so the most severe segment is always the one the eye finds at the top. Status colour is
- * never left to carry severity alone: the legend and the per-day total pair a word with every hue.
+ * Single-tone columns. The pack's event vocabulary carries no severity — `WarningLevel` belongs to
+ * this app's own annunciator and does not exist in the device's — so nothing here stacks, colours or
+ * orders by how bad an event sounds. What fired is named instead, under the focused column and in
+ * the table, with the raw code beside every label so a wrong label stays falsifiable on screen.
  *
- * A range with no warnings is not an empty chart. Drawing an axis over zeros would ask the reader to
+ * Clock rewrites never reach this card. The pack files them in the same ring under the same
+ * vocabulary, but they are a fact about the clock and are reported in the clock panel; tallying them
+ * here would show a spike of pack events on the day someone opened the vendor app.
+ *
+ * A range with no events is not an empty chart. Drawing an axis over zeros would ask the reader to
  * decode a blank grid for the good news; instead the card says it plainly, in the good-status green
  * that is legitimate here because it is a labelled state, not a data series.
  */
 import { computed, ref } from 'vue'
 
-import type { DailyErrors, RangeKind } from '../../application/history/statsRange'
+import type { RingEventDay } from '../../application/history/ringRange'
+import type { RangeKind } from '../../application/history/statsRange'
 import { useMeasuredWidth } from '../../application/useMeasuredWidth'
 import { extentOf, linearScale, positionOn, signedAxis } from '../../domain/history/geometry'
-import type { WarningLevel } from '../../domain/history/types'
 
-const props = defineProps<{ days: readonly DailyErrors[]; range: RangeKind }>()
+const props = defineProps<{ days: readonly RingEventDay[]; range: RangeKind }>()
 
 /** viewBox units held clear at the left rail for the count-axis labels — TrendStrips' constant. */
 const GUTTER = 46
@@ -32,21 +36,10 @@ const BASELINE_Y = PLOT_HEIGHT - LABEL_BAND
 /** Cap the column so it never fills its slot; the leftover is the 2px surface gap between days. */
 const BAR_MAX = 24
 const BAR_GAP = 2
-/** The rounded data-end at the cap of the topmost segment. */
+/** The rounded data-end at the cap of the column. */
 const CAP_RADIUS = 4
-/** Half of the 2px surface gap between stacked segments — one applied each side of a boundary. */
-const SEGMENT_INSET = 1
 /** Keeps every month column at least this wide inside its own scroll box. */
 const COLUMN_MIN_PX = 14
-
-/** bottom → top. The array order IS the stack order and is never re-sorted by count. */
-const LEVELS: readonly { readonly level: WarningLevel; readonly label: string }[] = [
-  { level: 'warning', label: 'Warning' },
-  { level: 'serious', label: 'Serious' },
-  { level: 'critical', label: 'Critical' },
-]
-/** The legend reads most-severe first, the reverse of the stack. */
-const LEGEND = [...LEVELS].reverse()
 
 /**
  * One viewBox unit is one CSS pixel, so the viewBox is measured rather than fixed. The plot is
@@ -65,18 +58,16 @@ const allClear = computed(() => maxDayTotal.value === 0)
 
 const subtitle = computed(() => {
   switch (props.range) {
-    case 'hour':
-      return 'By severity · last hour'
     case 'day':
-      return 'By severity · last 24 hours'
+      return "From the pack's own log · last 24 hours"
     case 'week':
-      return 'By severity · last 7 days'
+      return "From the pack's own log · last 7 days"
     case 'month':
-      return 'By severity · last 30 days'
+      return "From the pack's own log · last 30 days"
     case 'all':
-      return 'By severity · all recorded'
+      return "From the pack's own log · everything held"
     case 'custom':
-      return 'By severity · selected range'
+      return "From the pack's own log · selected range"
   }
 })
 
@@ -99,9 +90,11 @@ const weekdayLabel = new Intl.DateTimeFormat(undefined, { weekday: 'short' })
 const dayNumberLabel = new Intl.DateTimeFormat(undefined, { day: 'numeric' })
 const fullDayLabel = new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric' })
 
-interface Segment {
-  readonly level: WarningLevel
-  readonly d: string
+/** One label and the code behind it, so the reader can check the table against a capture. */
+interface FiredEvent {
+  readonly code: number
+  readonly label: string
+  readonly hex: string
 }
 
 interface Column {
@@ -110,11 +103,9 @@ interface Column {
   readonly cx: number
   readonly slotX: number
   readonly slotWidth: number
-  readonly segments: readonly Segment[]
+  readonly d: string
   readonly total: number
-  readonly warning: number
-  readonly serious: number
-  readonly critical: number
+  readonly fired: readonly FiredEvent[]
   readonly labelY: number
   readonly xLabel: string
   readonly showXLabel: boolean
@@ -123,7 +114,7 @@ interface Column {
   readonly dayLabel: string
 }
 
-/** Month is the wide case, so its day numbers thin to roughly six labels; week and the sub-day
+/** Month is the wide case, so its day numbers thin to roughly six labels; week and the shorter
  *  ranges label every column. */
 const labelStride = computed(() =>
   props.range === 'month' ? Math.max(1, Math.ceil(dayCount.value / 6)) : 1,
@@ -141,30 +132,12 @@ const columns = computed<Column[]>(() => {
   const barWidth = Math.max(2, Math.min(BAR_MAX, slot - BAR_GAP))
   const stride = labelStride.value
   // Month is the wide case: the running total is stamped over its busiest day alone, the rest left
-  // to the hover, as the energy bars do; week and the sub-day ranges label every column.
+  // to the hover, as the energy bars do; week and the shorter ranges label every column.
   const peak = props.range === 'month' ? peakTotalIndexOf(props.days) : -1
 
   return props.days.map((day, index) => {
     const slotX = GUTTER + slot * index
     const cx = slotX + slot / 2
-
-    const present = LEVELS.filter((level) => day[level.level] > 0)
-    const segments: Segment[] = []
-    let low = 0
-    present.forEach((entry, order) => {
-      const high = low + day[entry.level]
-      const isBottom = order === 0
-      const isTop = order === present.length - 1
-      // Inset every shared boundary by 1px on each side; the baseline and the rounded cap keep
-      // their real edges, so the 2px surface gap sits only between two stacked severities.
-      const top = (isTop ? positionOn(scale.value, high) : positionOn(scale.value, high) + SEGMENT_INSET)
-      const bottom = (isBottom ? positionOn(scale.value, low) : positionOn(scale.value, low) - SEGMENT_INSET)
-      segments.push({
-        level: entry.level,
-        d: columnPath(cx, top, bottom, barWidth, isTop ? CAP_RADIUS : 0),
-      })
-      low = high
-    })
 
     return {
       index,
@@ -172,11 +145,18 @@ const columns = computed<Column[]>(() => {
       cx: round(cx),
       slotX: round(slotX),
       slotWidth: round(slot),
-      segments,
+      d:
+        day.total === 0
+          ? ''
+          : columnPath(
+              cx,
+              positionOn(scale.value, day.total),
+              positionOn(scale.value, 0),
+              barWidth,
+              CAP_RADIUS,
+            ),
       total: day.total,
-      warning: day.warning,
-      serious: day.serious,
-      critical: day.critical,
+      fired: firedOn(day),
       labelY: round(positionOn(scale.value, day.total) - 5),
       xLabel: xLabelFor(day.day),
       showXLabel: index % stride === 0,
@@ -193,8 +173,8 @@ const activeColumn = computed(() =>
 
 const cursorAria = computed(
   () =>
-    `Warnings per day, ${dayCount.value} day${dayCount.value === 1 ? '' : 's'}. ` +
-    `Use the arrow keys to read a day's severities.`,
+    `Pack events per day, ${dayCount.value} day${dayCount.value === 1 ? '' : 's'}. ` +
+    `Use the arrow keys to read what fired on a day.`,
 )
 
 /**
@@ -251,8 +231,17 @@ function onFocus(): void {
   if (active.value === null && dayCount.value > 0) active.value = dayCount.value - 1
 }
 
+/** Labels and codes travel index for index out of the fold, so they are zipped rather than joined. */
+function firedOn(day: RingEventDay): FiredEvent[] {
+  return day.codes.map((code, at) => ({
+    code,
+    label: day.labels[at] ?? '',
+    hex: `0x${code.toString(16).padStart(2, '0')}`,
+  }))
+}
+
 /** The busiest day, whose total the month stamps and leaves the rest to the hover. First on a tie. */
-function peakTotalIndexOf(days: readonly DailyErrors[]): number {
+function peakTotalIndexOf(days: readonly RingEventDay[]): number {
   let best = -1
   let most = 0
   days.forEach((day, index) => {
@@ -272,8 +261,7 @@ function xLabelFor(day: number): string {
 
 /**
  * A column with its cap rounded and its base square. A rect's `rx` rounds both ends, so the
- * one-rounded-end mark has to be a path; a zero radius yields the square corners of the interior
- * segments through the same code.
+ * one-rounded-end mark has to be a path.
  */
 function columnPath(cx: number, top: number, bottom: number, width: number, radius: number): string {
   const x = cx - width / 2
@@ -296,30 +284,24 @@ function round(value: number): number {
 </script>
 
 <template>
-  <section class="card" data-testid="stats-errors-per-day">
+  <section class="card" data-testid="stats-events-per-day">
     <header class="head">
-      <h3 class="plate">Warnings per day</h3>
+      <h3 class="plate">Events per day</h3>
       <p class="muted sub">{{ subtitle }}</p>
     </header>
 
     <p v-if="allClear" class="clear copy">
       <span class="clear-dot" aria-hidden="true" />
-      No warnings in this range. A clean run — nothing fired.
+      No events in this range. The pack logged nothing but its scheduled snapshots.
     </p>
 
     <template v-else>
-      <ul class="legend">
-        <li v-for="key in LEGEND" :key="key.level">
-          <span class="swatch" :class="key.level" aria-hidden="true" />{{ key.label }}
-        </li>
-      </ul>
-
       <div class="plot-scroll">
         <div ref="plot" class="plot" :style="{ minWidth }">
           <svg
             :viewBox="`0 0 ${plotWidth} ${PLOT_HEIGHT}`"
             role="img"
-            :aria-label="`Warnings per day by severity, ${subtitle.toLowerCase()}`"
+            :aria-label="`Pack events per day, ${subtitle.toLowerCase()}`"
           >
             <g class="grid">
               <line
@@ -354,13 +336,7 @@ function round(value: number): number {
             />
 
             <g v-for="col in columns" :key="`col-${col.day}`">
-              <path
-                v-for="seg in col.segments"
-                :key="seg.level"
-                :d="seg.d"
-                class="seg"
-                :class="seg.level"
-              />
+              <path v-if="col.d" :d="col.d" class="col" />
               <text v-if="col.showTotal" :x="col.cx" :y="col.labelY" text-anchor="middle" class="total">
                 {{ col.total }}
               </text>
@@ -397,21 +373,15 @@ function round(value: number): number {
       <p class="line" role="status" aria-live="polite" :class="{ tracking: activeColumn !== null }">
         <template v-if="activeColumn">
           <span class="day">{{ activeColumn.dayLabel }}</span>
-          <span v-if="activeColumn.total === 0" class="none">no warnings</span>
+          <span v-if="activeColumn.total === 0" class="none">no events</span>
           <template v-else>
-            <span v-if="activeColumn.warning > 0" class="tally">
-              <i class="swatch warning" aria-hidden="true" /><b>{{ activeColumn.warning }}</b> warning
-            </span>
-            <span v-if="activeColumn.serious > 0" class="tally">
-              <i class="swatch serious" aria-hidden="true" /><b>{{ activeColumn.serious }}</b> serious
-            </span>
-            <span v-if="activeColumn.critical > 0" class="tally">
-              <i class="swatch critical" aria-hidden="true" /><b>{{ activeColumn.critical }}</b> critical
+            <span v-for="fired in activeColumn.fired" :key="fired.code" class="fired">
+              {{ fired.label }} <span class="code">{{ fired.hex }}</span>
             </span>
           </template>
         </template>
         <span v-else class="rest">
-          {{ rangeTotal }} warning{{ rangeTotal === 1 ? '' : 's' }} across
+          {{ rangeTotal }} event{{ rangeTotal === 1 ? '' : 's' }} across
           {{ dayCount }} day{{ dayCount === 1 ? '' : 's' }}
         </span>
       </p>
@@ -423,19 +393,20 @@ function round(value: number): number {
             <thead>
               <tr>
                 <th scope="col">Day</th>
-                <th scope="col" class="num">Warning</th>
-                <th scope="col" class="num">Serious</th>
-                <th scope="col" class="num">Critical</th>
-                <th scope="col" class="num">Total</th>
+                <th scope="col" class="num">Events</th>
+                <th scope="col">What fired</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="col in columns" :key="`row-${col.day}`">
                 <td>{{ col.dayLabel }}</td>
-                <td class="num">{{ col.warning }}</td>
-                <td class="num">{{ col.serious }}</td>
-                <td class="num">{{ col.critical }}</td>
                 <td class="num strong">{{ col.total }}</td>
+                <td class="what">
+                  <template v-if="col.fired.length === 0">—</template>
+                  <span v-for="fired in col.fired" :key="fired.code" class="fired">
+                    {{ fired.label }} <span class="code">{{ fired.hex }}</span>
+                  </span>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -478,44 +449,6 @@ function round(value: number): number {
   flex: none;
 }
 
-/* Legend — the required label channel; status colour never rides alone. */
-.legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem 1.1rem;
-  margin: 0.9rem 0 0.5rem;
-  padding: 0;
-  list-style: none;
-  font-family: var(--font-label);
-  font-size: 0.75rem;
-  letter-spacing: 0.04em;
-  color: var(--ink-secondary);
-}
-
-.legend li {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  display: inline-block;
-  flex: none;
-}
-
-.swatch.warning {
-  background: var(--status-warning);
-}
-.swatch.serious {
-  background: var(--status-serious);
-}
-.swatch.critical {
-  background: var(--status-critical);
-}
-
 /* Month is the wide case: it scrolls inside its own box, the page body never does. */
 .plot-scroll {
   overflow-x: auto;
@@ -524,6 +457,7 @@ function round(value: number): number {
 .plot {
   width: 100%;
   position: relative;
+  margin-top: 0.9rem;
 }
 
 .plot svg {
@@ -549,14 +483,9 @@ function round(value: number): number {
   fill: var(--ink-muted);
 }
 
-.seg.warning {
-  fill: var(--status-warning);
-}
-.seg.serious {
-  fill: var(--status-serious);
-}
-.seg.critical {
-  fill: var(--status-critical);
+/* One tone for every event. The pack's vocabulary carries no severity and this card invents none. */
+.col {
+  fill: var(--pack);
 }
 
 .total {
@@ -592,7 +521,7 @@ function round(value: number): number {
   outline-offset: -1px;
 }
 
-/* The reserved readout row: range total at rest, the focused day's breakdown while tracking. */
+/* The reserved readout row: range total at rest, the focused day's events while tracking. */
 .line {
   display: flex;
   flex-wrap: wrap;
@@ -612,15 +541,13 @@ function round(value: number): number {
   color: var(--ink-secondary);
 }
 
-.line .tally {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
+.fired {
+  color: var(--ink);
 }
 
-.line .tally b {
-  color: var(--ink);
-  font-weight: 600;
+/* The raw code beside every label, so a label this build has wrong stays falsifiable on screen. */
+.code {
+  color: var(--ink-muted);
 }
 
 .line .none {
@@ -682,9 +609,10 @@ function round(value: number): number {
   font-weight: 600;
 }
 
-@media (max-width: 720px) {
-  .legend {
-    gap: 0.35rem 0.85rem;
-  }
+.numbers .what {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.9rem;
+  color: var(--ink-secondary);
 }
 </style>

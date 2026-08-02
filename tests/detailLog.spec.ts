@@ -23,7 +23,12 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { decodeDetailLog, readDetailLogHeader } from '../src/domain/bms/detailLog'
+import {
+  decodeDetailLog,
+  decodeDetailLogRecord,
+  readDetailLogHeader,
+  readDetailLogRecordBytes,
+} from '../src/domain/bms/detailLog'
 import type { DetailLogRecord } from '../src/domain/bms/detailLog'
 import {
   FRAME_DETAIL_LOG,
@@ -512,6 +517,41 @@ describe('decodeDetailLog', () => {
 
     expect(record.heating).toBe(true)
     expect(record.heatingCurrent).toBeCloseTo(-1.2, 1)
+  })
+
+  // The archive stores a record's bytes and decodes them one at a time on read, so the two entry
+  // points have to be the same reading of the same layout — a stride that drifted between them
+  // would corrupt every stored row while every frame on screen stayed right.
+  it('decodes a record on its own exactly as it decodes it inside a frame', () => {
+    const filled = Array.from({ length: 12 }, (_, position) => sampledRows[position % sampledRows.length])
+    const frame = detailLogFrame(filled.map(encodeRecord), 640)
+
+    const wholeFrame = decodeDetailLog(frame, packClock)
+    const oneAtATime = readDetailLogRecordBytes(frame).map((record) =>
+      decodeDetailLogRecord(record.bytes, record.index, packClock),
+    )
+
+    expect(oneAtATime).toEqual(wholeFrame)
+  })
+
+  it('hands back each record as bytes of its own rather than a window onto the frame', () => {
+    const frame = detailLogFrame([encodeRecord(sampledRows[0]), encodeRecord(sampledRows[1])], 12)
+
+    const records = readDetailLogRecordBytes(frame)
+
+    expect(records.map((record) => record.index)).toEqual([12, 13])
+    expect(records[0].bytes).toEqual(encodeRecord(sampledRows[0]))
+    records.forEach((record) => {
+      expect(record.bytes).toHaveLength(RECORD_STRIDE)
+      // A view would carry the whole 300-byte frame into the archive behind every 24 stored bytes.
+      expect(record.bytes.byteLength).toBe(record.bytes.buffer.byteLength)
+    })
+  })
+
+  it('refuses to slice a frame claiming more records than one can physically hold', () => {
+    const frame = detailLogFrame(sampledRows.map(encodeRecord), 0, 13)
+
+    expect(() => readDetailLogRecordBytes(frame)).toThrow(/at most 12/)
   })
 })
 

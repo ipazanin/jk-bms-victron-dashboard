@@ -62,6 +62,7 @@ const NOTHING_CAME_BACK: DetailLogTransfer = {
   assembledFrameCount: 0,
   frames: [],
   records: [],
+  rawRecords: [],
   elapsedMs: 8_000,
 }
 

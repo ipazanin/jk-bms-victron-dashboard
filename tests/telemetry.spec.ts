@@ -3,15 +3,31 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { browserStandardUtcOffsetMinutes } from '../src/application/browserZone'
+import { unavailableHistoryStore } from '../src/application/history/port'
+import type { HistoryStore } from '../src/application/history/port'
+import { RING_STALE_AFTER_MS } from '../src/application/history/ringIngest'
 import { createTelemetry } from '../src/application/telemetry'
 import type { Telemetry, TelemetryDeps } from '../src/application/telemetry'
 import { saveRememberedSession } from '../src/application/rememberedSession'
 import type { RememberedSession } from '../src/application/rememberedSession'
+import { decodeDetailLogRecord } from '../src/domain/bms/detailLog'
+import type { DetailLogTransfer } from '../src/domain/bms/DetailLogTransfer'
 import type { BatterySnapshot } from '../src/domain/bms/types'
+import type { RingRecordBytes } from '../src/domain/history/RingRecordBytes'
+import type { DeviceKey } from '../src/domain/history/types'
 import { SNAPSHOT_SCHEMA_VERSION } from '../src/domain/schemaVersion'
 import { JkBmsClient } from '../src/infrastructure/ble/JkBmsClient'
 import { VictronScanner } from '../src/infrastructure/ble/VictronScanner'
-import { battery, rememberedSession, sessionRecord, solarReading } from './support/samples'
+import { MemoryHistoryStore } from './support/MemoryHistoryStore'
+import {
+  PACK_DEVICE_KEY,
+  battery,
+  deviceInfo,
+  rememberedSession,
+  ringRecords,
+  sessionRecord,
+  solarReading,
+} from './support/samples'
 import { fakeBmsLink, fakeSolarScan } from './support/fakeRadios'
 import type { FakeBmsLink, FakeSolarScan } from './support/fakeRadios'
 
@@ -32,9 +48,39 @@ function radioDeps(): TelemetryDeps {
     createBmsLink: (handlers) => new JkBmsClient(handlers),
     createSolarScan: (handlers) => new VictronScanner(handlers),
     historyStore: () => null,
+    refreshRingLedger: async () => undefined,
     now: () => Date.now(),
     monotonic: () => performance.now(),
     newId: () => crypto.randomUUID(),
+  }
+}
+
+/** Records at consecutive ring positions, as the frames of one unbroken burst carried them. */
+function carried(records: readonly Uint8Array[], firstIndex: number): RingRecordBytes[] {
+  return records.map((bytes, position) => ({ index: firstIndex + position, bytes }))
+}
+
+/**
+ * A finished read. The decoded records are derived from the bytes rather than stated beside them,
+ * because the two lists being index-aligned is the transport's contract and no case here is about
+ * breaking it.
+ */
+function transferOf(
+  rawRecords: readonly RingRecordBytes[],
+  overrides: Partial<DetailLogTransfer> = {},
+): DetailLogTransfer {
+  return {
+    outcome: 'records-read',
+    notificationBytes: 300 * Math.ceil(rawRecords.length / 12),
+    notificationCount: rawRecords.length,
+    assembledFrameCount: Math.ceil(rawRecords.length / 12),
+    frames: [],
+    records: rawRecords.map((raw) =>
+      decodeDetailLogRecord(raw.bytes, raw.index, { packUtcOffsetMinutes: 60 }),
+    ),
+    rawRecords,
+    elapsedMs: 940,
+    ...overrides,
   }
 }
 
@@ -187,6 +233,7 @@ describe('what reaches the archive is raw', () => {
       createBmsLink: bms.create,
       createSolarScan: solar.create,
       historyStore: () => null,
+      refreshRingLedger: async () => undefined,
       now: () => clock,
       monotonic: () => clock,
       newId: () => 'session',
@@ -262,6 +309,7 @@ describe('browsing a stored session', () => {
       createBmsLink: bms.create,
       createSolarScan: solar.create,
       historyStore: () => null,
+      refreshRingLedger: async () => undefined,
       now: () => Date.now(),
       monotonic: () => performance.now(),
       newId: () => 'session',
@@ -314,8 +362,8 @@ describe('browsing a stored session', () => {
 })
 
 describe('reading the pack’s stored detail log', () => {
-  // Diagnostic wiring only: the transfer is held for the card that shows it and reaches neither
-  // the archive nor the remembered snapshot.
+  // The transport half: what came back, and what the receipt renders it against. The archive is
+  // deliberately absent here, so nothing in these cases can be filed.
   let bms: FakeBmsLink
   let solar: FakeSolarScan
 
@@ -326,6 +374,7 @@ describe('reading the pack’s stored detail log', () => {
       createBmsLink: bms.create,
       createSolarScan: solar.create,
       historyStore: () => null,
+      refreshRingLedger: async () => undefined,
       now,
       monotonic: () => performance.now(),
       newId: () => 'session',
@@ -353,6 +402,7 @@ describe('reading the pack’s stored detail log', () => {
       assembledFrameCount: 0,
       frames: [],
       records: [],
+      rawRecords: [],
       elapsedMs: 3_100,
     } as const
     bms.answerNextDetailLogWith(answer)
@@ -403,6 +453,266 @@ describe('reading the pack’s stored detail log', () => {
   })
 })
 
+describe('filing a stored-log read against the pack that answered it', () => {
+  // The archive half. What is filed is the bytes the pack sent, under the key its own sessions
+  // group by, whatever this build made of them on screen.
+  let bms: FakeBmsLink
+  let solar: FakeSolarScan
+  let store: MemoryHistoryStore
+  let refreshed: DeviceKey[]
+  let clock = 0
+
+  function telemetryOver(historyStore: () => HistoryStore | null): Telemetry {
+    return createTelemetry({
+      createBmsLink: bms.create,
+      createSolarScan: solar.create,
+      historyStore,
+      refreshRingLedger: async (deviceKey) => {
+        refreshed.push(deviceKey)
+      },
+      now: () => clock,
+      monotonic: () => clock,
+      newId: () => 'session',
+    })
+  }
+
+  async function liveWithIdentity(): Promise<void> {
+    await telemetry.connectBms()
+    bms.emitDeviceInfo(deviceInfo())
+  }
+
+  beforeEach(() => {
+    localStorage.clear()
+    clock = Date.UTC(2026, 7, 1, 11, 14)
+    bms = fakeBmsLink()
+    solar = fakeSolarScan()
+    store = new MemoryHistoryStore({ now: () => clock })
+    refreshed = []
+    telemetry = telemetryOver(() => store)
+  })
+
+  it('files what came back under the pack’s own device key', async () => {
+    await liveWithIdentity()
+    bms.answerNextDetailLogWith(transferOf(carried(ringRecords(8), 0)))
+
+    await telemetry.readDetailLog()
+
+    const ledger = await store.readRingLedger(PACK_DEVICE_KEY)
+    expect(ledger?.records).toHaveLength(8)
+    expect(ledger?.reads).toHaveLength(1)
+    expect(telemetry.ringIngest.value).toMatchObject({ stored: true, appended: 8, totalRecords: 8, failure: null })
+    expect(telemetry.ringFilingNote.value).toBeNull()
+    // The channel never delivers to the tab that posted it, so this tab re-reads its own write.
+    expect(refreshed).toEqual([PACK_DEVICE_KEY])
+  })
+
+  it('files the unbroken stretches a torn burst carried and counts the orphans it dropped', async () => {
+    await liveWithIdentity()
+    const burst = ringRecords(12)
+    // Indices 8 and 9 never arrived. What is left is eight records the fold can place and a pair
+    // too short to identify itself, which is guessed at nowhere.
+    bms.answerNextDetailLogWith(
+      transferOf([...carried(burst.slice(0, 8), 0), ...carried(burst.slice(10), 10)]),
+    )
+
+    await telemetry.readDetailLog()
+
+    expect(telemetry.ringIngest.value).toMatchObject({ appended: 8, runsDiscarded: 1 })
+    expect((await store.readRingLedger(PACK_DEVICE_KEY))?.records).toHaveLength(8)
+  })
+
+  /**
+   * The fold aligns on ring position, so a window whose records sit at the wrong positions is
+   * filed as real history rather than rejected. A burst that retransmits part of itself has to
+   * collapse to one window before it ever reaches the fold, whatever order the frames landed in.
+   */
+  it('collapses a burst that retransmitted part of itself into one window', async () => {
+    await liveWithIdentity()
+    const fresh = ringRecords(8)
+    const stale = ringRecords(4, { current: 12.5 })
+    bms.answerNextDetailLogWith(transferOf([...carried(stale, 4), ...carried(fresh, 0)]))
+
+    await telemetry.readDetailLog()
+
+    const ledger = await store.readRingLedger(PACK_DEVICE_KEY)
+    expect(telemetry.ringIngest.value).toMatchObject({ appended: 8, runsDiscarded: 0, gapDeclared: false })
+    expect(ledger?.records).toHaveLength(8)
+    // Element-wise: the archive's rows come back through structuredClone, and a typed array that
+    // crossed a realm boundary is not the same object as one built here however it prints.
+    expect(Array.from(ledger?.records[4].bytes ?? [])).toEqual(Array.from(fresh[4]))
+  })
+
+  it('journals a read the pack answered without a stored log among it, and stores no record', async () => {
+    await liveWithIdentity()
+    bms.answerNextDetailLogWith(
+      transferOf([], { outcome: 'other-frames', notificationBytes: 1_200, assembledFrameCount: 4 }),
+    )
+
+    await telemetry.readDetailLog()
+
+    const ledger = await store.readRingLedger(PACK_DEVICE_KEY)
+    expect(ledger?.records).toEqual([])
+    expect(ledger?.reads).toHaveLength(1)
+    expect(ledger?.reads[0]).toMatchObject({ outcome: 'other-frames', indexSpan: null, recordsAppended: 0 })
+  })
+
+  it('journals a read the pack never answered, which is the finding worth keeping', async () => {
+    await liveWithIdentity()
+    bms.answerNextDetailLogWith(
+      transferOf([], { outcome: 'no-answer', notificationBytes: 0, notificationCount: 0, assembledFrameCount: 0 }),
+    )
+
+    await telemetry.readDetailLog()
+
+    const ledger = await store.readRingLedger(PACK_DEVICE_KEY)
+    expect(ledger?.records).toEqual([])
+    expect(ledger?.reads[0]).toMatchObject({ outcome: 'no-answer', notificationBytes: 0 })
+  })
+
+  it('keeps the transfer on screen when the archive refused the write', async () => {
+    telemetry.dispose()
+    const refusing = unavailableHistoryStore('quota-exhausted')
+    telemetry = telemetryOver(() => refusing)
+    await liveWithIdentity()
+    const answer = transferOf(carried(ringRecords(8), 0))
+    bms.answerNextDetailLogWith(answer)
+
+    await telemetry.readDetailLog()
+
+    expect(telemetry.detailLog.value).toEqual(answer)
+    // A storage failure is the receipt's business. The link's error line is about the link.
+    expect(telemetry.detailLogError.value).toBeNull()
+    expect(telemetry.ringIngest.value).toMatchObject({ stored: false, appended: 0, failure: 'quota-exhausted' })
+  })
+
+  it('says the pack could not be named rather than filing it under an invented key', async () => {
+    // No device-info frame and no advertised name: inventing a key here merges every unnamed pack
+    // this browser ever meets into one ledger, and the first read is what makes that unrecoverable.
+    await telemetry.connectBms()
+    bms.answerNextDetailLogWith(transferOf(carried(ringRecords(8), 0)))
+
+    await telemetry.readDetailLog()
+
+    expect(telemetry.ringFilingNote.value).toMatch(/neither a serial nor a name/)
+    expect(telemetry.ringIngest.value).toBeNull()
+    expect(await store.listRingLedgers()).toEqual([])
+    expect(refreshed).toEqual([])
+  })
+})
+
+describe('fetching a stale stored log without being asked', () => {
+  let bms: FakeBmsLink
+  let solar: FakeSolarScan
+  let store: MemoryHistoryStore
+  let clock = 0
+
+  /**
+   * Drains the microtask chain the auto-read runs on. It touches no timer — the whole path is a
+   * ledger read, the radio's answer, a merge and a refresh — so turning the queue over settles it.
+   */
+  async function settle(): Promise<void> {
+    for (let turn = 0; turn < 30; turn += 1) await Promise.resolve()
+  }
+
+  /** A connection that has reached live and produced its first cell frame, which is the trigger. */
+  async function liveWithCellFrame(): Promise<void> {
+    await telemetry.connectBms()
+    bms.emitDeviceInfo(deviceInfo())
+    bms.emitSnapshot(battery())
+    await settle()
+  }
+
+  async function readsFiled(): Promise<number> {
+    return (await store.readRingLedger(PACK_DEVICE_KEY))?.reads.length ?? 0
+  }
+
+  beforeEach(() => {
+    localStorage.clear()
+    clock = Date.UTC(2026, 7, 1, 11, 14)
+    bms = fakeBmsLink()
+    solar = fakeSolarScan()
+    store = new MemoryHistoryStore({ now: () => clock })
+    telemetry = createTelemetry({
+      createBmsLink: bms.create,
+      createSolarScan: solar.create,
+      historyStore: () => store,
+      refreshRingLedger: async () => undefined,
+      now: () => clock,
+      monotonic: () => clock,
+      newId: () => 'session',
+    })
+    bms.answerNextDetailLogWith(transferOf(carried(ringRecords(8), 0)))
+  })
+
+  it('reads the stored log by itself when this browser holds none of it', async () => {
+    await liveWithCellFrame()
+
+    const ledger = await store.readRingLedger(PACK_DEVICE_KEY)
+    expect(ledger?.records).toHaveLength(8)
+    expect(ledger?.reads).toHaveLength(1)
+  })
+
+  it('fires once in a connection, whatever the pack streams after it', async () => {
+    await liveWithCellFrame()
+
+    bms.emitSnapshot(battery())
+    bms.emitSnapshot(battery())
+    await settle()
+
+    expect(await readsFiled()).toBe(1)
+  })
+
+  it('leaves the pack alone on a connection made inside the day', async () => {
+    await liveWithCellFrame()
+    await telemetry.disconnectBms()
+
+    clock += RING_STALE_AFTER_MS - 60_000
+    await liveWithCellFrame()
+
+    expect(await readsFiled()).toBe(1)
+  })
+
+  it('reads again on the first connection after the ring has gone a day unread', async () => {
+    await liveWithCellFrame()
+    await telemetry.disconnectBms()
+
+    clock += RING_STALE_AFTER_MS + 60_000
+    await liveWithCellFrame()
+
+    expect(await readsFiled()).toBe(2)
+  })
+
+  /**
+   * A read the pack ignored still journals, and that row must not stand in for the ring this
+   * browser has never held. Counting it as an answer would let one silent read lock the pack out
+   * of the archive for a day, which is exactly the day the ring is rolling records off the end of.
+   */
+  it('tries again on the next connection when the pack answered nothing', async () => {
+    bms.answerNextDetailLogWith(transferOf([], { outcome: 'no-answer', notificationBytes: 0 }))
+    await liveWithCellFrame()
+    expect((await store.readRingLedger(PACK_DEVICE_KEY))?.records).toEqual([])
+    await telemetry.disconnectBms()
+
+    clock += 60 * 60_000
+    bms.answerNextDetailLogWith(transferOf(carried(ringRecords(8), 0)))
+    await liveWithCellFrame()
+
+    expect((await store.readRingLedger(PACK_DEVICE_KEY))?.records).toHaveLength(8)
+  })
+
+  it('does not retry inside the connection that the read failed in', async () => {
+    bms.failNextDetailLogWith(new Error('Lost the BMS mid-read.'))
+
+    await liveWithCellFrame()
+    expect(telemetry.detailLogError.value).toMatch(/Lost the BMS/)
+
+    bms.emitSnapshot(battery())
+    await settle()
+
+    expect(await store.readRingLedger(PACK_DEVICE_KEY)).toBeNull()
+  })
+})
+
 describe('the windows never outlive the pack they describe', () => {
   let clock = 0
   let bms: FakeBmsLink
@@ -417,6 +727,7 @@ describe('the windows never outlive the pack they describe', () => {
       createBmsLink: bms.create,
       createSolarScan: solar.create,
       historyStore: () => null,
+      refreshRingLedger: async () => undefined,
       now: () => clock,
       monotonic: () => clock,
       newId: () => 'session',

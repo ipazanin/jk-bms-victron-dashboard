@@ -32,6 +32,7 @@ beforeEach(() => {
     createBmsLink: bms.create,
     createSolarScan: solar.create,
     historyStore: () => store,
+    refreshRingLedger: async () => undefined,
     now: () => clock,
     monotonic: () => clock,
     newId: () => `session-${(session += 1)}`,

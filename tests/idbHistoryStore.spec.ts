@@ -4,8 +4,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { unavailableHistoryStore } from '../src/application/history/port'
 import type { HistoryAvailability } from '../src/application/history/port'
+import { PACK_SAMPLING_PERIOD_SECONDS } from '../src/domain/history/ringClock'
+import { MAX_RING_DEVICES } from '../src/domain/history/ringBudget'
+import type { RingSnapshot } from '../src/domain/history/RingSnapshot'
 import { PACK_STREAM } from '../src/domain/history/types'
-import type { HistoryChunk, SessionRecord } from '../src/domain/history/types'
+import type { DeviceKey, HistoryChunk, SessionRecord } from '../src/domain/history/types'
 import type { ArchiveChannel, ArchiveMessage } from '../src/infrastructure/history/archiveChannel'
 import {
   DATABASE_NAME,
@@ -17,14 +20,19 @@ import { classifyWriteFailure, isQuotaError } from '../src/infrastructure/histor
 import { openHistoryStore } from '../src/infrastructure/history/openHistoryStore'
 import {
   PACK_DEVICE_KEY,
+  RING_EPOCH_COUNTER_SECONDS,
   SAMPLE_EPOCH,
   SESSION_ID,
   deviceRecord,
   packChunk,
   packSamples,
+  ringReadRow,
+  ringRecords,
+  ringSnapshot,
   sessionClosure,
   sessionPatch,
   sessionRecord,
+  warningRecord,
 } from './support/samples'
 import { describeHistoryStore } from './support/describeHistoryStore'
 
@@ -134,6 +142,44 @@ function deleteRow(database: IDBDatabase, storeName: string, key: IDBValidKey): 
   })
 }
 
+/** Writes rows straight into a store, for the states only a budget far past a test's reach reaches. */
+function seedRows(database: IDBDatabase, storeName: string, rows: readonly unknown[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction([storeName], 'readwrite')
+    const store = transaction.objectStore(storeName)
+    for (const row of rows) store.put(row)
+    transaction.oncomplete = () => resolve()
+    transaction.onabort = () => reject(transaction.error)
+  })
+}
+
+/**
+ * The scope of every transaction opened while `work` ran.
+ *
+ * The one thing about a ring merge that matters most is invisible from the port: IndexedDB
+ * serialises overlapping-scope readwrite transactions across every connection on the origin, so a
+ * merge that reached the chunk store would queue behind — or abort — a live recording's commit, and
+ * nothing either store returns would ever show it.
+ */
+async function scopesOpenedDuring(
+  database: IDBDatabase,
+  work: () => Promise<unknown>,
+): Promise<string[][]> {
+  const opened: string[][] = []
+  const real = database.transaction.bind(database)
+  const watched = (stores: string | string[], mode?: IDBTransactionMode): IDBTransaction => {
+    opened.push(typeof stores === 'string' ? [stores] : [...stores])
+    return real(stores, mode)
+  }
+  Object.defineProperty(database, 'transaction', { value: watched, configurable: true })
+  try {
+    await work()
+  } finally {
+    Object.defineProperty(database, 'transaction', { value: real, configurable: true })
+  }
+  return opened
+}
+
 describeHistoryStore('IdbHistoryStore', async () => {
   const adapter = await openAdapter()
   return { store: adapter.store, dispose: adapter.dispose }
@@ -154,6 +200,8 @@ describe('the schema', () => {
       'chunks',
       'devices',
       'meta',
+      'ringReads',
+      'ringRecords',
       'sessions',
       'warnings',
     ])
@@ -168,6 +216,8 @@ describe('the schema', () => {
     expect([...transaction.objectStore('devices').indexNames]).toEqual(['byLastSeen'])
     expect([...transaction.objectStore('meta').indexNames]).toEqual([])
     expect([...transaction.objectStore('warnings').indexNames]).toEqual(['byTime'])
+    expect([...transaction.objectStore('ringRecords').indexNames]).toEqual(['byDevice'])
+    expect([...transaction.objectStore('ringReads').indexNames]).toEqual(['byDevice'])
   })
 
   it('keys a chunk on its session, stream and sequence together', async () => {
@@ -182,6 +232,43 @@ describe('the schema', () => {
     const transaction = adapter.database.transaction(['warnings'], 'readonly')
 
     expect(transaction.objectStore('warnings').keyPath).toEqual(['sessionId', 'seq'])
+  })
+
+  it('keys a ring row on the pack’s own write order, and a read on when it happened', async () => {
+    // Never on the ring index, which moved 42 places in three and a half hours on the real pack,
+    // and never on the RTC counter, which repeats and runs backwards across a clock rewrite.
+    adapter = await openAdapter()
+    const transaction = adapter.database.transaction(['ringRecords', 'ringReads'], 'readonly')
+
+    expect(transaction.objectStore('ringRecords').keyPath).toEqual(['deviceKey', 'seq'])
+    expect(transaction.objectStore('ringReads').keyPath).toEqual(['deviceKey', 'observedAt'])
+  })
+
+})
+
+describe('upgrading an archive in place', () => {
+  it('adds the ring stores to one already holding a session, a chunk and a warning', async () => {
+    // An upgrade transaction blocks every tab on the origin and the chunk store is tens of
+    // megabytes, so it may only add. What was already recorded has to come through untouched.
+    databaseCount += 1
+    const name = `shunt.log.spec.${databaseCount}`
+    const before = await openThePreviousVersion(name)
+    const store = new IdbHistoryStore(before, USABLE, recordingChannel())
+    await store.openSession(sessionRecord())
+    await store.commitChunk(packChunk(packSamples(5)), sessionPatch({ packSamples: 5, packChunks: 1 }))
+    await store.appendWarning(warningRecord({ seq: 0 }))
+    store.close()
+
+    const upgraded = await openDatabase(name)
+
+    expect(upgraded.version).toBe(DATABASE_VERSION)
+    expect([...upgraded.objectStoreNames]).toContain('ringRecords')
+    expect([...upgraded.objectStoreNames]).toContain('ringReads')
+    expect(await readAll<SessionRecord>(upgraded, 'sessions')).toHaveLength(1)
+    expect((await readAll<HistoryChunk>(upgraded, 'chunks'))[0].length).toBe(5)
+    expect(await readAll(upgraded, 'warnings')).toHaveLength(1)
+    upgraded.close()
+    await deleteDatabase(name)
   })
 })
 
@@ -344,6 +431,127 @@ describe('what the other tabs are told', () => {
   })
 })
 
+describe("filing the pack's own ring", () => {
+  let adapter: Adapter
+
+  afterEach(async () => {
+    await adapter.dispose()
+  })
+
+  /** Far enough past everything seeded below that no run of it could align against a stored row. */
+  const STRANDED_FROM = RING_EPOCH_COUNTER_SECONDS + 30_000 * PACK_SAMPLING_PERIOD_SECONDS
+
+  /** A read carrying eight records the ledger cannot possibly already hold. */
+  function strandedRead(observedAt: number): RingSnapshot {
+    return ringSnapshot({
+      observedAt,
+      runs: [{ firstIndex: 0, records: ringRecords(8, { counterSeconds: STRANDED_FROM }) }],
+    })
+  }
+
+  it('scopes a merge to the ring stores, so it can never queue behind a recording', async () => {
+    adapter = await openAdapter()
+    await adapter.store.openSession(sessionRecord())
+    await adapter.store.commitChunk(
+      packChunk(packSamples(6)),
+      sessionPatch({ packSamples: 6, packChunks: 1 }),
+    )
+
+    const scopes = await scopesOpenedDuring(adapter.database, () =>
+      adapter.store.appendRingSnapshot(ringSnapshot()),
+    )
+
+    expect(scopes).toEqual([['ringRecords', 'ringReads', 'devices']])
+    expect((await adapter.store.usage()).totalSamples).toBe(6)
+  })
+
+  it('tells the other tabs a ring was read, and only once the write committed', async () => {
+    adapter = await openAdapter()
+    await adapter.store.appendRingSnapshot(ringSnapshot())
+    expect(adapter.channel.posted).toEqual(['ring-read'])
+
+    // A journal row the platform cannot store takes the whole merge down with it, rows included:
+    // a ledger that grew while its receipt was lost is a ledger nothing can account for.
+    adapter.channel.forget()
+    const unwritable = strandedRead(SAMPLE_EPOCH + 3_600_000)
+    const refused = await adapter.store.appendRingSnapshot({
+      ...unwritable,
+      transport: { ...unwritable.transport, elapsedMs: (() => undefined) as never },
+    })
+
+    expect(refused.stored).toBe(false)
+    expect(refused.appended).toBe(0)
+    expect(adapter.channel.posted).toEqual([])
+    expect(await readAll(adapter.database, 'ringRecords')).toHaveLength(8)
+    expect(await readAll(adapter.database, 'ringReads')).toHaveLength(1)
+  })
+
+  it('announces a clock correction and a deleted ledger under the same word', async () => {
+    // The archive is the shared state and a receiver re-reads it, so nothing finer would be read.
+    adapter = await openAdapter()
+    await adapter.store.upsertDevice(deviceRecord())
+    await adapter.store.appendRingSnapshot(ringSnapshot())
+    adapter.channel.forget()
+
+    await adapter.store.setPackClock(PACK_DEVICE_KEY, { utcOffsetMinutes: 60, aheadSeconds: 25_268 })
+    await adapter.store.deleteRingLedger(PACK_DEVICE_KEY)
+
+    expect(adapter.channel.posted).toEqual(['ring-read', 'ring-read'])
+  })
+
+  it('drops the least recently read ledger whole once one pack too many has one', async () => {
+    // The one ring budget a test can actually reach. The per-device cap is twenty thousand rows,
+    // and seeding that many through this fake takes minutes — its index maintenance is quadratic
+    // in the rows already under one key, which is exactly the shape of a single pack's ledger.
+    adapter = await openAdapter()
+    const packs = Array.from(
+      { length: MAX_RING_DEVICES + 1 },
+      (_unused, index): DeviceKey => `jk:DEMO0000000${String(index).padStart(4, '0')}`,
+    )
+
+    let last = { prunedRecords: 0 }
+    for (const [index, deviceKey] of packs.entries()) {
+      last = await adapter.store.appendRingSnapshot(
+        ringSnapshot({ deviceKey, observedAt: SAMPLE_EPOCH + index * 3_600_000 }),
+      )
+    }
+
+    // A ledger nobody has read in months is the fairest thing to lose, and it goes whole: rows,
+    // journal and all, counted in the figures the read that evicted it reports.
+    expect(last.prunedRecords).toBe(8)
+    expect(await adapter.store.readRingLedger(packs[0])).toBeNull()
+    expect(await adapter.store.listRingLedgers()).toHaveLength(MAX_RING_DEVICES)
+    expect((await adapter.store.usage()).ringRecords).toBe(MAX_RING_DEVICES * 8)
+  })
+
+  it('sweeps journal rows whose ledger is gone', async () => {
+    // A crash between two deletes cannot produce this — the rows and the journal die in one
+    // transaction — but a half-written database can, and those rows are unreachable budget.
+    adapter = await openAdapter()
+    const orphaned: DeviceKey = 'jk:GONE000000001'
+    await seedRows(adapter.database, 'ringReads', [ringReadRow({ deviceKey: orphaned })])
+
+    const swept = await adapter.store.recover(SAMPLE_EPOCH + 3_600_000)
+
+    expect(swept.orphansRemoved).toBe(1)
+    expect(await adapter.store.readRingLedger(orphaned)).toBeNull()
+  })
+
+  it('leaves the receipt of a pack that answered nothing exactly where it is', async () => {
+    // A ledger holding no record is still a ledger: a pack that stopped answering 0xA7 is what a
+    // stored history of attempts is for, and the sweep runs on every single page load.
+    adapter = await openAdapter()
+    await adapter.store.appendRingSnapshot(
+      ringSnapshot({ observedAt: SAMPLE_EPOCH, outcome: 'no-answer', runs: [] }),
+    )
+
+    const swept = await adapter.store.recover(SAMPLE_EPOCH + 3_600_000)
+
+    expect(swept.orphansRemoved).toBe(0)
+    expect((await adapter.store.readRingLedger(PACK_DEVICE_KEY))?.reads).toHaveLength(1)
+  })
+})
+
 describe('another tab upgrading the schema', () => {
   let adapter: Adapter
 
@@ -390,15 +598,17 @@ async function waitForBlockedCountdown(): Promise<void> {
  * The archive as the build before this one left it.
  *
  * `applySchema` only ever builds every version it knows in one pass, so it cannot play an older
- * build: the store this build's upgrade adds would already be there, and the upgrade under test
- * would abort on the constraint rather than complete.
+ * build: the stores this build's upgrade adds would already be there, and the upgrade under test
+ * would abort on the constraint rather than complete. They are taken back out again here, which is
+ * what makes the version this opens at genuinely the previous one.
  */
 function openThePreviousVersion(name: string): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(name, DATABASE_VERSION - 1)
     request.onupgradeneeded = () => {
       applySchema(request.result, 0)
-      request.result.deleteObjectStore('warnings')
+      request.result.deleteObjectStore('ringRecords')
+      request.result.deleteObjectStore('ringReads')
     }
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
@@ -473,7 +683,7 @@ describe('probing for an archive', () => {
     // A tab running the previous build blocks the upgrade for as long as it stays open, and no
     // event ever arrives to say so. Waiting forever leaves the owner with a page that will never
     // record and never explain itself, so the probe bounds the wait and names the cause.
-    blockingTab = await openDatabase(DATABASE_NAME, DATABASE_VERSION - 1)
+    blockingTab = await openThePreviousVersion(DATABASE_NAME)
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
 
     const probe = openHistoryStore()
@@ -560,8 +770,10 @@ describe('a browser that cannot keep an archive', () => {
     expect(outcome.failure).toBe('no-indexeddb')
     expect(await store.listSessions()).toEqual([])
     expect(await store.readSession(SESSION_ID)).toBeNull()
-    expect(await store.usage()).toEqual({ totalSamples: 0, sessions: 0 })
+    expect(await store.usage()).toEqual({ totalSamples: 0, sessions: 0, ringRecords: 0 })
     expect(await store.recover(SAMPLE_EPOCH)).toEqual({ closed: 0, orphansRemoved: 0 })
+    expect(await store.readRingLedger(PACK_DEVICE_KEY)).toBeNull()
+    expect((await store.appendRingSnapshot(ringSnapshot())).failure).toBe('no-indexeddb')
 
     const visited: HistoryChunk[] = []
     await store.streamChunks(SESSION_ID, PACK_STREAM, { from: 0, to: 1 }, (chunk) => visited.push(chunk))

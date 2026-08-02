@@ -34,9 +34,12 @@ import type {
   CommitOutcome,
   HistoryAvailability,
   HistoryStore,
+  RingIngestOutcome,
+  RingLedgerSummary,
   SessionClosure,
   SessionListing,
   SessionPatch,
+  StoredRingLedger,
   StoredSession,
 } from '../../src/application/history/port'
 import { renderWindowFor } from '../../src/application/history/port'
@@ -44,6 +47,14 @@ import { planPrune } from '../../src/domain/history/budget'
 import { isReadableLayout } from '../../src/domain/history/columns'
 import type { ChunkExtent, PruneCandidate, PrunePlan } from '../../src/domain/history/budget'
 import { deviceLabel } from '../../src/domain/history/identity'
+import { MAX_RING_READS_PER_DEVICE, planRingPrune } from '../../src/domain/history/ringBudget'
+import type { RingDeviceExtent } from '../../src/domain/history/ringBudget'
+import { ALIGNMENT_TAIL_RECORDS, foldRingSnapshot } from '../../src/domain/history/ringLedger'
+import type { RingLedgerTail } from '../../src/domain/history/RingLedgerTail'
+import type { RingMergeOutcome } from '../../src/domain/history/RingMergeOutcome'
+import type { RingReadRow } from '../../src/domain/history/RingReadRow'
+import type { RingRecordRow } from '../../src/domain/history/RingRecordRow'
+import type { RingSnapshot } from '../../src/domain/history/RingSnapshot'
 import { HEARTBEAT_STALE_MS, PACK_STREAM, SOLAR_STREAM } from '../../src/domain/history/types'
 import type {
   ChunkKey,
@@ -88,6 +99,11 @@ export class MemoryHistoryStore implements HistoryStore {
   private readonly chunks = new Map<string, HistoryChunk>()
   private readonly devices = new Map<DeviceKey, DeviceRecord>()
   private readonly warnings = new Map<string, WarningRecord>()
+  /** Seq-ascending, dense. Its own Map, because ring rows and session rows share no budget. */
+  private readonly ringRows = new Map<DeviceKey, RingRecordRow[]>()
+  /** Ascending by observedAt, capped. Keyed on it too, as the adapter's [deviceKey, observedAt] is. */
+  private readonly ringReads = new Map<DeviceKey, RingReadRow[]>()
+  private readonly ringRetainedFrom = new Map<DeviceKey, number>()
   private readonly watchers = new Set<() => void>()
   private readonly now: () => number
 
@@ -268,6 +284,10 @@ export class MemoryHistoryStore implements HistoryStore {
             ...record,
             // Only renameDevice may clear the owner's name; a reconnect must not undo a rename.
             userLabel: record.userLabel ?? stored.userLabel,
+            // The same idiom, for the same reason: these two are the owner's answers about the
+            // pack's clock, and setPackClock alone may clear them.
+            packUtcOffsetMinutes: record.packUtcOffsetMinutes ?? stored.packUtcOffsetMinutes,
+            packClockAheadSeconds: record.packClockAheadSeconds ?? stored.packClockAheadSeconds,
             firstSeenAt: Math.min(stored.firstSeenAt, record.firstSeenAt),
             lastSeenAt: Math.max(stored.lastSeenAt, record.lastSeenAt),
             // A hint the writer maintains; a device row never counts down.
@@ -286,6 +306,86 @@ export class MemoryHistoryStore implements HistoryStore {
     const renamed: DeviceRecord = { ...stored, userLabel: chosen === '' ? null : chosen }
     this.devices.set(key, structuredClone(renamed))
     return structuredClone(renamed)
+  }
+
+  // ── the pack's own ring ────────────────────────────────────────────────────
+
+  /**
+   * Folds one read in and journals it, as the adapter does it in one ring-scoped transaction.
+   *
+   * Nothing here touches `totalSamples`, a session row or a chunk. That is not an oversight to be
+   * tidied up later: the two budgets must not be able to evict each other, and a fake that folded
+   * ring rows into the sample counter would let a spec above the port pass on an arrangement the
+   * real adapter refuses to make.
+   */
+  async appendRingSnapshot(snapshot: RingSnapshot): Promise<RingIngestOutcome> {
+    const stored = this.ringRows.get(snapshot.deviceKey) ?? []
+    const { rows, merge } = foldRingSnapshot(tailOf(stored), snapshot, snapshot.observedAt)
+
+    const kept = [...stored, ...rows.map((row) => structuredClone(row))]
+    this.ringRows.set(snapshot.deviceKey, kept)
+    this.journal(snapshot, merge, kept)
+    const prunedRecords = this.pruneRing()
+
+    return {
+      ...merge,
+      stored: true,
+      totalRecords: (this.ringRows.get(snapshot.deviceKey) ?? []).length,
+      prunedRecords,
+      failure: null,
+    }
+  }
+
+  async readRingLedger(deviceKey: DeviceKey): Promise<StoredRingLedger | null> {
+    const records = this.ringRows.get(deviceKey)
+    const reads = this.ringReads.get(deviceKey)
+    // A read that answered nothing still has a journal row, and that row is the only evidence there
+    // is about it — so a ledger holding no record is still a ledger.
+    if (records === undefined && reads === undefined) return null
+
+    return {
+      deviceKey,
+      records: (records ?? []).map((row) => structuredClone(row)),
+      reads: [...(reads ?? [])].reverse().map((read) => structuredClone(read)),
+      device: this.deviceOf(deviceKey),
+      retainedFromSeq: this.ringRetainedFrom.get(deviceKey) ?? null,
+    }
+  }
+
+  async listRingLedgers(): Promise<readonly RingLedgerSummary[]> {
+    return this.ringDeviceKeys()
+      .map((deviceKey) => {
+        const rows = this.ringRows.get(deviceKey) ?? []
+        return {
+          deviceKey,
+          label: deviceLabel(this.devices.get(deviceKey) ?? null),
+          records: rows.length,
+          lastReadAt: this.lastReadAtOf(deviceKey),
+          oldestPackClockSeconds: rows[0]?.packClockSeconds ?? 0,
+          newestPackClockSeconds: rows[rows.length - 1]?.packClockSeconds ?? 0,
+        }
+      })
+      .sort((left, right) => right.lastReadAt - left.lastReadAt)
+  }
+
+  async setPackClock(
+    deviceKey: DeviceKey,
+    clock: { readonly utcOffsetMinutes: number | null; readonly aheadSeconds: number | null },
+  ): Promise<DeviceRecord | null> {
+    const stored = this.devices.get(deviceKey)
+    if (stored === undefined) return null
+
+    const answered: DeviceRecord = {
+      ...stored,
+      packUtcOffsetMinutes: clock.utcOffsetMinutes,
+      packClockAheadSeconds: clock.aheadSeconds,
+    }
+    this.devices.set(deviceKey, structuredClone(answered))
+    return structuredClone(answered)
+  }
+
+  async deleteRingLedger(deviceKey: DeviceKey): Promise<void> {
+    this.dropRingLedger(deviceKey)
   }
 
   // ── housekeeping ───────────────────────────────────────────────────────────
@@ -327,8 +427,14 @@ export class MemoryHistoryStore implements HistoryStore {
     return { closed, orphansRemoved }
   }
 
-  async usage(): Promise<{ readonly totalSamples: number; readonly sessions: number }> {
-    return { totalSamples: this.totalSamples, sessions: this.sessions.size }
+  async usage(): Promise<{
+    readonly totalSamples: number
+    readonly sessions: number
+    readonly ringRecords: number
+  }> {
+    let ringRecords = 0
+    for (const rows of this.ringRows.values()) ringRecords += rows.length
+    return { totalSamples: this.totalSamples, sessions: this.sessions.size, ringRecords }
   }
 
   watch(onChanged: () => void): () => void {
@@ -506,6 +612,99 @@ export class MemoryHistoryStore implements HistoryStore {
     return { from, to: Math.max(from, to) }
   }
 
+  /**
+   * One journal row per read, whatever the read established.
+   *
+   * Keyed on `observedAt`, so two reads at the same millisecond collide into one exactly as they do
+   * under the adapter's `[deviceKey, observedAt]` key path — a fake that kept both would hide a
+   * clash the real store cannot.
+   */
+  private journal(
+    snapshot: RingSnapshot,
+    merge: RingMergeOutcome,
+    ledger: readonly RingRecordRow[],
+  ): void {
+    const anchor = newestScheduledRecord(snapshot)
+    const row: RingReadRow = {
+      deviceKey: snapshot.deviceKey,
+      observedAt: snapshot.observedAt,
+      outcome: snapshot.outcome,
+      notificationBytes: snapshot.transport.notificationBytes,
+      notificationCount: snapshot.transport.notificationCount,
+      assembledFrameCount: snapshot.transport.assembledFrameCount,
+      logFrameCount: snapshot.transport.logFrameCount,
+      indexSpan: indexSpanOf(snapshot),
+      recordsReceived: recordsReceivedIn(snapshot),
+      recordsAppended: merge.appended,
+      overlap: merge.overlap,
+      ringShift: merge.ringShift,
+      gapDeclared: merge.gapDeclared,
+      runsDiscarded: merge.runsDiscarded,
+      newestSampleCounter: anchor === null ? null : counterIn(anchor),
+      newestSampleSeq: anchor === null ? null : seqOfBytes(ledger, anchor),
+      elapsedMs: snapshot.transport.elapsedMs,
+    }
+
+    const kept = (this.ringReads.get(snapshot.deviceKey) ?? []).filter(
+      (read) => read.observedAt !== row.observedAt,
+    )
+    kept.push(structuredClone(row))
+    kept.sort((left, right) => left.observedAt - right.observedAt)
+    this.ringReads.set(snapshot.deviceKey, kept.slice(-MAX_RING_READS_PER_DEVICE))
+  }
+
+  /** Carries out what `planRingPrune` decided, and answers with the rows it gave up. */
+  private pruneRing(): number {
+    const plan = planRingPrune(this.ringExtents())
+    let freed = 0
+
+    for (const deviceKey of plan.dropWhole) {
+      freed += (this.ringRows.get(deviceKey) ?? []).length
+      this.dropRingLedger(deviceKey)
+    }
+
+    for (const eviction of plan.trim) {
+      const rows = this.ringRows.get(eviction.deviceKey) ?? []
+      const kept = rows.filter((row) => row.seq >= eviction.fromSeq)
+      // The survivor declares the break, exactly as `retainedFrom` does for a truncated session:
+      // what came before it is gone, and nothing may read the ledger as contiguous across it.
+      if (kept.length > 0) kept[0] = { ...kept[0], followsGap: true }
+      freed += rows.length - kept.length
+      this.ringRows.set(eviction.deviceKey, kept)
+      this.ringRetainedFrom.set(eviction.deviceKey, eviction.fromSeq)
+    }
+
+    return freed
+  }
+
+  private ringExtents(): RingDeviceExtent[] {
+    return this.ringDeviceKeys().map((deviceKey) => {
+      const rows = this.ringRows.get(deviceKey) ?? []
+      return {
+        deviceKey,
+        records: rows.length,
+        oldestSeq: rows[0]?.seq ?? 0,
+        lastReadAt: this.lastReadAtOf(deviceKey),
+      }
+    })
+  }
+
+  /** Every pack with a ledger or a journal, which is every pack a read was ever filed against. */
+  private ringDeviceKeys(): DeviceKey[] {
+    return [...new Set([...this.ringRows.keys(), ...this.ringReads.keys()])]
+  }
+
+  private lastReadAtOf(deviceKey: DeviceKey): number {
+    const reads = this.ringReads.get(deviceKey) ?? []
+    return reads[reads.length - 1]?.observedAt ?? 0
+  }
+
+  private dropRingLedger(deviceKey: DeviceKey): void {
+    this.ringRows.delete(deviceKey)
+    this.ringReads.delete(deviceKey)
+    this.ringRetainedFrom.delete(deviceKey)
+  }
+
   private lastSampleAtOf(id: SessionId): number | null {
     let latest: number | null = null
     for (const chunk of this.chunks.values()) {
@@ -519,6 +718,88 @@ export class MemoryHistoryStore implements HistoryStore {
 
 function keyOf(chunk: ChunkKey): string {
   return `${chunk.sessionId}|${chunk.stream}|${chunk.seq}`
+}
+
+/** Where the event code sits in a record, and the value that means "nothing happened". */
+const EVENT_CODE_BYTE = 4
+const SCHEDULED_SAMPLE = 0
+
+function tailOf(rows: readonly RingRecordRow[]): RingLedgerTail {
+  return {
+    // A ledger whose head was pruned still hands out seq above everything it ever stored; one
+    // emptied outright starts again at zero, because nothing is left to count from.
+    nextSeq: rows.length === 0 ? 0 : rows[rows.length - 1].seq + 1,
+    rows: rows.slice(-ALIGNMENT_TAIL_RECORDS),
+  }
+}
+
+function recordsReceivedIn(snapshot: RingSnapshot): number {
+  return snapshot.runs.reduce((total, run) => total + run.records.length, 0)
+}
+
+function indexSpanOf(snapshot: RingSnapshot): { readonly from: number; readonly to: number } | null {
+  let from: number | null = null
+  let to: number | null = null
+
+  for (const run of snapshot.runs) {
+    if (run.records.length === 0) continue
+    const last = run.firstIndex + run.records.length - 1
+    if (from === null || run.firstIndex < from) from = run.firstIndex
+    if (to === null || last > to) to = last
+  }
+
+  return from === null || to === null ? null : { from, to }
+}
+
+/**
+ * The newest scheduled record the read carried — the read's one clock anchor.
+ *
+ * Newest by ring index rather than by counter: after a backward rewrite the counter runs down, and
+ * the whole point of the anchor is to place the read against the face in force at the time.
+ */
+function newestScheduledRecord(snapshot: RingSnapshot): Uint8Array | null {
+  let newestIndex = Number.NEGATIVE_INFINITY
+  let newest: Uint8Array | null = null
+
+  for (const run of snapshot.runs) {
+    for (let position = 0; position < run.records.length; position += 1) {
+      const bytes = run.records[position]
+      if (bytes[EVENT_CODE_BYTE] !== SCHEDULED_SAMPLE) continue
+      const index = run.firstIndex + position
+      if (index <= newestIndex) continue
+      newestIndex = index
+      newest = bytes
+    }
+  }
+
+  return newest
+}
+
+/**
+ * Where the anchor landed in the ledger, found by matching the bytes from the newest end.
+ *
+ * Adjacent records are byte-identical often enough that this can land on either half of such a
+ * pair. Both halves carry the same counter and sit in the same clock segment, so which one is
+ * named changes nothing the field is read for; and a run of identical rows is indistinguishable by
+ * construction, so there is no better answer to be had.
+ */
+function seqOfBytes(ledger: readonly RingRecordRow[], bytes: Uint8Array): number | null {
+  for (let at = ledger.length - 1; at >= 0; at -= 1) {
+    if (sameBytes(ledger[at].bytes, bytes)) return ledger[at].seq
+  }
+  return null
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false
+  for (let at = 0; at < left.length; at += 1) {
+    if (left[at] !== right[at]) return false
+  }
+  return true
+}
+
+function counterIn(bytes: Uint8Array): number {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true)
 }
 
 /** Descending [sessionId, seq], matching how a 'prev' cursor on the byTime index breaks equal-`at`. */

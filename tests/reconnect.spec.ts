@@ -38,6 +38,7 @@ function spawn(options: { deviceId?: string | null; deviceName?: string | null }
     createBmsLink: bms.create,
     createSolarScan: solar.create,
     historyStore: () => store,
+    refreshRingLedger: async () => undefined,
     now: () => clock,
     monotonic: () => clock,
     newId: () => `session-${(ids += 1)}`,

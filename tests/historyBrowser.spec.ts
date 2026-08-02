@@ -17,16 +17,26 @@ import { createHistoryBrowser } from '../src/application/history/historyBrowser'
 import type { HistoryBrowser } from '../src/application/history/historyBrowser'
 import { MemoryHistoryStore } from './support/MemoryHistoryStore'
 import {
+  PACK_DEVICE_KEY,
+  RING_EPOCH_COUNTER_SECONDS,
   SAMPLE_EPOCH,
   SESSION_ID,
   inForeignLayout,
   packChunk,
   packSamples,
+  ringRecords,
+  ringSnapshot,
   sessionPatch,
   sessionRecord,
   solarChunk,
   solarSamples,
 } from './support/samples'
+import { PACK_SAMPLING_PERIOD_SECONDS } from '../src/domain/history/ringClock'
+
+/** Lets the microtask chain behind a fire-and-forget `refresh()` settle before an assertion. */
+async function flushMicrotasks(): Promise<void> {
+  for (let turn = 0; turn < 10; turn += 1) await Promise.resolve()
+}
 
 describe('reading a session through the archive model', () => {
   let store: MemoryHistoryStore
@@ -99,5 +109,86 @@ describe('reading a session through the archive model', () => {
     expect(loaded?.pack).toEqual([])
     expect(loaded?.solar).toEqual([])
     expect(loaded?.unreadableChunks).toBe(0)
+  })
+})
+
+describe("reading the pack's own ring through the archive model", () => {
+  const OTHER_PACK_KEY = 'jk:OTHERPACK002'
+
+  let store: MemoryHistoryStore
+  let browser: HistoryBrowser
+
+  beforeEach(() => {
+    store = new MemoryHistoryStore()
+    browser = createHistoryBrowser({
+      store: () => store,
+      now: () => SAMPLE_EPOCH,
+      download: () => undefined,
+    })
+  })
+
+  afterEach(() => {
+    browser.dispose()
+    store.close()
+  })
+
+  it('loads a ledger alongside the session list', async () => {
+    await store.appendRingSnapshot(ringSnapshot())
+
+    await browser.refresh()
+
+    expect(browser.ringLedgers.value).toHaveLength(1)
+    expect(browser.ringLedgers.value[0].deviceKey).toBe(PACK_DEVICE_KEY)
+    expect(browser.ringLedgers.value[0].records).toBe(8)
+  })
+
+  it('supersedes a ledger read still in flight', async () => {
+    await store.appendRingSnapshot(ringSnapshot({ deviceKey: PACK_DEVICE_KEY }))
+    await store.appendRingSnapshot(
+      // Below MIN_ALIGNMENT_OVERLAP and an empty ledger is opened, not broken — but a run this
+      // short is still discarded either way, so this one carries five records to actually land.
+      ringSnapshot({ deviceKey: OTHER_PACK_KEY, runs: [{ firstIndex: 0, records: ringRecords(5) }] }),
+    )
+
+    // Neither call is awaited before the next fires, so the second request's answer must be the
+    // one left standing whatever order the two reads themselves settle in.
+    const first = browser.loadRingLedger(PACK_DEVICE_KEY)
+    const second = browser.loadRingLedger(OTHER_PACK_KEY)
+    await Promise.all([first, second])
+
+    expect(browser.ringLedger.value?.deviceKey).toBe(OTHER_PACK_KEY)
+    expect(browser.ringLedger.value?.records).toHaveLength(5)
+  })
+
+  it("re-reads a loaded ledger when a foreign tab's ring-read arrives", async () => {
+    const opening = ringRecords(8)
+    await store.appendRingSnapshot(ringSnapshot({ runs: [{ firstIndex: 0, records: opening }] }))
+    await browser.loadRingLedger(PACK_DEVICE_KEY)
+    expect(browser.ringLedger.value?.records).toHaveLength(8)
+
+    // A second tab folding its own read straight into the store, then announcing the change the
+    // way a BroadcastChannel message would carry it here — the channel never delivers to the tab
+    // that posted, so this tab's copy is stale until the watch fires and re-reads it. The run
+    // repeats four already-stored records so it aligns, then carries two genuinely new ones.
+    const overlapThenNew = [
+      ...opening.slice(4),
+      ...ringRecords(2, {
+        counterSeconds: RING_EPOCH_COUNTER_SECONDS + 8 * PACK_SAMPLING_PERIOD_SECONDS,
+      }),
+    ]
+    await store.appendRingSnapshot(
+      ringSnapshot({ runs: [{ firstIndex: 4, records: overlapThenNew }] }),
+    )
+    store.announce()
+    await flushMicrotasks()
+
+    expect(browser.ringLedger.value?.records).toHaveLength(10)
+  })
+
+  it('survives a store that holds no ledger', async () => {
+    await expect(browser.loadRingLedger(OTHER_PACK_KEY)).resolves.toBeUndefined()
+
+    expect(browser.ringLedger.value).toBeNull()
+    expect(browser.ringLoading.value).toBe(false)
   })
 })

@@ -3,10 +3,16 @@
  *
  * It executes plans and never makes them: what to drop is decided by `planPrune`, what a chunk
  * holds is decided by the column layout, and what a session means is decided by the ledger. This
- * file's whole job is that those decisions land atomically. Every write is one transaction scoped
- * to all four stores, because IndexedDB serialises overlapping-scope readwrite transactions across
- * connections on the same origin — which makes commit-plus-prune atomic against a second tab for
- * free, where a read-modify-write split across an await would not be.
+ * file's whole job is that those decisions land atomically. A session write is one transaction
+ * scoped to every session store, because IndexedDB serialises overlapping-scope readwrite
+ * transactions across connections on the same origin — which makes commit-plus-prune atomic against
+ * a second tab for free, where a read-modify-write split across an await would not be.
+ *
+ * That same serialisation is why a ring merge is scoped to `RING_STORES` and never to
+ * `EVERY_STORE`. The two scopes overlap in nothing but the device row, so an 800-row merge can
+ * neither queue behind nor abort a live recording's chunk commit — and the ring keeps no counter in
+ * the meta row precisely because a counter there would drag `META` into the scope and put the merge
+ * back in the recorder's path.
  *
  * Two counters carry the archive's integrity and both move under one rule: `sealedSamples` on a
  * session and `totalSamples` in the meta row change only when a chunk seals, and only on the
@@ -28,6 +34,15 @@ import type {
   PruneProtection,
   PruneTruncation,
 } from '../../domain/history/budget'
+import { MAX_RING_READS_PER_DEVICE, planRingPrune } from '../../domain/history/ringBudget'
+import type { RingDeviceExtent, RingEviction } from '../../domain/history/ringBudget'
+import { ALIGNMENT_TAIL_RECORDS, foldRingSnapshot } from '../../domain/history/ringLedger'
+import type { RingLedgerTail } from '../../domain/history/RingLedgerTail'
+import type { RingMergeOutcome } from '../../domain/history/RingMergeOutcome'
+import type { RingReadRow } from '../../domain/history/RingReadRow'
+import type { RingRecordRow } from '../../domain/history/RingRecordRow'
+import type { RingSnapshot } from '../../domain/history/RingSnapshot'
+import type { StoredRingLedger } from '../../domain/history/StoredRingLedger'
 import { HEARTBEAT_STALE_MS, PACK_STREAM } from '../../domain/history/types'
 import type {
   DeviceKey,
@@ -48,6 +63,9 @@ import type {
   CommitOutcome,
   HistoryAvailability,
   HistoryStore,
+  HistoryUnavailableReason,
+  RingIngestOutcome,
+  RingLedgerSummary,
   SessionClosure,
   SessionListing,
   SessionPatch,
@@ -57,14 +75,20 @@ import type { ArchiveChannel } from './archiveChannel'
 import { classifyWriteFailure, cursorEach, requestAsPromise, runTransaction } from './idb'
 
 export const DATABASE_NAME = 'shunt.log'
-export const DATABASE_VERSION = 2
+export const DATABASE_VERSION = 5
 
 const SESSIONS = 'sessions'
 const CHUNKS = 'chunks'
 const DEVICES = 'devices'
 const META = 'meta'
 const WARNINGS = 'warnings'
+const RING_RECORDS = 'ringRecords'
+const RING_READS = 'ringReads'
+
+/** Everything a session write touches. The ring stores are deliberately not among them. */
 const EVERY_STORE = [SESSIONS, CHUNKS, DEVICES, META, WARNINGS]
+/** Everything a ring write touches, and nothing a recording does but the device row. */
+const RING_STORES = [RING_RECORDS, RING_READS, DEVICES]
 
 const BY_STARTED_AT = 'byStartedAt'
 const BY_DEVICE = 'byDevice'
@@ -122,6 +146,30 @@ export function applySchema(database: IDBDatabase, oldVersion: number): void {
     // indexed by time for the standalone log, which reads them most-recent-first across sessions.
     const warnings = database.createObjectStore(WARNINGS, { keyPath: ['sessionId', 'seq'] })
     warnings.createIndex(BY_TIME, 'at')
+  }
+  if (oldVersion < 3) {
+    // Keyed by the pack's own write order, so one device's ledger is a contiguous ascending range
+    // and a row's key never changes. Indexed by device as well, so a whole-ledger delete cursors
+    // the index rather than a constructed compound range — the same reason evictSession does.
+    const records = database.createObjectStore(RING_RECORDS, { keyPath: ['deviceKey', 'seq'] })
+    records.createIndex(BY_DEVICE, 'deviceKey')
+
+    // Two stores rather than one: the ledger grows without bound and is folded over, while the
+    // journal is a bounded audit trail that is never merged and never charted.
+    const reads = database.createObjectStore(RING_READS, { keyPath: ['deviceKey', 'observedAt'] })
+    reads.createIndex(BY_DEVICE, 'deviceKey')
+  }
+  // A version number proves an upgrade ran, not that it built what this code now builds — a
+  // database can carry a bumped version from code that no longer exists. So every upgrade ends by
+  // re-verifying the stores this schema owns and building whichever are missing, whatever the
+  // version pair that got it here.
+  if (!database.objectStoreNames.contains(RING_RECORDS)) {
+    const records = database.createObjectStore(RING_RECORDS, { keyPath: ['deviceKey', 'seq'] })
+    records.createIndex(BY_DEVICE, 'deviceKey')
+  }
+  if (!database.objectStoreNames.contains(RING_READS)) {
+    const reads = database.createObjectStore(RING_READS, { keyPath: ['deviceKey', 'observedAt'] })
+    reads.createIndex(BY_DEVICE, 'deviceKey')
   }
 }
 
@@ -391,6 +439,112 @@ export class IdbHistoryStore implements HistoryStore {
     return renamed
   }
 
+  // ── the pack's own ring ────────────────────────────────────────────────────
+
+  async appendRingSnapshot(snapshot: RingSnapshot): Promise<RingIngestOutcome> {
+    if (!this.connected) return refusedIngest(this.state.reason)
+    try {
+      const ingested = await this.mergeRing(snapshot)
+      this.channel.post('ring-read')
+      return ingested
+    } catch (error) {
+      // No retry, and no room made. A ring write may not evict sessions — the two budgets cannot
+      // reach each other, which is the whole reason the ledger is its own store — and its own prune
+      // has already run inside the transaction that failed, so a second attempt would free exactly
+      // nothing. The read stays on screen, unfiled, carrying the reason.
+      return refusedIngest(classifyWriteFailure(error) === 'quota' ? 'quota-exhausted' : null)
+    }
+  }
+
+  async readRingLedger(deviceKey: DeviceKey): Promise<StoredRingLedger | null> {
+    if (!this.connected) return null
+    return runTransaction(this.database, RING_STORES, 'readonly', async (transaction) => {
+      const records = await this.readRingRows(transaction, deviceKey)
+      const reads = await this.readRingJournal(transaction, deviceKey)
+      // A read that answered nothing still has a journal row, and that row is the only evidence
+      // there is about it — so a ledger holding no record is still a ledger.
+      if (records.length === 0 && reads.length === 0) return null
+
+      const device = await requestAsPromise<DeviceRecord | undefined>(
+        transaction.objectStore(DEVICES).get(deviceKey),
+      )
+      return {
+        deviceKey,
+        records,
+        reads,
+        device: device ?? null,
+        retainedFromSeq: retainedFromSeqOf(records),
+      }
+    })
+  }
+
+  async listRingLedgers(): Promise<readonly RingLedgerSummary[]> {
+    if (!this.connected) return []
+    return runTransaction(this.database, RING_STORES, 'readonly', async (transaction) => {
+      const summaries: RingLedgerSummary[] = []
+      for (const deviceKey of await this.ringDeviceKeys(transaction)) {
+        const device = await requestAsPromise<DeviceRecord | undefined>(
+          transaction.objectStore(DEVICES).get(deviceKey),
+        )
+        const oldest = await this.edgeRingRow(transaction, deviceKey, 'next')
+        const newest = await this.edgeRingRow(transaction, deviceKey, 'prev')
+        summaries.push({
+          deviceKey,
+          label: deviceLabel(device ?? null),
+          records: await this.countRingRecords(transaction, deviceKey),
+          lastReadAt: await this.lastReadAtOf(transaction, deviceKey),
+          // The pack's own clock face, not wall time, so this row is honest with no correction
+          // behind it. A ledger holding no record answers zero rather than inventing a face.
+          oldestPackClockSeconds: oldest?.packClockSeconds ?? 0,
+          newestPackClockSeconds: newest?.packClockSeconds ?? 0,
+        })
+      }
+      return summaries.sort((left, right) => right.lastReadAt - left.lastReadAt)
+    })
+  }
+
+  async setPackClock(
+    deviceKey: DeviceKey,
+    clock: {
+      readonly utcOffsetMinutes: number | null
+      readonly aheadSeconds: number | null
+    },
+  ): Promise<DeviceRecord | null> {
+    if (!this.connected) return null
+    const answered = await runTransaction(
+      this.database,
+      [DEVICES],
+      'readwrite',
+      // Read and write as one transaction, exactly as renameDevice does, so two tabs answering at
+      // once cannot interleave into a lost update.
+      async (transaction) => {
+        const devices = transaction.objectStore(DEVICES)
+        const stored = await requestAsPromise<DeviceRecord | undefined>(devices.get(deviceKey))
+        if (stored === undefined) return null
+        // Written verbatim, null included: the owner may take an answer back, and nothing else may.
+        const updated: DeviceRecord = {
+          ...stored,
+          packUtcOffsetMinutes: clock.utcOffsetMinutes,
+          packClockAheadSeconds: clock.aheadSeconds,
+        }
+        await requestAsPromise(devices.put(updated))
+        return updated
+      },
+    )
+    if (answered !== null) this.channel.post('ring-read')
+    return answered
+  }
+
+  async deleteRingLedger(deviceKey: DeviceKey): Promise<void> {
+    if (!this.connected) return
+    await runTransaction(this.database, RING_STORES, 'readwrite', async (transaction) => {
+      // Rows and journal die together; the device row survives, because it is the label and it
+      // carries the owner's answers about this pack's clock.
+      await this.dropRingLedger(transaction, deviceKey)
+    })
+    this.channel.post('ring-read')
+  }
+
   /**
    * The sweep that runs once, on open, before anything else touches the archive.
    *
@@ -469,18 +623,35 @@ export class IdbHistoryStore implements HistoryStore {
         return { closed, orphansRemoved }
       },
     )
+    // Its own ring-scoped transaction, so the recovery write stays out of the ring stores and the
+    // ring sweep stays out of the recorder's way.
+    const strandedJournals = await this.sweepRingJournals()
     if (swept.closed > 0) this.channel.post('session-closed')
-    return swept
+    return { ...swept, orphansRemoved: swept.orphansRemoved + strandedJournals }
   }
 
-  async usage(): Promise<{ readonly totalSamples: number; readonly sessions: number }> {
-    if (!this.connected) return { totalSamples: this.knownTotal, sessions: 0 }
-    return runTransaction(this.database, [SESSIONS, META], 'readonly', async (transaction) => {
-      const meta = await this.readMeta(transaction, 0)
-      const sessions = await requestAsPromise<number>(transaction.objectStore(SESSIONS).count())
-      this.knownTotal = meta.totalSamples
-      return { totalSamples: meta.totalSamples, sessions }
-    })
+  async usage(): Promise<{
+    readonly totalSamples: number
+    readonly sessions: number
+    readonly ringRecords: number
+  }> {
+    if (!this.connected) return { totalSamples: this.knownTotal, sessions: 0, ringRecords: 0 }
+    return runTransaction(
+      this.database,
+      [SESSIONS, META, RING_RECORDS],
+      'readonly',
+      async (transaction) => {
+        const meta = await this.readMeta(transaction, 0)
+        const sessions = await requestAsPromise<number>(transaction.objectStore(SESSIONS).count())
+        // Its own line, because ring rows are on their own budget: `planPrune` never sees one and
+        // no ring write ever moved the counter this reads.
+        const ringRecords = await requestAsPromise<number>(
+          transaction.objectStore(RING_RECORDS).count(),
+        )
+        this.knownTotal = meta.totalSamples
+        return { totalSamples: meta.totalSamples, sessions, ringRecords }
+      },
+    )
   }
 
   watch(onChanged: () => void): () => void {
@@ -726,6 +897,288 @@ export class IdbHistoryStore implements HistoryStore {
     return found
   }
 
+  // ── folding a ring read in ─────────────────────────────────────────────────
+
+  /**
+   * The whole merge as one write: place the read, append what is new, journal the attempt, and
+   * carry out whatever the ring budget decided.
+   *
+   * Nothing here reads or writes a session store, the meta row or a chunk. That is not an oversight
+   * to tidy up later — it is the property that keeps an 800-row merge off the recorder's critical
+   * path, and it is why per-device counts come from `count()` over a key range rather than from a
+   * counter somebody would have to keep in `meta`.
+   */
+  private mergeRing(snapshot: RingSnapshot): Promise<RingIngestOutcome> {
+    return runTransaction(this.database, RING_STORES, 'readwrite', async (transaction) => {
+      const records = transaction.objectStore(RING_RECORDS)
+      const tail = await this.readRingTail(transaction, snapshot.deviceKey)
+      // The read's own wall clock stamps the rows it creates: `firstReadAt` is provenance, and this
+      // store has no clock of its own that would be truer than the one the transfer arrived under.
+      const folded = foldRingSnapshot(tail, snapshot, snapshot.observedAt)
+      for (const row of folded.rows) await requestAsPromise(records.put(row))
+
+      await this.journalRead(transaction, snapshot, folded.merge, [...tail.rows, ...folded.rows])
+      const prunedRecords = await this.pruneRing(transaction)
+
+      return {
+        ...folded.merge,
+        stored: true,
+        totalRecords: await this.countRingRecords(transaction, snapshot.deviceKey),
+        prunedRecords,
+        failure: null,
+      }
+    })
+  }
+
+  /**
+   * As much of the ledger's newest end as the merge needs to place a read against it.
+   *
+   * Read backwards from the head and turned round, because alignment only ever succeeds near the
+   * head: the ring drops from its own tail, so a read can never reach further back than what the
+   * pack still holds.
+   */
+  private async readRingTail(
+    transaction: IDBTransaction,
+    deviceKey: DeviceKey,
+  ): Promise<RingLedgerTail> {
+    const rows: RingRecordRow[] = []
+    const newestFirst = transaction
+      .objectStore(RING_RECORDS)
+      .openCursor(ringRangeOf(deviceKey), 'prev')
+    await cursorEach(newestFirst, (cursor) => {
+      if (rows.length >= ALIGNMENT_TAIL_RECORDS) return false
+      rows.push(cursor.value as RingRecordRow)
+    })
+    rows.reverse()
+    // A ledger whose head was pruned still hands out seq above everything it ever stored; one
+    // emptied outright starts again at zero, because nothing is left to count from.
+    return { nextSeq: rows.length === 0 ? 0 : rows[rows.length - 1].seq + 1, rows }
+  }
+
+  /**
+   * One journal row per read, whatever the read established, capped at the newest few.
+   *
+   * The key is [deviceKey, observedAt], so two reads at the same millisecond collide into one row
+   * rather than accumulating — which is the same thing the memory store does, for the same reason.
+   */
+  private async journalRead(
+    transaction: IDBTransaction,
+    snapshot: RingSnapshot,
+    merge: RingMergeOutcome,
+    ledger: readonly RingRecordRow[],
+  ): Promise<void> {
+    const reads = transaction.objectStore(RING_READS)
+    const anchor = newestScheduledRecord(snapshot)
+    const row: RingReadRow = {
+      deviceKey: snapshot.deviceKey,
+      observedAt: snapshot.observedAt,
+      outcome: snapshot.outcome,
+      notificationBytes: snapshot.transport.notificationBytes,
+      notificationCount: snapshot.transport.notificationCount,
+      assembledFrameCount: snapshot.transport.assembledFrameCount,
+      logFrameCount: snapshot.transport.logFrameCount,
+      indexSpan: indexSpanOf(snapshot),
+      recordsReceived: recordsReceivedIn(snapshot),
+      recordsAppended: merge.appended,
+      overlap: merge.overlap,
+      ringShift: merge.ringShift,
+      gapDeclared: merge.gapDeclared,
+      runsDiscarded: merge.runsDiscarded,
+      newestSampleCounter: anchor === null ? null : counterIn(anchor),
+      newestSampleSeq: anchor === null ? null : seqOfBytes(ledger, anchor),
+      elapsedMs: snapshot.transport.elapsedMs,
+    }
+    await requestAsPromise(reads.put(row))
+
+    const held = await requestAsPromise<number>(reads.count(ringRangeOf(snapshot.deviceKey)))
+    let over = held - MAX_RING_READS_PER_DEVICE
+    if (over <= 0) return
+    await cursorEach(reads.openKeyCursor(ringRangeOf(snapshot.deviceKey)), (cursor) => {
+      if (over <= 0) return false
+      reads.delete(cursor.primaryKey)
+      over -= 1
+    })
+  }
+
+  /** Carries out what `planRingPrune` decided, and answers with every row it gave up. */
+  private async pruneRing(transaction: IDBTransaction): Promise<number> {
+    const plan = planRingPrune(await this.ringExtents(transaction))
+    let freed = 0
+
+    for (const deviceKey of plan.dropWhole) {
+      freed += await this.countRingRecords(transaction, deviceKey)
+      await this.dropRingLedger(transaction, deviceKey)
+    }
+    for (const eviction of plan.trim) freed += await this.trimRingLedger(transaction, eviction)
+
+    return freed
+  }
+
+  private async ringExtents(transaction: IDBTransaction): Promise<RingDeviceExtent[]> {
+    const extents: RingDeviceExtent[] = []
+    for (const deviceKey of await this.ringDeviceKeys(transaction)) {
+      extents.push({
+        deviceKey,
+        records: await this.countRingRecords(transaction, deviceKey),
+        oldestSeq: (await this.edgeRingRow(transaction, deviceKey, 'next'))?.seq ?? 0,
+        lastReadAt: await this.lastReadAtOf(transaction, deviceKey),
+      })
+    }
+    return extents
+  }
+
+  /** Cuts the head off one ledger, which then has to say that its oldest row follows a break. */
+  private async trimRingLedger(
+    transaction: IDBTransaction,
+    eviction: RingEviction,
+  ): Promise<number> {
+    const records = transaction.objectStore(RING_RECORDS)
+    const doomed = IDBKeyRange.bound(
+      [eviction.deviceKey],
+      [eviction.deviceKey, eviction.fromSeq],
+      false,
+      true,
+    )
+    let freed = 0
+    await cursorEach(records.openKeyCursor(doomed), (cursor) => {
+      records.delete(cursor.primaryKey)
+      freed += 1
+    })
+
+    // The survivor declares the break, exactly as `retainedFrom` does for a truncated session:
+    // what came before it is gone, and nothing may read the ledger as contiguous across it.
+    const survivors = records.openCursor(
+      IDBKeyRange.bound([eviction.deviceKey, eviction.fromSeq], [eviction.deviceKey, HIGHEST_SEQ]),
+    )
+    await cursorEach(survivors, (cursor) => {
+      const row = cursor.value as RingRecordRow
+      if (!row.followsGap) records.put({ ...row, followsGap: true })
+      return false
+    })
+    return freed
+  }
+
+  /**
+   * Removes journal rows for a pack whose ledger is gone but whose reads say it held records.
+   *
+   * A ledger and its journal die inside one transaction, so nothing this adapter does can strand
+   * one — but a database left half-written by something else can, and those rows are unreachable
+   * budget. A journal whose every read carried nothing is not stranded at all: it is the receipt
+   * for a pack that answered nothing, which is exactly the read most worth keeping.
+   */
+  private sweepRingJournals(): Promise<number> {
+    return runTransaction(this.database, RING_STORES, 'readwrite', async (transaction) => {
+      const reads = transaction.objectStore(RING_READS)
+      let removed = 0
+      for (const deviceKey of await this.ringDeviceKeys(transaction)) {
+        if ((await this.countRingRecords(transaction, deviceKey)) > 0) continue
+        const journal = await this.readRingJournal(transaction, deviceKey)
+        if (!journal.some(claimsStoredRecords)) continue
+
+        await cursorEach(reads.openKeyCursor(ringRangeOf(deviceKey)), (cursor) => {
+          reads.delete(cursor.primaryKey)
+          removed += 1
+        })
+      }
+      return removed
+    })
+  }
+
+  // ── reading a ring ledger ──────────────────────────────────────────────────
+
+  private async readRingRows(
+    transaction: IDBTransaction,
+    deviceKey: DeviceKey,
+  ): Promise<RingRecordRow[]> {
+    const rows: RingRecordRow[] = []
+    const ascending = transaction.objectStore(RING_RECORDS).openCursor(ringRangeOf(deviceKey))
+    await cursorEach(ascending, (cursor) => {
+      rows.push(cursor.value as RingRecordRow)
+    })
+    return rows
+  }
+
+  /** Newest read first, capped: the journal is an audit trail rather than a series. */
+  private async readRingJournal(
+    transaction: IDBTransaction,
+    deviceKey: DeviceKey,
+  ): Promise<RingReadRow[]> {
+    const reads: RingReadRow[] = []
+    const newestFirst = transaction
+      .objectStore(RING_READS)
+      .openCursor(ringRangeOf(deviceKey), 'prev')
+    await cursorEach(newestFirst, (cursor) => {
+      if (reads.length >= MAX_RING_READS_PER_DEVICE) return false
+      reads.push(cursor.value as RingReadRow)
+    })
+    return reads
+  }
+
+  /** Every pack with a ledger or a journal, which is every pack a read was ever filed against. */
+  private async ringDeviceKeys(transaction: IDBTransaction): Promise<DeviceKey[]> {
+    const keys = new Set<DeviceKey>()
+    for (const storeName of [RING_RECORDS, RING_READS]) {
+      // One entry per distinct index key, so enumerating the packs costs the packs and not the rows.
+      const distinct = transaction
+        .objectStore(storeName)
+        .index(BY_DEVICE)
+        .openKeyCursor(null, 'nextunique')
+      await cursorEach(distinct, (cursor) => {
+        keys.add(cursor.key as DeviceKey)
+      })
+    }
+    return [...keys]
+  }
+
+  private countRingRecords(transaction: IDBTransaction, deviceKey: DeviceKey): Promise<number> {
+    return requestAsPromise<number>(
+      transaction.objectStore(RING_RECORDS).count(ringRangeOf(deviceKey)),
+    )
+  }
+
+  /** The oldest or newest row of one ledger, without hydrating the rows between them. */
+  private async edgeRingRow(
+    transaction: IDBTransaction,
+    deviceKey: DeviceKey,
+    direction: IDBCursorDirection,
+  ): Promise<RingRecordRow | null> {
+    let found: RingRecordRow | null = null
+    const cursor = transaction
+      .objectStore(RING_RECORDS)
+      .openCursor(ringRangeOf(deviceKey), direction)
+    await cursorEach(cursor, (each) => {
+      found = each.value as RingRecordRow
+      return false
+    })
+    return found
+  }
+
+  private async lastReadAtOf(transaction: IDBTransaction, deviceKey: DeviceKey): Promise<number> {
+    let observedAt = 0
+    const newestFirst = transaction
+      .objectStore(RING_READS)
+      .openKeyCursor(ringRangeOf(deviceKey), 'prev')
+    await cursorEach(newestFirst, (cursor) => {
+      observedAt = (cursor.key as [DeviceKey, number])[1]
+      return false
+    })
+    return observedAt
+  }
+
+  private async dropRingLedger(
+    transaction: IDBTransaction,
+    deviceKey: DeviceKey,
+  ): Promise<void> {
+    // Cursored through the index, never through a constructed compound key range: a row the range
+    // missed would outlive the ledger it belongs to and hold its share of the budget forever.
+    for (const storeName of [RING_RECORDS, RING_READS]) {
+      const store = transaction.objectStore(storeName)
+      await cursorEach(store.index(BY_DEVICE).openKeyCursor(IDBKeyRange.only(deviceKey)), (cursor) => {
+        store.delete(cursor.primaryKey)
+      })
+    }
+  }
+
   // ── the counter and the open tail ──────────────────────────────────────────
 
   /**
@@ -808,15 +1261,133 @@ function candidateOf(record: SessionRecord, chunks: readonly ChunkExtent[]): Pru
 /**
  * Keeps a rename, and the first sighting, across every later identification of the same device.
  * `userLabel` lives here and not on a session row precisely so one rename covers every session.
+ *
+ * The two pack-clock fields are kept under the same rule and for the same reason: they are the
+ * owner's own answers, nothing derives them, and only `setPackClock` may change one. A reconnect
+ * that quietly cleared them would be silent data loss rather than a visible one.
  */
 function mergeDevice(stored: DeviceRecord, incoming: DeviceRecord): DeviceRecord {
   return {
     ...incoming,
     userLabel: stored.userLabel,
+    packUtcOffsetMinutes: stored.packUtcOffsetMinutes,
+    packClockAheadSeconds: stored.packClockAheadSeconds,
     firstSeenAt: Math.min(stored.firstSeenAt, incoming.firstSeenAt),
     lastSeenAt: Math.max(stored.lastSeenAt, incoming.lastSeenAt),
     sessionCount: Math.max(stored.sessionCount, incoming.sessionCount),
   }
+}
+
+/**
+ * One pack's rows as a contiguous key range, in either ring store: both are keyed [deviceKey, n] —
+ * a seq in the ledger, a wall clock in the journal. `[key]` sorts below every `[key, n]`.
+ */
+function ringRangeOf(deviceKey: DeviceKey): IDBKeyRange {
+  return IDBKeyRange.bound([deviceKey], [deviceKey, Number.MAX_SAFE_INTEGER])
+}
+
+/**
+ * Where a pruned ledger now begins, derived rather than stored.
+ *
+ * A ledger nothing has cut is dense from zero, because the fold numbers a pack's first read from
+ * there. So an oldest row above zero is exactly what pruning left behind, and there is no separate
+ * marker to keep in step with the rows it describes.
+ */
+function retainedFromSeqOf(records: readonly RingRecordRow[]): number | null {
+  const oldest = records[0]
+  return oldest === undefined || oldest.seq === 0 ? null : oldest.seq
+}
+
+/** Whether this read said it put rows in a ledger that no longer holds any. */
+function claimsStoredRecords(read: RingReadRow): boolean {
+  return read.recordsAppended > 0 || read.overlap > 0
+}
+
+function refusedIngest(failure: HistoryUnavailableReason | null): RingIngestOutcome {
+  return {
+    stored: false,
+    appended: 0,
+    overlap: 0,
+    ringShift: null,
+    gapDeclared: false,
+    runsDiscarded: 0,
+    totalRecords: 0,
+    prunedRecords: 0,
+    failure,
+  }
+}
+
+/** Where the event code sits in a record, and the value that means "nothing happened". */
+const EVENT_CODE_BYTE = 4
+const SCHEDULED_SAMPLE = 0
+
+function recordsReceivedIn(snapshot: RingSnapshot): number {
+  return snapshot.runs.reduce((total, run) => total + run.records.length, 0)
+}
+
+function indexSpanOf(snapshot: RingSnapshot): { readonly from: number; readonly to: number } | null {
+  let from: number | null = null
+  let to: number | null = null
+
+  for (const run of snapshot.runs) {
+    if (run.records.length === 0) continue
+    const last = run.firstIndex + run.records.length - 1
+    if (from === null || run.firstIndex < from) from = run.firstIndex
+    if (to === null || last > to) to = last
+  }
+
+  return from === null || to === null ? null : { from, to }
+}
+
+/**
+ * The newest scheduled record the read carried — the read's one clock anchor.
+ *
+ * Newest by ring index rather than by counter: after a backward rewrite the counter runs down, and
+ * the whole point of the anchor is to place the read against the face in force at the time.
+ */
+function newestScheduledRecord(snapshot: RingSnapshot): Uint8Array | null {
+  let newestIndex = Number.NEGATIVE_INFINITY
+  let newest: Uint8Array | null = null
+
+  for (const run of snapshot.runs) {
+    for (let position = 0; position < run.records.length; position += 1) {
+      const bytes = run.records[position]
+      if (bytes[EVENT_CODE_BYTE] !== SCHEDULED_SAMPLE) continue
+      const index = run.firstIndex + position
+      if (index <= newestIndex) continue
+      newestIndex = index
+      newest = bytes
+    }
+  }
+
+  return newest
+}
+
+/**
+ * Where the anchor landed in the ledger, found by matching the bytes from the newest end.
+ *
+ * Adjacent records are byte-identical often enough that this can land on either half of such a
+ * pair. Both halves carry the same counter and sit in the same clock segment, so which one is
+ * named changes nothing the field is read for; and a run of identical rows is indistinguishable by
+ * construction, so there is no better answer to be had.
+ */
+function seqOfBytes(ledger: readonly RingRecordRow[], bytes: Uint8Array): number | null {
+  for (let at = ledger.length - 1; at >= 0; at -= 1) {
+    if (sameBytes(ledger[at].bytes, bytes)) return ledger[at].seq
+  }
+  return null
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false
+  for (let at = 0; at < left.length; at += 1) {
+    if (left[at] !== right[at]) return false
+  }
+  return true
+}
+
+function counterIn(bytes: Uint8Array): number {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true)
 }
 
 function lastSampleTimeOf(chunk: HistoryChunk): number | null {

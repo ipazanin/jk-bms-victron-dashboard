@@ -12,7 +12,14 @@
 
 const CHANNEL_NAME = 'shunt.log'
 
-export type ArchiveMessage = 'session-opened' | 'session-closed' | 'pruned' | 'device-renamed'
+export type ArchiveMessage =
+  | 'session-opened'
+  | 'session-closed'
+  | 'pruned'
+  | 'device-renamed'
+  /** One word for every change to a pack's ring: a merge, a clock correction, a prune, a delete.
+   *  The archive is the shared state and the receiver re-reads, so nothing finer would be read. */
+  | 'ring-read'
 
 export interface ArchiveChannel {
   post(message: ArchiveMessage): void
@@ -62,12 +69,13 @@ function silentChannel(): ArchiveChannel {
   }
 }
 
-/** Another origin-sharing page could post anything; only the four words this one knows are acted on. */
+/** Another origin-sharing page could post anything; only the words this one knows are acted on. */
 function isArchiveMessage(value: unknown): value is ArchiveMessage {
   return (
     value === 'session-opened' ||
     value === 'session-closed' ||
     value === 'pruned' ||
-    value === 'device-renamed'
+    value === 'device-renamed' ||
+    value === 'ring-read'
   )
 }

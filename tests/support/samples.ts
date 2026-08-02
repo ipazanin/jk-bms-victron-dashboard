@@ -19,10 +19,15 @@
 import type { SessionClosure, SessionPatch } from '../../src/application/history/port'
 import { REMEMBERED_SCHEMA_VERSION } from '../../src/application/rememberedSession'
 import type { RememberedSession } from '../../src/application/rememberedSession'
+import { RTC_EPOCH_UTC_MS } from '../../src/domain/bms/detailLog'
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../src/domain/bms/types'
 import { PackChunkBuilder, SolarChunkBuilder } from '../../src/domain/history/columns'
 import { packDefaultLabel, packDeviceKeyFor, UNIDENTIFIED_PACK_KEY } from '../../src/domain/history/identity'
 import { EMPTY_LEDGER } from '../../src/domain/history/ledger'
+import { PACK_SAMPLING_PERIOD_SECONDS } from '../../src/domain/history/ringClock'
+import type { RingReadRow } from '../../src/domain/history/RingReadRow'
+import type { RingRecordRow } from '../../src/domain/history/RingRecordRow'
+import type { RingSnapshot } from '../../src/domain/history/RingSnapshot'
 import { CHUNK_LAYOUT_VERSION, SAMPLE_INTERVAL_MS } from '../../src/domain/history/types'
 import type {
   DeviceKey,
@@ -307,6 +312,189 @@ export function deviceRecord(overrides: Partial<DeviceRecord> = {}): DeviceRecor
     firstSeenAt: SAMPLE_EPOCH,
     lastSeenAt: SAMPLE_EPOCH,
     sessionCount: 1,
+    packUtcOffsetMinutes: null,
+    packClockAheadSeconds: null,
+    ...overrides,
+  }
+}
+
+// ── the pack's own ring ──────────────────────────────────────────────────────
+
+/**
+ * The pack's RTC counter at `SAMPLE_EPOCH`, so a synthesised record's face lands on the same watch
+ * the rest of this file is drawn against. Derived rather than transcribed: the counter's origin is
+ * the decoder's own, and a hand-copied constant here would drift from it silently.
+ */
+export const RING_EPOCH_COUNTER_SECONDS = Math.round((SAMPLE_EPOCH - RTC_EPOCH_UTC_MS) / 1_000)
+
+/** Where the pack writes each field of a record, and at what scale. Mirrors `detailLog.ts`. */
+const RECORD_BYTES = 24
+const CHARGE_MOSFET_ON = 0x01
+const DISCHARGE_MOSFET_ON = 0x02
+const BALANCING = 0x04
+const HEATING = 0x08
+
+/**
+ * One record's worth of pack, in display units.
+ *
+ * The defaults are the same instant the rest of this file describes — `battery()`'s figures, at the
+ * wire scales the record encodes them in — so a record decoded back through `decodeDetailLogRecord`
+ * reproduces them exactly rather than to within a rounding.
+ */
+export interface RingRecordSpec {
+  readonly counterSeconds: number
+  /** 0 is a scheduled sample; 0x3b is the pair the pack writes when its clock is set. */
+  readonly eventCode: number
+  readonly chargingEnabled: boolean
+  readonly dischargingEnabled: boolean
+  readonly balancing: boolean
+  readonly heating: boolean
+  /** Zero-based, as the record carries them. */
+  readonly highestCellIndex: number
+  readonly lowestCellIndex: number
+  readonly highestCellVoltage: number
+  readonly lowestCellVoltage: number
+  readonly packVoltage: number
+  /** Positive is charge. */
+  readonly current: number
+  readonly remainingCapacity: number
+  readonly nominalCapacity: number
+  readonly highestTemperature: number
+  readonly lowestTemperature: number
+  readonly mosfetTemperature: number
+  readonly heatingCurrent: number
+}
+
+/** The 24 bytes the pack would have written for that state. The inverse of `decodeDetailLogRecord`. */
+export function ringRecordBytes(overrides: Partial<RingRecordSpec> = {}): Uint8Array {
+  const spec: RingRecordSpec = {
+    counterSeconds: RING_EPOCH_COUNTER_SECONDS,
+    eventCode: 0,
+    chargingEnabled: true,
+    dischargingEnabled: true,
+    balancing: false,
+    heating: false,
+    highestCellIndex: 0,
+    lowestCellIndex: 2,
+    highestCellVoltage: 3.394,
+    lowestCellVoltage: 3.393,
+    packVoltage: 13.57,
+    current: -8.4,
+    remainingCapacity: 309.1,
+    nominalCapacity: 315,
+    highestTemperature: 27,
+    lowestTemperature: 27,
+    mosfetTemperature: 30,
+    heatingCurrent: 0,
+    ...overrides,
+  }
+
+  const bytes = new Uint8Array(RECORD_BYTES)
+  const record = new DataView(bytes.buffer)
+  record.setUint32(0, spec.counterSeconds, true)
+  record.setUint8(4, spec.eventCode)
+  record.setUint8(
+    5,
+    (spec.chargingEnabled ? CHARGE_MOSFET_ON : 0) |
+      (spec.dischargingEnabled ? DISCHARGE_MOSFET_ON : 0) |
+      (spec.balancing ? BALANCING : 0) |
+      (spec.heating ? HEATING : 0),
+  )
+  record.setUint8(6, spec.highestCellIndex)
+  record.setUint8(7, spec.lowestCellIndex)
+  record.setUint16(8, Math.round(spec.highestCellVoltage * 1_000), true)
+  record.setUint16(10, Math.round(spec.lowestCellVoltage * 1_000), true)
+  record.setUint16(12, Math.round(spec.packVoltage * 100), true)
+  record.setInt16(14, Math.round(spec.current * 10), true)
+  record.setUint16(16, Math.round(spec.remainingCapacity * 10), true)
+  record.setUint16(18, Math.round(spec.nominalCapacity * 10), true)
+  record.setInt8(20, spec.highestTemperature)
+  record.setInt8(21, spec.lowestTemperature)
+  record.setInt8(22, spec.mosfetTemperature)
+  record.setInt8(23, Math.round(spec.heatingCurrent * 10))
+  return bytes
+}
+
+/**
+ * A stretch of scheduled records one sampling period apart, oldest first — the ring as the pack
+ * fills it when nothing happens. Every other override applies to every record, so a case that needs
+ * a varying signal maps over the result.
+ */
+export function ringRecords(count: number, overrides: Partial<RingRecordSpec> = {}): Uint8Array[] {
+  const from = overrides.counterSeconds ?? RING_EPOCH_COUNTER_SECONDS
+  return Array.from({ length: count }, (_unused, position) =>
+    ringRecordBytes({ ...overrides, counterSeconds: from + position * PACK_SAMPLING_PERIOD_SECONDS }),
+  )
+}
+
+/** The pack's RTC counter as a record carries it: the little-endian uint32 at bytes[0..3]. */
+export function ringRecordCounter(bytes: Uint8Array): number {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true)
+}
+
+/**
+ * One stored row. `packClockSeconds` follows the bytes unless a case overrides it deliberately,
+ * which is how the invariant binding the two is stated as breakable rather than assumed.
+ */
+export function ringRecordRow(overrides: Partial<RingRecordRow> = {}): RingRecordRow {
+  const bytes = overrides.bytes ?? ringRecordBytes()
+  return {
+    deviceKey: PACK_DEVICE_KEY,
+    seq: 0,
+    packClockSeconds: ringRecordCounter(bytes),
+    bytes,
+    firstReadAt: SAMPLE_EPOCH,
+    followsGap: false,
+    ...overrides,
+  }
+}
+
+/**
+ * One read, as the fold takes it: eight scheduled records from ring index 0, unbroken.
+ *
+ * A case that is about the merge overrides `runs`; a case that is about a read carrying nothing
+ * passes `runs: []` with the outcome that produced it.
+ */
+export function ringSnapshot(overrides: Partial<RingSnapshot> = {}): RingSnapshot {
+  return {
+    deviceKey: PACK_DEVICE_KEY,
+    observedAt: SAMPLE_EPOCH,
+    outcome: 'records-read',
+    runs: [{ firstIndex: 0, records: ringRecords(8) }],
+    transport: {
+      notificationBytes: 2_360,
+      notificationCount: 12,
+      assembledFrameCount: 1,
+      logFrameCount: 1,
+      elapsedMs: 940,
+    },
+    ...overrides,
+  }
+}
+
+/**
+ * One journal row, as the read that opened a ledger leaves it: nothing to align against, so no
+ * overlap and no shift — the ring's movement is only ever measured against a read before it.
+ */
+export function ringReadRow(overrides: Partial<RingReadRow> = {}): RingReadRow {
+  return {
+    deviceKey: PACK_DEVICE_KEY,
+    observedAt: SAMPLE_EPOCH,
+    outcome: 'records-read',
+    notificationBytes: 2_360,
+    notificationCount: 12,
+    assembledFrameCount: 1,
+    logFrameCount: 1,
+    indexSpan: { from: 0, to: 7 },
+    recordsReceived: 8,
+    recordsAppended: 8,
+    overlap: 0,
+    ringShift: null,
+    gapDeclared: false,
+    runsDiscarded: 0,
+    newestSampleCounter: RING_EPOCH_COUNTER_SECONDS + 7 * PACK_SAMPLING_PERIOD_SECONDS,
+    newestSampleSeq: 7,
+    elapsedMs: 940,
     ...overrides,
   }
 }

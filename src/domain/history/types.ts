@@ -342,6 +342,21 @@ export interface DeviceRecord {
   readonly firstSeenAt: number
   readonly lastSeenAt: number
   readonly sessionCount: number
+
+  /**
+   * The zone the pack was installed in, signed the way a zone is written (CET = +60). The pack
+   * states it nowhere; without this it is guessed fresh from the browser on every read, which
+   * `browserZone.ts` already documents as breaking the moment the boat is browsed from another
+   * country. Null until the owner confirms it, at which point the guess stops being re-made.
+   */
+  readonly packUtcOffsetMinutes: number | null
+  /**
+   * How far the pack's CURRENT clock face runs ahead of the real clock, in seconds, as the owner
+   * states it. One signed number covers the whole ledger: the ring's own calibration pairs place
+   * every earlier record against the current face exactly, so the only unknown a person has to
+   * supply is where that face sits. Applied on read; never written into a stored counter.
+   */
+  readonly packClockAheadSeconds: number | null
 }
 
 export interface HistoryMeta {

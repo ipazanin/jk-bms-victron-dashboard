@@ -1001,8 +1001,9 @@ export class SessionRecorder {
   // ── devices ────────────────────────────────────────────────────────────────
 
   /**
-   * One upsert per device per session. `userLabel` is null because the recorder has never seen
-   * one; the store keeps whatever the owner typed.
+   * One upsert per device per session. The owner-set fields — `userLabel` and the pack's zone and
+   * clock error — are null because the recorder has never seen one; the store keeps whatever the
+   * owner typed.
    */
   private rememberPackDevice(session: OpenSession, key: DeviceKey, at: number): void {
     const info = this.deviceInfo
@@ -1018,6 +1019,8 @@ export class SessionRecorder {
       firstSeenAt: at,
       lastSeenAt: at,
       sessionCount,
+      packUtcOffsetMinutes: null,
+      packClockAheadSeconds: null,
     }))
   }
 
@@ -1034,6 +1037,8 @@ export class SessionRecorder {
       firstSeenAt: at,
       lastSeenAt: at,
       sessionCount,
+      packUtcOffsetMinutes: null,
+      packClockAheadSeconds: null,
     }))
   }
 

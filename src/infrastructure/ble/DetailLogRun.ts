@@ -15,11 +15,17 @@
  * yields a measurement rather than hanging the UI.
  */
 
-import { decodeDetailLog, detailLogOutcome, readDetailLogHeader } from '../../domain/bms/detailLog'
+import {
+  decodeDetailLog,
+  detailLogOutcome,
+  readDetailLogHeader,
+  readDetailLogRecordBytes,
+} from '../../domain/bms/detailLog'
 import type { DetailLogRecord } from '../../domain/bms/detailLog'
 import type { DetailLogFrameHeader } from '../../domain/bms/DetailLogFrameHeader'
 import type { DetailLogTransfer } from '../../domain/bms/DetailLogTransfer'
 import { FRAME_DETAIL_LOG, frameType } from '../../domain/bms/protocol'
+import type { RingRecordBytes } from '../../domain/history/RingRecordBytes'
 
 /**
  * How long the pack has to produce its first stored-log frame before the read is called unanswered.
@@ -46,6 +52,7 @@ export class DetailLogRun {
   private readonly startedAt = Date.now()
   private readonly headers: DetailLogFrameHeader[] = []
   private readonly records: DetailLogRecord[] = []
+  private readonly rawRecords: RingRecordBytes[] = []
   private notificationBytes = 0
   private notificationCount = 0
   private assembledFrameCount = 0
@@ -85,11 +92,17 @@ export class DetailLogRun {
     this.rearmSilence(QUIET_GAP_MS)
   }
 
-  /** Throws on a frame whose layout is not what the decoder was written for; the caller reports it. */
+  /**
+   * Throws on a frame whose layout is not what the decoder was written for; the caller reports it.
+   *
+   * Decoding runs first and both lists grow after it, so a frame that will not decode contributes
+   * neither a record nor the bytes behind one — which is what lets the two be read positionally.
+   */
   readRecordsFrom(frame: Uint8Array): void {
     if (this.settle === null) return
     const decoded = decodeDetailLog(frame, { packUtcOffsetMinutes: this.packUtcOffsetMinutes })
     this.records.push(...decoded)
+    this.rawRecords.push(...readDetailLogRecordBytes(frame))
   }
 
   /**
@@ -116,6 +129,7 @@ export class DetailLogRun {
       assembledFrameCount: this.assembledFrameCount,
       frames: [...this.headers],
       records: [...this.records],
+      rawRecords: [...this.rawRecords],
       elapsedMs: Date.now() - this.startedAt,
     })
   }

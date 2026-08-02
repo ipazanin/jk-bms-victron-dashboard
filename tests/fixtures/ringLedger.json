@@ -1,0 +1,1019 @@
+{
+ "note": "One pack's ledger, carved from the 13:14 read in captures/bms-frames.jsonl and re-laid onto a regular hourly timeline. Every record is 24 bytes the pack itself wrote; only the RTC counter at bytes[0..3] is rewritten, so each row still decodes to the voltages, currents, capacities, cell extremes and temperatures of the reading it came from. A 0x06 record carries no ASCII and no serial, which is the basis detailLogFrame.json is committed verbatim on and is re-verified byte-wise over exactly these rows. scripts/visual-check.mjs seeds them into the ring stores, sliding the whole ledger — counters and read stamp together — onto the day the check runs.",
+ "scenario": "Six days, five of them recorded: one day, then a day the pack recorded nothing, then three days to now. A cell-4 overcharge trip fires at the top of a charge, the hour before it snaps the coulomb counter to exactly nominal, and one clock rewrite of 7 h 01 m 08 s splits the ledger into two faces. The read that filed it measured the pack running between 6 h 16 m and 7 h 16 m ahead of the browser, which is the interval the captured read really gave. The unrecorded day is the one part of this that is arranged rather than observed: the captured ring holds no hole but the rewrite itself, so this file is not evidence about the pack's sampling and must not be cited as any.",
+ "deviceKey": "jk:DEMO00000000001",
+ "device": {
+  "packUtcOffsetMinutes": 60,
+  "packClockAheadSeconds": null
+ },
+ "expected": {
+  "records": 122,
+  "eventCode": 103,
+  "eventLabel": "Cell 4 overcharge protection",
+  "calibrationStepSeconds": 25268,
+  "counterSnaps": 1,
+  "unrecordedHours": 25
+ },
+ "reads": [
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "observedAt": 1785582840000,
+   "outcome": "records-read",
+   "notificationBytes": 11352,
+   "notificationCount": 130,
+   "assembledFrameCount": 11,
+   "logFrameCount": 11,
+   "indexSpan": {
+    "from": 0,
+    "to": 121
+   },
+   "recordsReceived": 122,
+   "recordsAppended": 122,
+   "overlap": 0,
+   "ringShift": null,
+   "gapDeclared": false,
+   "runsDiscarded": 0,
+   "newestSampleCounter": 207772225,
+   "newestSampleSeq": 121,
+   "elapsedMs": 1450
+  }
+ ],
+ "records": [
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 0,
+   "packClockSeconds": 207232014,
+   "bytes": "0e1c5a0c000703003d0e950d960534004e0c4e0c1a1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 1,
+   "packClockSeconds": 207235615,
+   "bytes": "1f2a5a0c000701001b0eb50d9a050f004a0c4e0c1a1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 2,
+   "packClockSeconds": 207239216,
+   "bytes": "30385a0c00070100e60db70d8a05d8ff430c4e0c1b1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 3,
+   "packClockSeconds": 207242817,
+   "bytes": "41465a0c000301007a0d720d6305f9ff280c4e0c1b1a1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 4,
+   "packClockSeconds": 207246418,
+   "bytes": "52545a0c00030001570d560d5505f7ff0f0c4e0c1b1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 5,
+   "packClockSeconds": 207250019,
+   "bytes": "63625a0c00030001570d550d55050c000c0c4e0c1b1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 6,
+   "packClockSeconds": 207253620,
+   "bytes": "74705a0c00030001570d550d5505f3ff090c4e0c1b1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 7,
+   "packClockSeconds": 207257221,
+   "bytes": "857e5a0c00030001570d550d55050d00060c4e0c1c1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 8,
+   "packClockSeconds": 207260822,
+   "bytes": "968c5a0c00030001570d550d55050e00030c4e0c1c1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 9,
+   "packClockSeconds": 207264423,
+   "bytes": "a79a5a0c000300014c0d4c0d51050700fc0b4e0c1c1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 10,
+   "packClockSeconds": 207268024,
+   "bytes": "b8a85a0c00030200330d2e0d4705daffe30b4e0c1b1b1d00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 11,
+   "packClockSeconds": 207271625,
+   "bytes": "c9b65a0c00030100290d230d4305d1ffcf0b4e0c1b1b1c00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 12,
+   "packClockSeconds": 207275226,
+   "bytes": "dac45a0c00030200290d280d4305f6ffba0b4e0c1b1b1c00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 13,
+   "packClockSeconds": 207278827,
+   "bytes": "ebd25a0c00030100270d270d4105f2ffa10b4e0c1b1a1b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 14,
+   "packClockSeconds": 207282428,
+   "bytes": "fce05a0c00030000260d260d4205f4ff8a0b4e0c1a1a1b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 15,
+   "packClockSeconds": 207286029,
+   "bytes": "0def5a0c00030100230d220d4105f2ff730b4e0c1a1a1a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 16,
+   "packClockSeconds": 207289630,
+   "bytes": "1efd5a0c00030200260d240d4105f7ff630b4e0c1a191a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 17,
+   "packClockSeconds": 207293231,
+   "bytes": "2f0b5b0c00030100260d230d4105f9ff4d0b4e0c19191a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 18,
+   "packClockSeconds": 207296832,
+   "bytes": "40195b0c00030100240d230d4105f8ff360b4e0c19191900",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 19,
+   "packClockSeconds": 207300433,
+   "bytes": "51275b0c000301001e0d180d3f05daff210b4e0c19191a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 20,
+   "packClockSeconds": 207304034,
+   "bytes": "62355b0c00030003270d240d4205f8ff110b4e0c19181900",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 21,
+   "packClockSeconds": 207307635,
+   "bytes": "73435b0c00070003410d320d48053700230b4e0c19181c00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 22,
+   "packClockSeconds": 207311236,
+   "bytes": "84515b0c000700035d0d410d50056700660b4e0c19191e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 23,
+   "packClockSeconds": 207314837,
+   "bytes": "955f5b0c00070003650d4a0d53057600d80b4e0c19191f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 24,
+   "packClockSeconds": 207404862,
+   "bytes": "3ebf5c0c00070300f20db40d8905ac004e0c4e0c1a1a1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 25,
+   "packClockSeconds": 207408463,
+   "bytes": "4fcd5c0c00070100100ee50d9b05f1ff4b0c4e0c1b1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 26,
+   "packClockSeconds": 207412064,
+   "bytes": "60db5c0c00030300090e000e9c050d00420c4e0c1b1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 27,
+   "packClockSeconds": 207415665,
+   "bytes": "71e95c0c00030300740d6e0d6005d7ff210c4e0c1b1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 28,
+   "packClockSeconds": 207419266,
+   "bytes": "82f75c0c00030301530d530d5405f3ff0b0c4e0c1b1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 29,
+   "packClockSeconds": 207422867,
+   "bytes": "93055d0c00030300520d510d5305f3ff060c4e0c1c1b1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 30,
+   "packClockSeconds": 207426468,
+   "bytes": "a4135d0c00030300520d510d5305f3ff030c4e0c1c1c1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 31,
+   "packClockSeconds": 207430069,
+   "bytes": "b5215d0c00030300530d520d5405f6ff010c4e0c1c1c1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 32,
+   "packClockSeconds": 207433670,
+   "bytes": "c62f5d0c00030300550d550d5505f1ff010c4e0c1d1c1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 33,
+   "packClockSeconds": 207437271,
+   "bytes": "d73d5d0c000300004c0d4c0d5105effff70b4e0c1d1c1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 34,
+   "packClockSeconds": 207440872,
+   "bytes": "e84b5d0c00030300330d330d4705eeffd90b4e0c1c1c1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 35,
+   "packClockSeconds": 207444473,
+   "bytes": "f9595d0c000702001f0d100d390582ff900b4e0c1d1c2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 36,
+   "packClockSeconds": 207448074,
+   "bytes": "0a685d0c00030100260d240d4205f1ff4c0b4e0c1c1c1d00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 37,
+   "packClockSeconds": 207451675,
+   "bytes": "1b765d0c00030300240d1f0d4105daff3a0b4e0c1c1c1c00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 38,
+   "packClockSeconds": 207455276,
+   "bytes": "2c845d0c00030100260d240d4205f1ff230b4e0c1b1b1c00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 39,
+   "packClockSeconds": 207458877,
+   "bytes": "3d925d0c00030100240d230d4105f1ff0a0b4e0c1b1b1b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 40,
+   "packClockSeconds": 207462478,
+   "bytes": "4ea05d0c000301001f0d1a0d3f05dafff30a4e0c1a1a1b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 41,
+   "packClockSeconds": 207466079,
+   "bytes": "5fae5d0c00030000220d220d4005f2ffe00a4e0c1a1a1a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 42,
+   "packClockSeconds": 207469680,
+   "bytes": "70bc5d0c000301001f0d210d4005f2ffc80a4e0c1a1a1a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 43,
+   "packClockSeconds": 207473281,
+   "bytes": "81ca5d0c00030100220d1d0d4005f1ffb80a4e0c19191a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 44,
+   "packClockSeconds": 207476882,
+   "bytes": "92d85d0c00030003240d230d4105f4ffa00a4e0c19191a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 45,
+   "packClockSeconds": 207480483,
+   "bytes": "a3e65d0c000300022f0d2c0d45051500af0a4e0c19191a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 46,
+   "packClockSeconds": 207484084,
+   "bytes": "b4f45d0c00030003470d3d0d4d055000f60a4e0c19191e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 47,
+   "packClockSeconds": 207487685,
+   "bytes": "c5025e0c00070003570d470d51059300680b4e0c1a191f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 48,
+   "packClockSeconds": 207488885,
+   "bytes": "75075e0c3b070003740d400d52056a008d0b4e0c1b1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 49,
+   "packClockSeconds": 207514153,
+   "bytes": "296a5e0c3b070003740d400d52056a008d0b4e0c1b1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 50,
+   "packClockSeconds": 207516554,
+   "bytes": "8a735e0c00030100270d240d4205f1ff900b4e0c1b1a1b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 51,
+   "packClockSeconds": 207520155,
+   "bytes": "9b815e0c00030100240d240d4105efff780b4e0c1a1a1b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 52,
+   "packClockSeconds": 207523756,
+   "bytes": "ac8f5e0c00030100230d230d4105f4ff620b4e0c1a1a1a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 53,
+   "packClockSeconds": 207527357,
+   "bytes": "bd9d5e0c000301001f0d1a0d3f05b3ff4e0b4e0c1a1a1a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 54,
+   "packClockSeconds": 207530958,
+   "bytes": "ceab5e0c00030300220d1c0d4005baff3a0b4e0c19191a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 55,
+   "packClockSeconds": 207534559,
+   "bytes": "dfb95e0c00030100230d220d4105f2ff240b4e0c19191a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 56,
+   "packClockSeconds": 207538160,
+   "bytes": "f0c75e0c00030003230d220d4105f6ff100b4e0c19191900",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 57,
+   "packClockSeconds": 207541761,
+   "bytes": "01d65e0c000700033b0d320d48053200280b4e0c19191b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 58,
+   "packClockSeconds": 207545362,
+   "bytes": "12e45e0c00070003500d410d4e0566006d0b4e0c19191e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 59,
+   "packClockSeconds": 207548963,
+   "bytes": "23f25e0c000700035a0d4a0d52059100df0b4e0c1a191f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 60,
+   "packClockSeconds": 207552564,
+   "bytes": "34005f0c000700015c0d4e0d53058e004e0c4e0c1b1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 61,
+   "packClockSeconds": 207556165,
+   "bytes": "450e5f0c67070300430e9b0d960542004e0c4e0c1b1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 62,
+   "packClockSeconds": 207559766,
+   "bytes": "561c5f0c00060300ef0d8a0d840500004d0c4e0c1b1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 63,
+   "packClockSeconds": 207563367,
+   "bytes": "672a5f0c00060100c70d940d7e0500004c0c4e0c1b1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 64,
+   "packClockSeconds": 207566968,
+   "bytes": "78385f0c00060300bc0da50d7b0500004a0c4e0c1b1a2100",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 65,
+   "packClockSeconds": 207570569,
+   "bytes": "89465f0c000302006b0d640d5d05edff310c4e0c1b1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 66,
+   "packClockSeconds": 207574170,
+   "bytes": "9a545f0c00030100530d520d5405ebff210c4e0c1b1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 67,
+   "packClockSeconds": 207577771,
+   "bytes": "ab625f0c000201004e0d4d0d5205ffff1e0c4e0c1c1b1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 68,
+   "packClockSeconds": 207581372,
+   "bytes": "bc705f0c00060300f70d880d840500004d0c4e0c1b1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 69,
+   "packClockSeconds": 207584973,
+   "bytes": "cd7e5f0c00060100be0d8e0d7a0500004c0c4e0c1b1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 70,
+   "packClockSeconds": 207588574,
+   "bytes": "de8c5f0c00060300ac0d950d750500004c0c4e0c1b1b2100",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 71,
+   "packClockSeconds": 207592175,
+   "bytes": "ef9a5f0c00030300640d600d5a05f2ff320c4e0c1b1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 72,
+   "packClockSeconds": 207595776,
+   "bytes": "00a95f0c00020100530d510d5405ffff280c4e0c1b1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 73,
+   "packClockSeconds": 207599377,
+   "bytes": "11b75f0c00020200510d4e0d5305ffff260c4e0c1c1b1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 74,
+   "packClockSeconds": 207602978,
+   "bytes": "22c55f0c000201004d0d4b0d5105ffff240c4e0c1c1c1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 75,
+   "packClockSeconds": 207606579,
+   "bytes": "33d35f0c000201004a0d480d5005ffff230c4e0c1c1c1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 76,
+   "packClockSeconds": 207610180,
+   "bytes": "44e15f0c00030001580d530d550510002d0c4e0c1c1c1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 77,
+   "packClockSeconds": 207613781,
+   "bytes": "55ef5f0c00030300500d4e0d5305f4ff290c4e0c1d1c1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 78,
+   "packClockSeconds": 207617382,
+   "bytes": "66fd5f0c00030100370d360d4905f6ff110c4e0c1d1c1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 79,
+   "packClockSeconds": 207620983,
+   "bytes": "770b600c000301002c0d2c0d4405f7fff70b4e0c1c1c1d00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 80,
+   "packClockSeconds": 207624584,
+   "bytes": "8819600c00030100280d270d4305f7ffdd0b4e0c1c1c1d00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 81,
+   "packClockSeconds": 207628185,
+   "bytes": "9927600c00030100270d240d4205f6ffc60b4e0c1c1b1c00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 82,
+   "packClockSeconds": 207631786,
+   "bytes": "aa35600c00030100220d1a0d4005afffb20b4e0c1b1b1b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 83,
+   "packClockSeconds": 207635387,
+   "bytes": "bb43600c00030100260d240d4205f8ff9f0b4e0c1b1b1b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 84,
+   "packClockSeconds": 207638988,
+   "bytes": "cc51600c00030100260d240d4205d7ff8a0b4e0c1a1a1a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 85,
+   "packClockSeconds": 207642589,
+   "bytes": "dd5f600c00030100240d230d4105f3ff740b4e0c1a1a1a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 86,
+   "packClockSeconds": 207646190,
+   "bytes": "ee6d600c000301001f0d080d3d05dcff5e0b4e0c1a191b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 87,
+   "packClockSeconds": 207649791,
+   "bytes": "ff7b600c00030100240d220d4105d5ff4e0b4e0c19191a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 88,
+   "packClockSeconds": 207653392,
+   "bytes": "108a600c00030100240d240d4105f4ff3a0b4e0c19191900",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 89,
+   "packClockSeconds": 207656993,
+   "bytes": "2198600c00070002360d2e0d46051900470b4e0c19191a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 90,
+   "packClockSeconds": 207660594,
+   "bytes": "32a6600c00070001570d3e0d4e054800900b4e0c19191e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 91,
+   "packClockSeconds": 207664195,
+   "bytes": "43b4600c00070001530d4a0d51056700050c4e0c1a191f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 92,
+   "packClockSeconds": 207667796,
+   "bytes": "54c2600c00030001570d530d55051000260c4e0c1c1c1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 93,
+   "packClockSeconds": 207671397,
+   "bytes": "65d0600c00030001560d530d54050d00260c4e0c1c1c1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 94,
+   "packClockSeconds": 207674998,
+   "bytes": "76de600c00030001560d550d55050d00240c4e0c1d1c1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 95,
+   "packClockSeconds": 207678599,
+   "bytes": "87ec600c00030100470d450d4f05eeff170c4e0c1d1c1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 96,
+   "packClockSeconds": 207682200,
+   "bytes": "98fa600c000301002e0d2c0d4505eefff70b4e0c1c1c2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 97,
+   "packClockSeconds": 207685801,
+   "bytes": "a908610c00030100240d1f0d4105d0ffd80b4e0c1c1c1d00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 98,
+   "packClockSeconds": 207689402,
+   "bytes": "ba16610c00030100230d1e0d4005d6ffbf0b4e0c1c1c1d00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 99,
+   "packClockSeconds": 207693003,
+   "bytes": "cb24610c00030100270d260d4205f4ffa40b4e0c1b1b1c00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 100,
+   "packClockSeconds": 207696604,
+   "bytes": "dc32610c00030003260d260d4205f2ff8c0b4e0c1b1b1b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 101,
+   "packClockSeconds": 207700205,
+   "bytes": "ed40610c00030100240d230d4105f3ff730b4e0c1b1b1b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 102,
+   "packClockSeconds": 207703806,
+   "bytes": "fe4e610c00030100240d230d4105f3ff620b4e0c1a1a1b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 103,
+   "packClockSeconds": 207707407,
+   "bytes": "0f5d610c00030100240d230d4105f8ff4c0b4e0c1a1a1a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 104,
+   "packClockSeconds": 207711008,
+   "bytes": "206b610c00030100220d220d4005efff330b4e0c1a1a1a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 105,
+   "packClockSeconds": 207714609,
+   "bytes": "3179610c00030100210d1c0d3f05daff220b4e0c19191a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 106,
+   "packClockSeconds": 207718210,
+   "bytes": "4287610c00030001260d240d4105f7ff0c0b4e0c19191a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 107,
+   "packClockSeconds": 207721811,
+   "bytes": "5395610c00030003360d2f0d46053200170b4e0c19191a00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 108,
+   "packClockSeconds": 207725412,
+   "bytes": "64a3610c00030003450d3c0d4c0546005b0b4e0c19191b00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 109,
+   "packClockSeconds": 207729013,
+   "bytes": "75b1610c00030200470d500d50056e00ce0b4e0c1a191f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 110,
+   "packClockSeconds": 207732614,
+   "bytes": "86bf610c00060300d90d880d7e0521004d0c4e0c1a1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 111,
+   "packClockSeconds": 207736215,
+   "bytes": "97cd610c00060300c20d850d7a05ffff4b0c4e0c1a1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 112,
+   "packClockSeconds": 207739816,
+   "bytes": "a8db610c00070200af0d8e0d7505eeff490c4e0c1a1a2000",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 113,
+   "packClockSeconds": 207743417,
+   "bytes": "b9e9610c00020100600d5a0d590500002d0c4e0c1b1a1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 114,
+   "packClockSeconds": 207747018,
+   "bytes": "caf7610c00030100550d520d5505f6ff250c4e0c1b1a1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 115,
+   "packClockSeconds": 207750619,
+   "bytes": "db05620c00030300510d4e0d5305f4ff210c4e0c1b1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 116,
+   "packClockSeconds": 207754220,
+   "bytes": "ec13620c000203004d0d480d510500001e0c4e0c1b1b1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 117,
+   "packClockSeconds": 207757821,
+   "bytes": "fd21620c00030003560d510d54051e001f0c4e0c1c1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 118,
+   "packClockSeconds": 207761422,
+   "bytes": "0e30620c00030001570d550d55051000240c4e0c1c1b1e00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 119,
+   "packClockSeconds": 207765023,
+   "bytes": "1f3e620c00030300370d370d4805e9ff050c4e0c1c1c1f00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 120,
+   "packClockSeconds": 207768624,
+   "bytes": "304c620c00030100290d240d4305d7ffeb0b4e0c1c1b1d00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  },
+  {
+   "deviceKey": "jk:DEMO00000000001",
+   "seq": 121,
+   "packClockSeconds": 207772225,
+   "bytes": "415a620c00030300240d210d4105ddffd30b4e0c1b1b1d00",
+   "firstReadAt": 1785582840000,
+   "followsGap": false
+  }
+ ]
+}

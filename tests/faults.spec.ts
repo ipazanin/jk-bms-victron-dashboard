@@ -97,6 +97,7 @@ function deps(): TelemetryDeps {
     createBmsLink: bms.create,
     createSolarScan: solar.create,
     historyStore: () => null,
+    refreshRingLedger: async () => undefined,
     now: () => clock,
     monotonic: () => clock,
     newId: () => 'session',
