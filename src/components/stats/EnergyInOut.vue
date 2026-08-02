@@ -27,11 +27,12 @@ const props = defineProps<{
 
 const GUTTER = 52
 const PLOT_H = 132
-const XLABEL_H = 20
+/** Room below the baseline for the bucket labels, inside the same viewBox as the bars. */
+const LABEL_BAND = 20
 const INSET = 1
-/** Headroom above the plot so a peak's cap label sits above its bar rather than clipping off. */
-const LABEL_PAD = 14
-const BAR_MAX = 22
+/** Breathing room above the tallest bar, so a peak that reaches the axis top still reads as a bar. */
+const TOP_PAD = 6
+const BAR_MAX = 30
 /** The 2px surface gap the design language keeps between a bar and its slot edge and its twin. */
 const SURFACE_GAP = 2
 const PAIR_GAP = 2
@@ -71,7 +72,7 @@ const geom = computed(() => {
   const slot = (plotWidth.value - GUTTER) / n
   const barWidth = Math.max(1, Math.min(BAR_MAX, (slot - SURFACE_GAP - PAIR_GAP) / 2))
   const offset = (barWidth + PAIR_GAP) / 2
-  const stride = Math.max(1, Math.ceil(n / labelBudget(slot)))
+  const stride = labelStride(slot)
 
   const slots: Slot[] = props.buckets.map((bucket, index) => {
     const cx = GUTTER + (index + 0.5) * slot
@@ -99,6 +100,7 @@ interface Bar {
 
 interface AxisTick {
   readonly y: number
+  readonly value: number
   readonly text: string
 }
 
@@ -108,7 +110,7 @@ const view = computed(() => {
 
   const peak = maxMagnitudeOf(buckets.flatMap((bucket) => [bucket.inWh, bucket.outWh]))
   const axis = signedAxis(extentOf([0, peak]))
-  const scale = linearScale(axis.low, axis.high, PLOT_H - INSET, LABEL_PAD)
+  const scale = linearScale(axis.low, axis.high, PLOT_H - INSET, TOP_PAD)
   const baselineY = positionOn(scale, 0)
 
   const bars: Bar[] = slots.map((slot) => {
@@ -121,9 +123,14 @@ const view = computed(() => {
     }
   })
 
-  const ticks: AxisTick[] = axis.ticks
-    .filter((value) => value >= 0)
-    .map((value) => ({ y: positionOn(scale, value), text: value === 0 ? '0' : energyLabel(value) }))
+  // The unit is stated once, on the topmost tick; repeating it down the column is four readings of
+  // the same fact and crowds the rail the figures have to stay legible in.
+  const rungs = axis.ticks.filter((value) => value >= 0)
+  const ticks: AxisTick[] = rungs.map((value, index) => ({
+    y: positionOn(scale, value),
+    value,
+    text: index === rungs.length - 1 ? `${energyFigure(value)} ${unitLabel.value}` : energyFigure(value),
+  }))
 
   return { baselineY, bars, ticks, scale }
 })
@@ -240,17 +247,31 @@ function bucketLabel(bucket: EnergyBucket): string {
 
 /** Wh under a kilowatt-hour, kWh above, negative zero normalised so a folded bucket carries no sign. */
 function energyLabel(wh: number): string {
-  if (unitLabel.value === 'kWh') {
-    const kwh = Number((wh / 1000).toFixed(2))
-    return `${kwh === 0 ? 0 : kwh} kWh`
-  }
-  const rounded = Math.round(wh)
-  return `${rounded === 0 ? 0 : rounded} Wh`
+  return `${energyFigure(wh)} ${unitLabel.value}`
 }
 
-/** How many x labels the current slot width can hold without them touching. */
-function labelBudget(slot: number): number {
-  return Math.max(4, Math.floor((plotWidth.value - GUTTER) / Math.max(28, slot)))
+/** The figure alone, for the axis rail where the unit is stated once at the top. */
+function energyFigure(wh: number): string {
+  if (unitLabel.value === 'kWh') {
+    const kwh = Number((wh / 1000).toFixed(2))
+    return String(kwh === 0 ? 0 : kwh)
+  }
+  const rounded = Math.round(wh)
+  return String(rounded === 0 ? 0 : rounded)
+}
+
+/** Mono at 10px, so a glyph is 6px wide; the pair of spaces keeps two labels from touching. */
+const XLABEL_CHAR_PX = 6
+const XLABEL_GAP_PX = 12
+
+/**
+ * How many buckets to step between labels. The bound is the width of the label itself, not the
+ * width of a slot: a week's slots are wide enough for every day to be named, and thinning them on
+ * slot width alone dropped labels that had room to spare.
+ */
+function labelStride(slot: number): number {
+  const widest = props.buckets.reduce((most, bucket) => Math.max(most, xLabelFor(bucket.start).length), 0)
+  return Math.max(1, Math.ceil((widest * XLABEL_CHAR_PX + XLABEL_GAP_PX) / Math.max(1, slot)))
 }
 
 // ── geometry helpers (shared shape with the single-series bars) ──────────────
@@ -287,8 +308,10 @@ function f(value: number): string {
   return Number.isFinite(value) ? value.toFixed(1) : '0'
 }
 
+/** One viewBox unit is one CSS pixel: bars, axis and labels share the frame the plot is measured in. */
 const PLOT_HEIGHT = PLOT_H
-const XLABEL_HEIGHT = XLABEL_H
+const FRAME_HEIGHT = PLOT_H + LABEL_BAND
+const XLABEL_Y = PLOT_H + 13
 </script>
 
 <template>
@@ -316,8 +339,7 @@ const XLABEL_HEIGHT = XLABEL_H
       <div class="plot-scroll">
         <div ref="plot" class="plot" :style="{ minWidth: plotMinWidth }">
           <svg
-            :viewBox="`0 0 ${plotWidth} ${PLOT_HEIGHT}`"
-            preserveAspectRatio="none"
+            :viewBox="`0 0 ${plotWidth} ${FRAME_HEIGHT}`"
             role="img"
             :aria-label="`Charge into the pack versus out of it per ${unit}, in ${unitLabel}, as paired bars.`"
           >
@@ -332,7 +354,14 @@ const XLABEL_HEIGHT = XLABEL_H
             />
 
             <template v-for="tick in view.ticks" :key="tick.text">
-              <line :x1="GUTTER" :y1="tick.y" :x2="plotWidth" :y2="tick.y" class="grid" />
+              <line
+                :x1="GUTTER"
+                :y1="tick.y"
+                :x2="plotWidth"
+                :y2="tick.y"
+                class="grid"
+                :class="{ base: tick.value === 0 }"
+              />
               <text :x="GUTTER - 6" :y="tick.y + 3" text-anchor="end" class="tick">{{ tick.text }}</text>
             </template>
 
@@ -340,25 +369,20 @@ const XLABEL_HEIGHT = XLABEL_H
               <path v-if="bar.inPath" :d="bar.inPath" class="col charge" />
               <path v-if="bar.outPath" :d="bar.outPath" class="col draw" />
             </template>
-          </svg>
 
-          <svg
-            class="xaxis"
-            :viewBox="`0 0 ${plotWidth} ${XLABEL_HEIGHT}`"
-            preserveAspectRatio="none"
-            aria-hidden="true"
-          >
-            <text
-              v-for="slot in geom.slots"
-              v-show="slot.showX"
-              :key="slot.index"
-              :x="slot.cx"
-              y="13"
-              text-anchor="middle"
-              class="xlabel"
-            >
-              {{ slot.xLabel }}
-            </text>
+            <g aria-hidden="true">
+              <text
+                v-for="slot in geom.slots"
+                v-show="slot.showX"
+                :key="slot.index"
+                :x="slot.cx"
+                :y="XLABEL_Y"
+                text-anchor="middle"
+                class="xlabel"
+              >
+                {{ slot.xLabel }}
+              </text>
+            </g>
           </svg>
 
           <div
@@ -486,14 +510,7 @@ const XLABEL_HEIGHT = XLABEL_H
 
 .plot > svg {
   width: 100%;
-  height: 132px;
-  display: block;
-  overflow: visible;
-}
-
-.xaxis {
-  width: 100%;
-  height: 20px;
+  height: v-bind('FRAME_HEIGHT + "px"');
   display: block;
   overflow: visible;
 }
@@ -502,6 +519,11 @@ const XLABEL_HEIGHT = XLABEL_H
   stroke: var(--gridline);
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
+}
+
+/* Zero is the floor every bar stands on, not one more rung. */
+.grid.base {
+  stroke: var(--baseline);
 }
 
 .tick {
