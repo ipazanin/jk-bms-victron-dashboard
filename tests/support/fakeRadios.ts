@@ -9,7 +9,7 @@
  */
 
 import type { DetailLogTransfer } from '../../src/domain/bms/DetailLogTransfer'
-import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../src/domain/bms/types'
+import type { BatterySnapshot, DeviceInfo } from '../../src/domain/bms/types'
 import type { SolarHistoryTransfer } from '../../src/domain/solar/SolarHistoryTransfer'
 import type { SolarReading } from '../../src/domain/solar/types'
 import type { BmsLink, DisconnectReason, JkBmsHandlers } from '../../src/infrastructure/ble/JkBmsClient'
@@ -17,7 +17,7 @@ import type {
   SolarHistoryHandlers,
   SolarHistoryLink,
 } from '../../src/infrastructure/ble/VictronHistoryClient'
-import type { SolarScan, VictronHandlers } from '../../src/infrastructure/ble/VictronScanner'
+import type { SolarScan, VictronHandlers } from '../../src/infrastructure/ble/solarScan'
 
 /**
  * What a radio says over its own link from inside an attempt that then fails. The real client
@@ -32,14 +32,10 @@ interface InterruptedAttempt {
 export interface FakeBmsLink {
   /** Hand this to `createTelemetry` as `createBmsLink`. */
   create(handlers: JkBmsHandlers): BmsLink
-  readonly connected: boolean
   emitSnapshot(snapshot: BatterySnapshot): void
   emitDeviceInfo(info: DeviceInfo): void
-  emitSettings(settings: BmsSettings): void
   emitDisconnect(reason?: DisconnectReason): void
   emitError(error: Error): void
-  /** How a dismissed chooser reaches the app: connect() rejects and nothing else changes. */
-  failNextConnectWith(error: Error): void
   /** How an out-of-range or permission-gone pack reaches the app: reconnect() rejects. */
   failNextReconnectWith(error: Error): void
   /**
@@ -76,7 +72,6 @@ export function fakeBmsLink(
 ): FakeBmsLink {
   let handlers: JkBmsHandlers = {}
   let connected = false
-  let nextConnectError: Error | null = null
   let nextReconnectError: Error | null = null
   let interruptedConnect: InterruptedAttempt | null = null
   let interruptedReconnect: InterruptedAttempt | null = null
@@ -98,9 +93,6 @@ export function fakeBmsLink(
         interrupted.report()
         throw interrupted.rejection
       }
-      const failure = nextConnectError
-      nextConnectError = null
-      if (failure !== null) throw failure
       connected = true
     },
     async reconnect(deviceId: string) {
@@ -133,9 +125,6 @@ export function fakeBmsLink(
       handlers = next
       return link
     },
-    get connected() {
-      return connected
-    },
     get lastReconnectId() {
       return lastReconnectId
     },
@@ -150,15 +139,11 @@ export function fakeBmsLink(
     },
     emitSnapshot: (snapshot) => handlers.onSnapshot?.(snapshot),
     emitDeviceInfo: (info) => handlers.onDeviceInfo?.(info),
-    emitSettings: (settings) => handlers.onSettings?.(settings),
     emitDisconnect: (reason = 'dropped') => {
       connected = false
       handlers.onDisconnect?.(reason)
     },
     emitError: (error) => handlers.onError?.(error),
-    failNextConnectWith: (error) => {
-      nextConnectError = error
-    },
     failNextReconnectWith: (error) => {
       nextReconnectError = error
     },
@@ -174,28 +159,19 @@ export function fakeBmsLink(
 export interface FakeSolarScan {
   /** Hand this to `createTelemetry` as `createSolarScan`. */
   create(handlers: VictronHandlers): SolarScan
-  readonly scanning: boolean
   emitReading(reading: SolarReading, rssi?: number): void
-  emitForeignDevice(): void
   emitStale(): void
-  emitIdentity(modelId: number): void
-  emitError(error: Error): void
-  failNextStartWith(error: Error): void
 }
 
 export function fakeSolarScan(): FakeSolarScan {
   let handlers: VictronHandlers = {}
   let scanning = false
-  let nextStartError: Error | null = null
 
   const scan: SolarScan = {
     get scanning() {
       return scanning
     },
     async start() {
-      const failure = nextStartError
-      nextStartError = null
-      if (failure !== null) throw failure
       scanning = true
     },
     stop() {
@@ -208,17 +184,8 @@ export function fakeSolarScan(): FakeSolarScan {
       handlers = next
       return scan
     },
-    get scanning() {
-      return scanning
-    },
     emitReading: (reading, rssi = -67) => handlers.onReading?.(reading, rssi),
-    emitForeignDevice: () => handlers.onForeignDevice?.(),
     emitStale: () => handlers.onStale?.(),
-    emitIdentity: (modelId) => handlers.onIdentity?.(modelId),
-    emitError: (error) => handlers.onError?.(error),
-    failNextStartWith: (error) => {
-      nextStartError = error
-    },
   }
 }
 
@@ -231,12 +198,6 @@ export function fakeSolarScan(): FakeSolarScan {
 export interface FakeSolarHistoryLink {
   /** Hand this to `createTelemetry` as `createSolarHistoryLink`. */
   create(handlers: SolarHistoryHandlers): SolarHistoryLink
-  /** What the next sweep comes back with. Silence, until a spec says otherwise. */
-  answerNextSweepWith(transfer: SolarHistoryTransfer): void
-  /** How a dismissed chooser or a controller that will not connect reaches the app. */
-  failNextSweepWith(error: Error): void
-  /** How many sweeps the app asked for, so a spec can assert a guard actually guarded. */
-  readonly sweeps: number
 }
 
 const NO_TUNNEL_ANSWER: SolarHistoryTransfer = {
@@ -252,27 +213,20 @@ const NO_TUNNEL_ANSWER: SolarHistoryTransfer = {
   elapsedMs: 9_000,
 }
 
-export function fakeSolarHistoryLink(options: { readonly deviceName?: string | null } = {}): FakeSolarHistoryLink {
+export function fakeSolarHistoryLink(): FakeSolarHistoryLink {
   let reading = false
-  let sweeps = 0
-  let nextTransfer: SolarHistoryTransfer = NO_TUNNEL_ANSWER
-  let nextError: Error | null = null
 
   const link: SolarHistoryLink = {
     get reading() {
       return reading
     },
     get deviceName() {
-      return options.deviceName ?? 'SmartSolar HQ2'
+      return 'SmartSolar HQ2'
     },
     async readStoredHistory() {
-      sweeps += 1
       reading = true
       try {
-        const failure = nextError
-        nextError = null
-        if (failure !== null) throw failure
-        return nextTransfer
+        return NO_TUNNEL_ANSWER
       } finally {
         reading = false
       }
@@ -282,15 +236,6 @@ export function fakeSolarHistoryLink(options: { readonly deviceName?: string | n
   return {
     create() {
       return link
-    },
-    answerNextSweepWith: (transfer) => {
-      nextTransfer = transfer
-    },
-    failNextSweepWith: (error) => {
-      nextError = error
-    },
-    get sweeps() {
-      return sweeps
     },
   }
 }

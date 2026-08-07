@@ -160,7 +160,7 @@ const recordedSummary = computed(() => {
       :bus="bus"
       :pack-voltage="battery?.packVoltage ?? null"
       :rssi="solarRssi"
-      :can-scan="capabilities.canScan"
+      :can-listen-solar="capabilities.canListenSolar"
     />
 
     <!-- The live trend sits last: a strip mounting when a series first arrives grows the panel,

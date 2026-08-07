@@ -58,7 +58,7 @@ const SOLAR_ROW = {
   bus: null,
   packVoltage: null,
   rssi: 0,
-  canScan: true,
+  canListenSolar: true,
 }
 
 function solarRow(overrides: Partial<typeof SOLAR_ROW> = {}): string {
@@ -202,10 +202,10 @@ describe('what the solar panel says', () => {
     const hint = 'This browser cannot read Bluetooth advertisements.'
 
     for (const phase of ['absent', 'connecting', 'listening', 'waiting'] as LinkPhase[]) {
-      expect(solarRow({ solarPhase: phase, canScan: false })).toContain(hint)
+      expect(solarRow({ solarPhase: phase, canListenSolar: false })).toContain(hint)
     }
 
-    expect(solarRow({ solarPhase: 'reading', solar: CONTROLLER, canScan: false })).not.toContain(hint)
+    expect(solarRow({ solarPhase: 'reading', solar: CONTROLLER, canListenSolar: false })).not.toContain(hint)
   })
 })
 

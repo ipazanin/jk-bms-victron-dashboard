@@ -59,13 +59,14 @@ const requirements = computed<Requirement[]>(() => [
         : 'Turn Bluetooth on in your system settings, then reload.',
   },
   {
-    label: 'Advertisement scanning enabled',
+    label: 'Advertisement listening enabled',
     needed: 'solar',
-    level: props.capabilities.canScan ? 'ok' : 'blocked',
+    level: props.capabilities.canListenSolar ? 'ok' : 'blocked',
     remedy:
-      'The Victron broadcasts rather than accepting a connection, so reading it needs scanning. ' +
-      'Open chrome://flags/#enable-experimental-web-platform-features, turn it on and relaunch. ' +
-      'It exists only on Chrome for Android and macOS — not Windows, Linux or ChromeOS, and not iOS.',
+      'The Victron broadcasts rather than accepting a connection, so reading it needs the browser ' +
+      'to hear advertisements — by scanning for every device or by watching one picked from the chooser. ' +
+      'Both sit behind chrome://flags/#enable-experimental-web-platform-features; turn it on and relaunch. ' +
+      'Where the scan is silent, as on macOS, the page uses the chooser instead.',
   },
   {
     label: 'Web Crypto available',

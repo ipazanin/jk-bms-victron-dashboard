@@ -1,12 +1,15 @@
 /**
  * The solar radio port and the machinery every solar radio shares.
  *
- * Two things implement `SolarScan`: `VictronScanner`, which drives the browser's own
- * `requestLEScan`, and `BridgeSolarScan`, which reads the same advertisements relayed from a
- * native helper over a WebSocket — the escape hatch for macOS, where the browser's scan opens its
- * prompt and then finds nothing. Both hand raw manufacturer payloads to one
- * `SolarAdvertisementProcessor`, so the decrypt, the key check, the identity-once rule and the
- * staleness demotion are written once and cannot drift between the two paths.
+ * `SolarLiveScan` is what the app wires: it owns no radio itself and picks between the two browser
+ * routes on every press — `VictronScanner`, which drives `requestLEScan`, and `SolarWatchScanner`,
+ * which watches one chooser-picked device, because the scan opens its prompt on macOS and then
+ * finds nothing. `BridgeSolarScan` is a fourth implementation, reading the same advertisements
+ * relayed from a native helper over a WebSocket, reached only via `?bridge=`.
+ *
+ * Every transport hands raw manufacturer payloads to one `SolarAdvertisementProcessor`, so the
+ * decrypt, the key check, the identity-once rule and the staleness demotion are written once and
+ * cannot drift between the routes.
  */
 
 import {
@@ -51,6 +54,14 @@ export interface SolarScan {
 }
 
 /**
+ * Which route this browser reads live solar by. 'scan' is the browser's own `requestLEScan`;
+ * 'watch' is one chooser-picked device watched for advertisements, which is what macOS needs.
+ * Remembered between presses because the scan's failure — silence — only shows itself long after
+ * the click that could have raised a chooser.
+ */
+export type SolarLiveTransport = 'scan' | 'watch'
+
+/**
  * The decode-and-dispatch core, fed one manufacturer payload at a time by whatever transport owns
  * the radio. It holds the key, the AES key, the staleness clock and the generation counter that
  * drops a decode belonging to a scan that has since stopped — the parts that are subtle enough
@@ -69,10 +80,6 @@ export class SolarAdvertisementProcessor {
 
   constructor(handlers: VictronHandlers) {
     this.handlers = handlers
-  }
-
-  get active(): boolean {
-    return this.running
   }
 
   /**

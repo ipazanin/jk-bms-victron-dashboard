@@ -38,8 +38,17 @@ export function describeConnectError(error: Error): string | null {
   }
 }
 
-export function describeScanError(error: Error): string {
-  if ((error as DOMException).name === 'NotAllowedError') {
+/**
+ * Null on a dismissed prompt, for the same reason describeConnectError returns it: the solar watch
+ * route raises a device chooser, and closing one is a decision rather than a fault. Chrome's own
+ * "User cancelled the requestDevice() chooser." is internal text and has no business in a banner.
+ */
+export function describeScanError(error: Error): string | null {
+  const name = (error as DOMException).name
+  if (/cancell?ed/i.test(error.message)) return null
+  if (name === 'AbortError') return null
+
+  if (name === 'NotAllowedError') {
     return 'Bluetooth scanning was declined. Click Connect solar again and allow the prompt.'
   }
   return error.message

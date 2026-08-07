@@ -50,6 +50,13 @@ describe('describeScanError', () => {
     expect(describeScanError(domException('NotAllowedError'))).toMatch(/Connect solar again/)
   })
 
+  it('says nothing when the user closed the watch route’s device chooser', () => {
+    expect(
+      describeScanError(domException('NotFoundError', 'User cancelled the requestDevice() chooser.')),
+    ).toBeNull()
+    expect(describeScanError(domException('AbortError', 'superseded'))).toBeNull()
+  })
+
   it('passes other messages through', () => {
     expect(describeScanError(domException('Whatever', 'plain text'))).toBe('plain text')
   })

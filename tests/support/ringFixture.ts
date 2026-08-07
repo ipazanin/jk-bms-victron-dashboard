@@ -9,6 +9,7 @@
 import type { RingRun } from '../../src/domain/history/RingRun'
 import type { RingSnapshot } from '../../src/domain/history/RingSnapshot'
 import fixture from '../fixtures/ringMerge.json'
+import { hexToBytes } from './bytes'
 
 const FIRST_RECORD_INDEX = 6
 const RECORD_COUNT = 8
@@ -19,19 +20,11 @@ export const ringMerge = fixture
 
 export type CapturedRead = 'earlier' | 'later'
 
-export function bytesOf(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2)
-  for (let at = 0; at < bytes.length; at += 1) {
-    bytes[at] = Number.parseInt(hex.slice(at * 2, at * 2 + 2), 16)
-  }
-  return bytes
-}
-
 /** Every record one read carried, keyed by the ring index the frame gave it. */
 export function recordsOf(read: CapturedRead): Map<number, Uint8Array> {
   const records = new Map<number, Uint8Array>()
   for (const hex of ringMerge[read].frames) {
-    const frame = bytesOf(hex)
+    const frame = hexToBytes(hex)
     const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
     const firstIndex = view.getUint16(FIRST_RECORD_INDEX, true)
     const declared = view.getUint8(RECORD_COUNT)
@@ -45,7 +38,7 @@ export function recordsOf(read: CapturedRead): Map<number, Uint8Array> {
 }
 
 /** Maximal contiguous stretches of ring index, ascending. */
-export function runsIn(records: ReadonlyMap<number, Uint8Array>): readonly RingRun[] {
+function runsIn(records: ReadonlyMap<number, Uint8Array>): readonly RingRun[] {
   const indexes = [...records.keys()].sort((left, right) => left - right)
   const runs: RingRun[] = []
   let firstIndex = -1

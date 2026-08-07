@@ -15,9 +15,9 @@
  * advertised — filtering on it produces an empty chooser. `showAllDevices` is the escape hatch.
  *
  * This path works where the advertisement scan does not. On macOS Chrome `requestLEScan` opens its
- * prompt and then never delivers an advertisement, which is what `BridgeSolarScan` exists to work
- * around; `requestDevice` plus a GATT connect is unaffected, so the stored history is reachable on
- * a Mac even though the live feed is not.
+ * prompt and then never delivers an advertisement, which is what `SolarWatchScanner` exists to work
+ * around; `requestDevice` is unaffected either way, so the stored history was reachable on a Mac
+ * even before the live feed was.
  *
  * Reads go out one at a time and each is awaited before the next. Batching several read PDUs into
  * one write is legal — the vendor app does it, two at a time under a CBOR array of two — and it was

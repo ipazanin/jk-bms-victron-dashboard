@@ -3,9 +3,9 @@
  *
  * A runtime toggle, not a build flag: open the app with `?bridge=1` and it connects to the local
  * helper on ws://localhost:8787; `?bridge=ws://host:port` points it elsewhere; `?bridge=0` forces
- * it off. Absent the parameter, the real `VictronScanner` is used and the deployed site behaves
- * exactly as before. This exists because `requestLEScan` is dead on macOS Chrome — see
- * BridgeSolarScan.ts and the bridge/ directory.
+ * it off. Absent the parameter, `SolarLiveScan` picks a browser radio and the deployed site behaves
+ * exactly as before. This predates the watch route and remains the fallback for a browser that has
+ * neither radio — see BridgeSolarScan.ts and the bridge/ directory.
  */
 
 const DEFAULT_SOLAR_BRIDGE_URL = 'ws://localhost:8787'

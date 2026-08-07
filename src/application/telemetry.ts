@@ -34,8 +34,8 @@ import { JkBmsClient } from '../infrastructure/ble/JkBmsClient'
 import type { BmsLink, JkBmsHandlers } from '../infrastructure/ble/JkBmsClient'
 import { VictronHistoryClient } from '../infrastructure/ble/VictronHistoryClient'
 import type { SolarHistoryHandlers, SolarHistoryLink } from '../infrastructure/ble/VictronHistoryClient'
-import { VictronScanner } from '../infrastructure/ble/VictronScanner'
-import type { SolarScan, VictronHandlers } from '../infrastructure/ble/VictronScanner'
+import { SolarLiveScan } from '../infrastructure/ble/SolarLiveScan'
+import type { SolarScan, VictronHandlers } from '../infrastructure/ble/solarScan'
 import { BridgeSolarScan } from '../infrastructure/ble/BridgeSolarScan'
 import { resolveSolarBridgeUrl } from '../infrastructure/ble/solarBridge'
 import { browserStandardUtcOffsetMinutes } from './browserZone'
@@ -921,11 +921,12 @@ export function createTelemetry(deps: TelemetryDeps) {
     if (source.value === 'remembered') leaveRemembered()
     else if (source.value === 'history') leaveHistory()
     solarState.value = 'connecting'
-    // Saved before the attempt, not after it. requestLEScan raises a native permission prompt, and
-    // a scan that is declined, dismissed or simply never answered would otherwise discard
-    // thirty-two hex characters the owner has to find in VictronConnect and type again. This is a
-    // synchronous localStorage write, so it yields nothing and cannot spend the click's transient
-    // activation before the scan asks for it.
+    // Saved before the attempt, not after it. Starting the radio raises a native prompt — a scan
+    // permission or a device chooser — and an attempt that is declined, dismissed or simply never
+    // answered would otherwise discard thirty-two hex characters the owner has to find in
+    // VictronConnect and type again. This is a synchronous localStorage write, so it yields
+    // nothing: the chooser route depends on that, because a single await here would spend the
+    // click's transient activation before requestDevice could ask for it.
     saveAdvertisementKey(key)
     try {
       await solarScan.start(key)
@@ -1083,16 +1084,17 @@ export function attachHistoryStore(store: HistoryStore): void {
 }
 
 function browserDeps(): TelemetryDeps {
-  // A `?bridge=` in the URL swaps the browser's own radio for the native helper — the only way to
-  // read solar on macOS, where requestLEScan never delivers. Absent it, nothing changes.
+  // A `?bridge=` in the URL swaps the browser's own radio for the native helper — the route that
+  // needs no chooser tap. Absent it, SolarLiveScan picks between the browser's scan and a watched
+  // device by itself.
   const bridgeUrl = resolveSolarBridgeUrl(typeof window !== 'undefined' ? window.location.search : '')
   return {
     createBmsLink: (handlers) => new JkBmsClient(handlers),
     createSolarScan: bridgeUrl
       ? (handlers) => new BridgeSolarScan(bridgeUrl, handlers)
-      : (handlers) => new VictronScanner(handlers),
-    // Not bridged. The bridge exists because macOS Chrome never delivers an advertisement to
-    // requestLEScan; a GATT connect is unaffected, so the tunnel is the browser's own radio either way.
+      : (handlers) => new SolarLiveScan(handlers),
+    // Not bridged. A GATT connect is unaffected by whatever the advertisement scan does, so the
+    // tunnel is the browser's own radio either way.
     createSolarHistoryLink: (handlers) => new VictronHistoryClient(handlers),
     historyStore: () => attachedStore,
     refreshRingLedger: (deviceKey) => useHistoryBrowser().refreshRingLedger(deviceKey),

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fixtures from './fixtures.json'
 import { hexToBytes } from './support/bytes'
 import { holdDecrypt } from './support/pendingDecrypt'
+import { advertisementEvent } from './support/watchRadio'
 import { toArrayBuffer } from '../src/domain/bytes'
 import { VictronScanner } from '../src/infrastructure/ble/VictronScanner'
 import { VICTRON_COMPANY_ID } from '../src/domain/solar/types'
@@ -31,11 +32,7 @@ function installRadio(): void {
 }
 
 function advertisement(): Event {
-  const event = new Event('advertisementreceived')
-  const manufacturerData = new Map<number, DataView>()
-  manufacturerData.set(VICTRON_COMPANY_ID, new DataView(payload.buffer, payload.byteOffset, payload.byteLength))
-  Object.assign(event, { manufacturerData, rssi: -55 })
-  return event
+  return advertisementEvent(payload, VICTRON_COMPANY_ID, -55)
 }
 
 beforeEach(() => {

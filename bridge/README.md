@@ -1,4 +1,4 @@
-# Solar bridge (macOS workaround)
+# Solar bridge (macOS, no chooser tap)
 
 The dashboard reads the Victron SmartSolar by scanning its Bluetooth "Instant
 Readout" advertisements. On **macOS Chrome that scan is broken** — the browser's
@@ -7,11 +7,15 @@ never delivers a single advertisement (it's an unresolved Chromium issue,
 crbug.com/897312). The BMS still works, because it uses a different Bluetooth API
 that macOS does support; only the solar scan is affected.
 
-This bridge is the way around it. A native process **can** see those
-advertisements through CoreBluetooth, so `victron_bridge.py` scans locally and
-relays the raw advertisement bytes to the page over a `ws://localhost` socket.
-The page decodes them with the exact same code it uses for a real scan — same UI,
-same recorder, same everything.
+There are two ways around that. In the browser, the page raises the ordinary
+Bluetooth chooser and watches the controller you pick — one tap per page load.
+This bridge is the other way, the one with no tap: the experimental flag still
+has to be on for the page to offer solar at all, but no chooser is raised and
+no per-load pick is needed. A native process **can** see those advertisements
+through CoreBluetooth, so `victron_bridge.py` scans locally and relays the raw
+advertisement bytes to the page over a `ws://localhost` socket. The page decodes
+them with the exact same code it uses for a browser scan — same UI, same
+recorder, same everything.
 
 Your encryption key never leaves the browser and is never sent to this script.
 The bytes it relays are a public BLE broadcast that anything in radio range
@@ -50,7 +54,7 @@ comes straight from the bridge.
 
 - `?bridge=1` → connect to `ws://localhost:8787` (the default).
 - `?bridge=ws://host:port` → connect somewhere else.
-- No `?bridge` at all → the normal browser scan, unchanged.
+- No `?bridge` at all → the browser's own radio, unchanged.
 
 A side benefit: because Chrome no longer touches the radio for solar, the BMS
 connection stops dropping when you start solar with both radios in use.

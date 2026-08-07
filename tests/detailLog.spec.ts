@@ -41,6 +41,7 @@ import {
 } from '../src/domain/bms/protocol'
 import capturedFrames from './fixtures/detailLogFrame.json'
 import vendorExport from './fixtures/detailLogRows.json'
+import { hexToBytes } from './support/bytes'
 
 interface SampledRow {
   /** The pack's clock face in the fixture's `recordedTimeZone`, exactly as the vendor app rendered it. */
@@ -219,16 +220,8 @@ const RING_CAPACITY = 836
 const CELLS_IN_PACK = 4
 const PACK_NOMINAL_CAPACITY_AH = 315
 
-function bytesOfHex(hex: string): Uint8Array {
-  const frame = new Uint8Array(hex.length / 2)
-  for (let position = 0; position < frame.length; position += 1) {
-    frame[position] = Number.parseInt(hex.slice(position * 2, position * 2 + 2), 16)
-  }
-  return frame
-}
-
-const fullPage = bytesOfHex(capturedFrames.full.hex)
-const tailPage = bytesOfHex(capturedFrames.tail.hex)
+const fullPage = hexToBytes(capturedFrames.full.hex)
+const tailPage = hexToBytes(capturedFrames.tail.hex)
 
 const capturedPages = [
   { described: 'a full page', frame: fullPage, declared: capturedFrames.full },

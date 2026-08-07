@@ -1,12 +1,14 @@
 /**
  * Solar readings relayed from a native Bluetooth helper over a localhost WebSocket.
  *
- * macOS Chrome cannot deliver BLE advertisements to a page — `requestLEScan` opens its prompt and
- * then finds nothing — so the Victron feature is dead there through the browser's own radio. A
- * small local script (see the bridge/ directory) scans with CoreBluetooth, which works, and
- * forwards the raw manufacturer payload here. This class is the other end: it feeds those bytes to
- * the same `SolarAdvertisementProcessor` the real scanner uses, so the decrypt and every
- * downstream handler are identical.
+ * `requestLEScan` opens its prompt on macOS Chrome and then finds nothing. A small local script
+ * (see the bridge/ directory) scans with CoreBluetooth, which works, and forwards the raw
+ * manufacturer payload here. This class is the other end: it feeds those bytes to the same
+ * `SolarAdvertisementProcessor` the browser's own radios use, so the decrypt and every downstream
+ * handler are identical.
+ *
+ * `SolarWatchScanner` reads the same advertisements in the browser off a chooser-picked handle,
+ * so this is the route for someone who wants neither a chooser tap nor the experimental flag.
  *
  * The key is never sent to the bridge; the browser still holds it and does the decrypt. The
  * relayed bytes are a public broadcast that anything in radio range already hears.

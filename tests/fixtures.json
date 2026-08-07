@@ -5,7 +5,6 @@
   "victron": {
     "note": "Synthetic vector under a throwaway key. Not the real device key.",
     "advertisementKey": "0123456789abcdef0123456789abcdef",
-    "manufacturerId": 737,
     "payloadHex": "100257a0012a1301333ebae2fb4cd7e9ac104eeb",
     "plaintextHex": "05004105470069006300ffff",
     "expected": {

@@ -14,7 +14,7 @@ const props = defineProps<{
   bus: BusReconciliation | null
   packVoltage: number | null
   rssi: number
-  canScan: boolean
+  canListenSolar: boolean
 }>()
 
 const errorLevel = computed(() => (props.solar && props.solar.chargerError !== 0 ? 'critical' : 'good'))
@@ -78,10 +78,10 @@ const paragraph = computed(() => {
 
     <template v-else>
       <p class="empty" :class="{ pending: isPending(solarPhase) }">{{ paragraph }}</p>
-      <p v-if="!canScan" class="hint">
+      <p v-if="!canListenSolar" class="hint">
         This browser cannot read Bluetooth advertisements. Enable
-        <code>chrome://flags/#enable-experimental-web-platform-features</code> in Chrome on Android
-        or macOS, then reload.
+        <code>chrome://flags/#enable-experimental-web-platform-features</code> in Chrome, then
+        reload.
       </p>
     </template>
   </section>

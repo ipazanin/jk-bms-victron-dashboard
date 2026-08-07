@@ -106,7 +106,7 @@ const keyLooksComplete = computed(() => /^[0-9a-f]{32}$/.test(normalisedKey.valu
     <div class="solar">
       <h3 class="plate">Solar controller</h3>
 
-      <p v-if="!capabilities.canScan || !capabilities.hasSubtleCrypto" class="notice">
+      <p v-if="!capabilities.canListenSolar || !capabilities.hasSubtleCrypto" class="notice">
         The solar controller can’t be read in this browser. See <em>What this page needs</em>
         above — the battery works regardless, it just can’t show boat load.
       </p>
@@ -135,9 +135,9 @@ const keyLooksComplete = computed(() => /^[0-9a-f]{32}$/.test(normalisedKey.valu
           and is never sent anywhere.
         </p>
 
-        <!-- Cancel stops this page listening; it cannot withdraw a permission prompt the browser
-             has already put up. Allowing that prompt afterwards starts the scan, and the panel
-             then says it is listening. -->
+        <!-- Cancel stops this page listening; it cannot withdraw a prompt the browser has already
+             put up. Answering that prompt afterwards — allowing the scan, or picking the
+             controller — starts the listen, and the panel then says it is listening. -->
         <div class="actions">
           <button
             v-if="solarState === 'idle'"
@@ -153,8 +153,8 @@ const keyLooksComplete = computed(() => /^[0-9a-f]{32}$/.test(normalisedKey.valu
         </div>
 
         <p v-if="solarState === 'connecting'" class="hint">
-          Your browser is asking whether this page may scan for nearby Bluetooth devices. Allow it
-          to start listening; dismissing the prompt cancels.
+          Your browser is asking about nearby Bluetooth devices. Allow the scan, or pick the
+          controller from the list, to start listening; dismissing the prompt cancels.
         </p>
 
         <p v-if="solarState === 'listening' && !foreignDeviceSeen" class="hint">

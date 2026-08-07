@@ -20,7 +20,7 @@ import type { SessionClosure, SessionPatch } from '../../src/application/history
 import { REMEMBERED_SCHEMA_VERSION } from '../../src/application/rememberedSession'
 import type { RememberedSession } from '../../src/application/rememberedSession'
 import { RTC_EPOCH_UTC_MS } from '../../src/domain/bms/detailLog'
-import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../src/domain/bms/types'
+import type { BatterySnapshot, DeviceInfo } from '../../src/domain/bms/types'
 import { PackChunkBuilder, SolarChunkBuilder } from '../../src/domain/history/columns'
 import { packDefaultLabel, packDeviceKeyFor, UNIDENTIFIED_PACK_KEY } from '../../src/domain/history/identity'
 import { EMPTY_LEDGER } from '../../src/domain/history/ledger'
@@ -56,7 +56,7 @@ export const SAMPLE_EPOCH = Date.UTC(2025, 6, 12, 6, 20, 0)
 const CAPTURED_SERIAL = 'DEMO00000000001'
 
 export const PACK_DEVICE_KEY: DeviceKey = packDeviceKeyFor(deviceInfo(), null) ?? UNIDENTIFIED_PACK_KEY
-export const PACK_DEVICE_LABEL = packDefaultLabel(deviceInfo(), null)
+const PACK_DEVICE_LABEL = packDefaultLabel(deviceInfo(), null)
 /** A digest of some controller's advertisement key. Opaque by construction; never parsed back. */
 export const SOLAR_DEVICE_KEY: DeviceKey = 'victron:3f9a17c40b2e'
 
@@ -98,23 +98,6 @@ export function deviceInfo(overrides: Partial<DeviceInfo> = {}): DeviceInfo {
     serialNumber: CAPTURED_SERIAL,
     uptimeSeconds: 4_481_077,
     powerOnCount: 37,
-    ...overrides,
-  }
-}
-
-export function bmsSettings(overrides: Partial<BmsSettings> = {}): BmsSettings {
-  return {
-    cellCount: 4,
-    nominalCapacity: 315,
-    cellOverVoltage: 3.65,
-    cellUnderVoltage: 2.5,
-    balanceTriggerDelta: 0.01,
-    startBalanceVoltage: 3.1,
-    maxBalanceCurrent: 2,
-    chargeOverTemperature: 70,
-    chargeUnderTemperature: -10,
-    mosfetOverTemperature: 80,
-    balancerEnabled: true,
     ...overrides,
   }
 }

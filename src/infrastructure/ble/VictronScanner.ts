@@ -9,17 +9,17 @@
  * byte is what separates your controller from your neighbour's; the shared processor returns a
  * foreign-device signal for anything that fails it.
  *
- * This drives the browser's own radio. `requestLEScan` is unreliable on some desktop platforms —
- * on macOS Chrome it opens its prompt and then never delivers an advertisement — which is what
- * `BridgeSolarScan` exists to work around.
+ * This is the scan route `SolarLiveScan` picks; it never wires itself. `requestLEScan` is
+ * unreliable on some desktop platforms — on macOS Chrome it opens its prompt and then never
+ * delivers an advertisement — which is what `SolarWatchScanner` answers in the browser, and a
+ * silence here flips the remembered verdict to 'watch' so the next press goes that way.
+ * `BridgeSolarScan` stays the fallback for a browser that has neither radio.
  */
 
 import { parseAdvertisementKey } from '../../domain/solar/advertisement'
 import { VICTRON_COMPANY_ID } from '../../domain/solar/types'
 import { SolarAdvertisementProcessor } from './solarScan'
 import type { SolarScan, VictronHandlers } from './solarScan'
-
-export type { SolarScan, VictronHandlers } from './solarScan'
 
 export class VictronScanner implements SolarScan {
   private scan: BluetoothLEScan | null = null

@@ -50,31 +50,35 @@ different record types and are **not** decoded — only the solar-charger record
 
 Web Bluetooth is a Chromium-only API. This is not something the page can work around.
 
-| Browser | Battery (GATT) | Solar (advertisements) |
+| Browser | Battery (GATT) | Solar (live advertisements) |
 |---|---|---|
-| Chrome / Edge, macOS | ✅ | ⚠️ flagged, but the scan finds nothing — [use the bridge](bridge/README.md) |
+| Chrome / Edge, macOS | ✅ | ⚠️ flagged — pick the controller from the chooser, or [the bridge](bridge/README.md) for no tap |
 | Chrome, Android | ✅ | ⚠️ behind a flag |
-| Chrome / Edge, Windows · Linux · ChromeOS | ✅ | ❌ not implemented |
+| Chrome / Edge, Windows · Linux · ChromeOS | ✅ | ⚠️ flagged, untested here — no scan, so the page offers the watch route |
 | Firefox, any platform | ❌ | ❌ |
 | Safari, macOS & iOS | ❌ | ❌ |
-| Bluefy (iOS) | ✅ | ❌ |
+| Bluefy (iOS) | ✅ | ❌ neither route |
 
 - **Firefox will never work.** Mozilla's [standards position on Web Bluetooth](https://github.com/mozilla/standards-positions/issues/95)
   is *negative*; there is no implementation to enable.
 - **Safari ships nothing**, and Apple requires iOS browsers to use WebKit, so Chrome-on-iOS
   inherits the gap. iOS users need [Bluefy](https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055).
-- **Solar needs a flag.** Advertisement scanning (`requestLEScan`) is still behind
-  `chrome://flags/#enable-experimental-web-platform-features`, and per the
+- **Solar needs a flag.** Both routes to a live advertisement — the device-free scan
+  (`requestLEScan`) and watching one chosen device (`watchAdvertisements`) — sit behind
+  `chrome://flags/#enable-experimental-web-platform-features`. The page detects each separately and
+  offers solar if either exists. Per the
   [WebBluetoothCG implementation status](https://github.com/WebBluetoothCG/web-bluetooth/blob/main/implementation-status.md)
-  it is listed for **Android and macOS** — but the macOS entry is an open implementation issue
-  ([crbug.com/897312](https://crbug.com/897312)), so in practice only Android delivers.
-- **On macOS the scan opens its prompt and finds nothing.** The flag is honoured and the permission
-  dialog appears, but it sits on *Scanning…* with an empty device list forever — no advertisement
-  ever reaches the page, so the encryption key is never even consulted. The battery is unaffected;
-  GATT works fine on macOS. To read solar on a Mac, run the native helper in
+  the scan is listed for **Android and macOS**, but the macOS entry is an open implementation issue
+  ([crbug.com/897312](https://crbug.com/897312)).
+- **On macOS the scan is silent, so the page watches one device instead.** The flag is honoured and
+  the permission dialog appears, but it sits on *Scanning…* with an empty device list forever. So on
+  a Mac **Connect solar** raises the ordinary Bluetooth chooser: pick your controller and the page
+  reads its advertisements through the browser's own radio, one tap per page load. The battery is
+  unaffected either way; GATT works fine on macOS.
+- **The bridge is the option with no chooser tap.** Run the native helper in
   [`bridge/`](bridge/README.md): it scans with CoreBluetooth (which does see the advertisements) and
   relays the raw payload to the page over `ws://localhost`, where the same code decodes it with your
-  key exactly as a real scan would. Serve the app locally and open it with `?bridge=1`.
+  key exactly as a browser scan would. Serve the app locally and open it with `?bridge=1`.
 
 Storage is the opposite shape, and it changes what the Log can be. Firefox and Safari have perfect
 IndexedDB and no Web Bluetooth at all, so they can never record — and having never recorded, they
@@ -93,7 +97,7 @@ The page feature-detects all of this and degrades honestly. With no solar it is 
 correct battery instrument — it withholds the house-load span rather than faking it to zero.
 
 A **What this page needs** checklist under *Connect* shows the live state of every precondition —
-Web Bluetooth, HTTPS, whether the radio is actually switched on, advertisement scanning, Web Crypto —
+Web Bluetooth, HTTPS, whether the radio is actually switched on, advertisement listening, Web Crypto —
 tagged by whether it gates the battery or only the solar half, with the remedy for each.
 
 ## Before you connect
@@ -207,6 +211,12 @@ npm run typecheck
 npm run build
 npm run check:visual   # renders in real Chrome, asserts no overflow, no console errors, no jitter
 ```
+
+`localhost` is a secure context, so Web Bluetooth works on the dev server as-is. Viewing the dev
+build from a phone needs a real HTTPS origin: run
+`__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=.trycloudflare.com npm run dev` and point
+`cloudflared tunnel --url http://localhost:5173` at it. The tunnel URL changes per run, and each
+new URL is a new origin — Bluetooth permissions reset with it.
 
 `check:visual` drives the *built* site, so run `npm run build && npm run preview` first and leave the
 preview server up (it serves `http://localhost:4173/jk-bms-victron-dashboard/`, the script's default
