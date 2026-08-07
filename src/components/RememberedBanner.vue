@@ -110,7 +110,13 @@ const connectHref = hashOf({ name: 'connect' })
   color: var(--ink-muted);
 }
 
+/* A link inside a sentence is still a control, and --tap is the floor for every control on the
+   page. Inline-flex gives it the height without breaking the line it sits in. */
 .hint a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  padding-inline: 0.25rem;
   color: var(--pack-ink);
   text-decoration: none;
 }

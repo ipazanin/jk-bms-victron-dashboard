@@ -2,16 +2,39 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { COMPACT_QUERY } from '../src/application/breakpoints'
 import type { LinkPhase } from '../src/application/linkPhase'
 import type { Fault, FaultLevel, Source } from '../src/application/telemetry'
 import AnnunciatorStrip from '../src/components/AnnunciatorStrip.vue'
 import EnergyFlow from '../src/components/bus/EnergyFlow.vue'
 import ShuntAmmeter from '../src/components/ShuntAmmeter.vue'
+import SocCluster from '../src/components/SocCluster.vue'
 import SolarRow from '../src/components/SolarRow.vue'
-import type { StoredEnergy } from '../src/domain/dcBus'
+import type { Projection, StoredEnergy } from '../src/domain/dcBus'
 import type { Reach } from '../src/domain/reach'
 import type { SolarReading } from '../src/domain/solar/types'
 import { textOf, unmountComponent } from './support/mountComponent'
+import { battery as batterySnapshot } from './support/samples'
+
+/**
+ * jsdom answers every media query false, so a component's compact layout is unreachable without
+ * this: the phone arms of these instruments are real branches with their own words in them, and
+ * a spec that mounts under the desktop arm pins the sentence it is named for dropping.
+ */
+function onAPhone<T>(render: () => T): T {
+  const answered = window.matchMedia
+  window.matchMedia = ((query: string) => ({
+    matches: query === COMPACT_QUERY,
+    media: query,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  })) as unknown as typeof window.matchMedia
+  try {
+    return render()
+  } finally {
+    window.matchMedia = answered
+  }
+}
 
 // The gap between pressing connect and the first frame is the state these components exist to
 // narrate, and it is the one state a BusView-level spec cannot reach: 'connecting', 'listening'
@@ -32,6 +55,7 @@ const AMMETER = {
   pvPower: null as number | null,
   packReach: null as Reach | null,
   solarReach: null as Reach | null,
+  stale: false,
 }
 
 /** A pack frame in hand, which is the only thing that lets the pack row print anything. */
@@ -89,8 +113,11 @@ const FLOW = {
   housePower: null as number | null,
   houseLoadPlausible: null as boolean | null,
   packStored: null as StoredEnergy | null,
+  projection: null as Projection | null,
   packReach: null as Reach | null,
   solarReach: null as Reach | null,
+  stale: false,
+  capturedAt: null as number | null,
 }
 
 function energyFlow(overrides: Partial<typeof FLOW> = {}): string {
@@ -283,6 +310,153 @@ describe('what the energy flow ghosts', () => {
   it('prints an em dash on the hub when neither radio has a voltage', () => {
     expect(energyFlow()).toContain('DC BUS—')
     expect(energyFlow({ busVoltage: 13.42 })).not.toContain('DC BUS—')
+  })
+})
+
+/**
+ * The card's one level figure and the runtime it implies. The two arrive on different clocks: the
+ * charge is instantaneous and prints from the first frame, while the runtime is a claim about a
+ * sustained rate and waits for a window it can honestly make that claim over.
+ */
+describe('what the flow card says is left in the pack', () => {
+  const STORED: StoredEnergy = { wattHours: 3956, nominalVoltage: 12.8 }
+
+  function toEmpty(over: { hours?: number; settled?: boolean } = {}): Projection {
+    return { kind: 'toEmpty', hours: 4.2, overMs: 300_000, settled: true, ...over }
+  }
+
+  it('prints the charge from the first frame, with no runtime in hand yet', () => {
+    const text = energyFlow({ ...PACK_READS, packStored: STORED, projection: null })
+
+    expect(text).toContain('4.0 kWh')
+    expect(text).not.toContain('to empty')
+  })
+
+  it('says nothing about runtime while the window is still filling', () => {
+    const text = energyFlow({
+      ...PACK_READS,
+      packStored: STORED,
+      projection: { kind: 'collecting' },
+    })
+
+    expect(text).toContain('4.0 kWh')
+    expect(text).not.toContain('to empty')
+    expect(text).not.toContain('holding')
+  })
+
+  it('names the destination the measured rate is heading for', () => {
+    expect(energyFlow({ ...PACK_READS, packStored: STORED, projection: toEmpty() })).toContain(
+      '04:12 to empty',
+    )
+    unmountComponent()
+    expect(
+      energyFlow({
+        ...PACK_READS,
+        packStored: STORED,
+        projection: { kind: 'toFull', hours: 1.5, overMs: 300_000, settled: true },
+      }),
+    ).toContain('01:30 to full')
+  })
+
+  it('says holding rather than name a runtime inside the deadband', () => {
+    const text = energyFlow({
+      ...PACK_READS,
+      packStored: STORED,
+      projection: { kind: 'holding', overMs: 300_000, settled: true },
+    })
+
+    expect(text).toContain('holding')
+    expect(text).not.toContain('to empty')
+  })
+
+  it('marks a figure the window is still widening under, and only that one', () => {
+    expect(
+      energyFlow({ ...PACK_READS, packStored: STORED, projection: toEmpty({ settled: false }) }),
+    ).toContain('~04:12 to empty')
+    unmountComponent()
+    expect(energyFlow({ ...PACK_READS, packStored: STORED, projection: toEmpty() })).not.toContain(
+      '~',
+    )
+  })
+
+  it('spells the basis out in full where the row has the width for it', () => {
+    const text = energyFlow({ ...PACK_READS, packStored: STORED, projection: null })
+
+    expect(text).toContain('charge valued at 12.8 V nominal, so a switching load cannot move it')
+  })
+
+  it('drops the basis to the clause that carries it on a phone', () => {
+    const text = onAPhone(() =>
+      energyFlow({ ...PACK_READS, packStored: STORED, projection: null }),
+    )
+
+    expect(text).toContain('at 12.8 V')
+    expect(text).not.toContain('so a switching load cannot move it')
+  })
+
+  it('stands the basis down entirely once a runtime shares the phone row with it', () => {
+    // Three nowrap figures already fill a phone-width row. The basis would be squeezed to nothing
+    // while still holding its gap, so it goes and the aria summary keeps the whole sentence.
+    const text = onAPhone(() =>
+      energyFlow({ ...PACK_READS, packStored: STORED, projection: toEmpty() }),
+    )
+
+    expect(text).toContain('04:12 to empty')
+    expect(text).not.toContain('12.8 V nominal')
+    expect(text).not.toContain('at 12.8 V')
+  })
+
+  it('will not call a discharging pack full at the bottom of its count', () => {
+    // hoursToEmpty divides the charge left by the rate, so an empty pack still drawing current
+    // reaches exactly zero hours — the one moment 'full' would be the opposite of the truth.
+    const text = energyFlow({
+      ...PACK_READS,
+      packStored: { wattHours: 0, nominalVoltage: 12.8 },
+      projection: toEmpty({ hours: 0 }),
+    })
+
+    expect(text).toContain('00:00 to empty')
+    expect(text).not.toContain('full')
+  })
+
+  it('calls a pack at capacity full, which is the case the word is for', () => {
+    const text = energyFlow({
+      ...PACK_READS,
+      packStored: STORED,
+      projection: { kind: 'toFull', hours: 0, overMs: 300_000, settled: true },
+    })
+
+    expect(text).toContain('full')
+    expect(text).not.toContain('00:00')
+  })
+})
+
+/**
+ * The runtime row on the state-of-charge card names the same projection the flow card does, from
+ * the same ref, so the two cannot disagree on one screen — including about the word 'full'.
+ */
+describe('what the state-of-charge card says the runtime is', () => {
+  function soc(projection: Projection | null): string {
+    return textOf(SocCluster, { battery: batterySnapshot(), projection })
+  }
+
+  it('names the destination and the window it was measured over', () => {
+    expect(soc({ kind: 'toEmpty', hours: 4.2, overMs: 300_000, settled: true })).toContain(
+      '04:12 to empty · over 5 min',
+    )
+  })
+
+  it('will not call a discharging pack full at the bottom of its count', () => {
+    const text = soc({ kind: 'toEmpty', hours: 0, overMs: 300_000, settled: true })
+
+    expect(text).toContain('00:00 to empty')
+    expect(text).not.toContain('full')
+  })
+
+  it('calls a pack at capacity full, which is the case the word is for', () => {
+    expect(soc({ kind: 'toFull', hours: 0, overMs: 300_000, settled: true })).toContain(
+      'full · over 5 min',
+    )
   })
 })
 

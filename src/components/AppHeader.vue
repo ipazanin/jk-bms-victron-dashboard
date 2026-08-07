@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import { useIsDesktop } from '../application/breakpoints'
+import { NARROW_QUERY, useIsDesktop } from '../application/breakpoints'
 import { hashOf } from '../application/route'
 import type { FaultLevel, Source } from '../application/telemetry'
 import type { Theme } from '../application/theme'
+import { useMediaQuery } from '../application/useMediaQuery'
 
 /**
  * What the header has to say about the boat, read off telemetry by whoever owns it. The header
@@ -28,6 +29,7 @@ const props = defineProps<{
 const emit = defineEmits<{ toggleTheme: []; toggleSidebar: [] }>()
 
 const isDesktop = useIsDesktop()
+const narrow = useMediaQuery(NARROW_QUERY)
 
 /**
  * The one sidebar-toggle button means different things by width, so its icon and its ARIA state
@@ -70,8 +72,8 @@ const contextText = computed(() => {
     return status.worst === 'good' ? 'Live' : `Live · ${capitalized(status.worst)}`
   }
   if (status.source === 'remembered') return 'Remembered'
-  if (status.source === 'history') return 'Reviewing saved session'
-  return 'JK-BMS · Victron SmartSolar'
+  if (status.source === 'history') return narrow.value ? 'Saved session' : 'Reviewing saved session'
+  return narrow.value ? 'JK-BMS · Victron' : 'JK-BMS · Victron SmartSolar'
 })
 </script>
 
@@ -279,9 +281,4 @@ const contextText = computed(() => {
   transform: translateY(-6px) rotate(-45deg);
 }
 
-@media (max-width: 420px) {
-  .context {
-    display: none;
-  }
-}
 </style>

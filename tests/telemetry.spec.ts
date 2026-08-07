@@ -778,7 +778,12 @@ describe('the windows never outlive the pack they describe', () => {
     await telemetry.connectBms()
     driveSeconds(65)
 
-    expect(telemetry.projection.value).toEqual({ kind: 'toEmpty', hours: expect.any(Number), overMs: 64_000 })
+    expect(telemetry.projection.value).toEqual({
+      kind: 'toEmpty',
+      hours: expect.any(Number),
+      overMs: 64_000,
+      settled: true,
+    })
 
     await telemetry.disconnectBms()
 

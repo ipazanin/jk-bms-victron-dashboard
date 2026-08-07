@@ -139,6 +139,14 @@ const PASSES = [
       }
       if (!report.soc) fail(scope, 'no state-of-charge figure rendered')
       if (!/not live data/i.test(report.text)) fail(scope, 'the remembered banner did not render')
+      // The banner scrolls off the top of a phone. Every instrument still painting the snapshot
+      // below it has to carry the claim on its own surface, in words and in its own dataset.
+      if (!/not live ·/i.test(report.text)) {
+        fail(scope, 'no instrument caption said the figures are not live')
+      }
+      if (report.liveInstruments !== false) {
+        fail(scope, 'an instrument read as live over a remembered snapshot')
+      }
     },
   },
   {
@@ -309,6 +317,15 @@ for (const viewport of VIEWPORTS) {
       )
       if (report.overflowing.length) fail(scope, `overflowing: ${report.overflowing.join(', ')}`)
     }
+    // The page-level test above is blind to anything cut off, wrapped or undersized INSIDE a card,
+    // which is where every mobile problem this check has ever missed actually lived.
+    if (report.clipped.length) fail(scope, `text clipped inside: ${report.clipped.join(', ')}`)
+    if (report.wrappedFigures.length) {
+      fail(scope, `figures broken across lines: ${report.wrappedFigures.join(', ')}`)
+    }
+    if (report.smallTargets.length) {
+      fail(scope, `tap targets under 44px: ${report.smallTargets.join(', ')}`)
+    }
     if (errors.length) fail(scope, `console errors: ${errors.slice(0, 3).join(' | ')}`)
     if (report.hasNegativeZero) fail(scope, 'rendered a negative zero')
     // A state that never rendered fails once, for the reason it never rendered. Grading its
@@ -440,6 +457,9 @@ async function measureDrawer() {
       fail(scope, 'the workspace stayed reachable behind the open drawer (not inert)')
     }
     if (containment.drawerInert) fail(scope, 'the open drawer is itself inert')
+    // `.is-open` lands when the slide STARTS. Shot then, the committed screenshot shows the panel
+    // halfway across with its content clipped at the edge — a correct layout misrepresented.
+    await settleDrawer(page)
     await page.screenshot({ path: join(SCREENSHOT_DIR, 'phone-drawer.png') })
   }
 
@@ -448,6 +468,25 @@ async function measureDrawer() {
   console.log(`${scope.padEnd(24)}  ${opened ? 'opened' : 'FAILED'}  errors=${errors.length}`)
 
   await context.close()
+}
+
+/** Resolves on the drawer's own transform transition ending, or on a ceiling if it never fires. */
+function settleDrawer(page) {
+  return page.evaluate(() => {
+    const drawer = document.querySelector('[data-testid="app-sidebar"]')
+    if (drawer === null) return undefined
+    return new Promise((resolve) => {
+      const done = () => {
+        drawer.removeEventListener('transitionend', onEnd)
+        resolve(undefined)
+      }
+      const onEnd = (event) => {
+        if (event.propertyName === 'transform') done()
+      }
+      drawer.addEventListener('transitionend', onEnd)
+      setTimeout(done, 400)
+    })
+  })
 }
 
 /**
@@ -717,12 +756,49 @@ async function seedStores(remembered, archive, ring) {
 function readPage(page) {
   return page.evaluate(() => {
     const doc = document.documentElement
-    const overflowing = [...document.querySelectorAll('*')]
-      .filter((element) => element.getBoundingClientRect().right > doc.clientWidth + 1)
-      .map(
-        (element) =>
-          `${element.tagName.toLowerCase()}.${element.className?.toString().split(' ')[0] ?? ''}`,
-      )
+    const name = (element) =>
+      `${element.tagName.toLowerCase()}.${element.className?.toString().split(' ')[0] ?? ''}`
+    const first = (found) => [...new Set(found.map(name))].slice(0, 6)
+
+    const elements = [...document.querySelectorAll('*')]
+    const overflowing = elements.filter(
+      (element) => element.getBoundingClientRect().right > doc.clientWidth + 1,
+    )
+
+    // Text cut off INSIDE a card never moves documentElement.scrollWidth, so the page-level
+    // overflow test cannot see it. This is the one that catches a sentence ellipsised to a stub.
+    const clipped = elements.filter((element) => {
+      // A screen-reader-only span is a 1px box holding a whole word on purpose. It is not text
+      // cut off; it is text that was never for the eye.
+      if (element.clientWidth <= 1) return false
+      if (element.scrollWidth - element.clientWidth <= 1) return false
+      return /hidden|clip/.test(getComputedStyle(element).overflowX)
+    })
+
+    // A figure taller than one and a half of its own lines has broken '122.0 h' across two of
+    // them, which is a value split from its unit rather than a value. Only classes that hold ONE
+    // value: `.readout` is also worn by whole sentences, which wrap for a living.
+    const wrappedFigures = [...
+      document.querySelectorAll('.hero-figure, .secondary-figure, .when')
+    ].filter((element) => {
+      // A `.unit` span is the other half of the same figure — '61' and '%' — and is exactly what
+      // this check is here to catch coming apart. Anything else nested is markup rather than a
+      // value, and its own wrapping is not this grader's business.
+      if ([...element.children].some((child) => !child.classList.contains('unit'))) return false
+      const lineHeight = parseFloat(getComputedStyle(element).lineHeight)
+      return Number.isFinite(lineHeight) && element.getBoundingClientRect().height > lineHeight * 1.6
+    })
+
+    // --tap is declared the floor for every control on the page, not a target for the new ones.
+    const smallTargets = [...document.querySelectorAll('button, a[href], input, select, summary')]
+      .filter((element) => {
+        const box = element.getBoundingClientRect()
+        return box.height > 0 && box.height < 44
+      })
+
+    // Every instrument that paints figures says on its own surface whether they are a measurement
+    // in progress. Null when the page has no such instrument on it at all.
+    const liveFlags = [...document.querySelectorAll('[data-live]')].map((node) => node.dataset.live)
 
     const text = document.body.innerText
     const ribbon = document.querySelector('[data-testid="session-ribbon"] path.trace.pack')
@@ -741,7 +817,11 @@ function readPage(page) {
     return {
       scrollWidth: doc.scrollWidth,
       clientWidth: doc.clientWidth,
-      overflowing: [...new Set(overflowing)].slice(0, 6),
+      overflowing: first(overflowing),
+      clipped: first(clipped),
+      wrappedFigures: first(wrappedFigures),
+      smallTargets: first(smallTargets),
+      liveInstruments: liveFlags.length === 0 ? null : liveFlags.some((flag) => flag === 'true'),
       text,
       hasAmmeter: document.querySelector('[data-testid="shunt-ammeter"]') !== null,
       powered: document.querySelector('[data-testid="shunt-ammeter"]')?.dataset.powered === 'true',

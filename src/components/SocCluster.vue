@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 
 import StatusChip from './StatusChip.vue'
-import { ampHours, hours, volts } from '../application/format'
+import { ampHours, duration, volts } from '../application/format'
 import type { BatterySnapshot } from '../domain/bms/types'
 import type { Projection } from '../domain/dcBus'
 
@@ -40,6 +40,9 @@ function aperture(overMs: number): string {
  * everything below them. Every state the projection can be in has words here, including the
  * two that decline to name a figure — a remembered or browsed session carries no window at all,
  * and a rate taken from an hours-old snapshot describes a boat that has since moved on.
+ *
+ * An unsettled figure carries a tilde: the window is still widening under it, so the number will
+ * visibly walk for the first minute and must not read as a settled claim.
  */
 const runtime = computed(() => {
   const projection = props.projection
@@ -48,7 +51,13 @@ const runtime = computed(() => {
   if (projection.kind === 'holding') return `holding · ${aperture(projection.overMs)}`
 
   const destination = projection.kind === 'toFull' ? 'to full' : 'to empty'
-  const figure = projection.hours === 0 ? 'full' : `${hours(projection.hours)} ${destination}`
+  const about = projection.settled ? '' : '~'
+  // Only a charge can end at 'full'. A discharge reaches zero hours at the bottom of the coulomb
+  // count, where the word would name the exact opposite of what the meter above it is showing.
+  const figure =
+    projection.kind === 'toFull' && projection.hours === 0
+      ? 'full'
+      : `${about}${duration(projection.hours * 3600)} ${destination}`
   return `${figure} · ${aperture(projection.overMs)}`
 })
 </script>

@@ -19,10 +19,20 @@
  */
 import { computed, ref, watch } from 'vue'
 
-import { amps, ampsAbsolute, storedWattHours, volts, watts, wattsSigned } from '../../application/format'
+import { COMPACT_QUERY } from '../../application/breakpoints'
+import {
+  amps,
+  ampsAbsolute,
+  clockTime,
+  duration,
+  storedWattHours,
+  volts,
+  watts,
+  wattsSigned,
+} from '../../application/format'
 import type { LinkPhase } from '../../application/linkPhase'
 import { useMediaQuery } from '../../application/useMediaQuery'
-import type { StoredEnergy } from '../../domain/dcBus'
+import type { Projection, StoredEnergy } from '../../domain/dcBus'
 import type { Reach } from '../../domain/reach'
 import { CURRENT_LADDER, nextStop } from '../../domain/scaleLadder'
 
@@ -45,8 +55,16 @@ const props = defineProps<{
   houseLoadPlausible: boolean | null
   /** Null with no pack connected, and with a pack that has not reported its series count. */
   packStored: StoredEnergy | null
+  /** The same ref the state-of-charge card reads, never recomputed here: two runtimes on one
+   *  screen have to be the same runtime, and an ETA taken off the latest sample is not one. */
+  projection: Projection | null
   packReach: Reach | null
   solarReach: Reach | null
+  /** The figures are a restored snapshot or an archived session rather than a measurement in
+   *  progress. Every channel that says "live" — the marching dashes above all — has to go quiet. */
+  stale: boolean
+  /** When the stale figures were observed; null for an archived session, which the Log dates. */
+  capturedAt: number | null
 }>()
 
 /** Flow deadband, matching the shunt: below this a reading rounds to zero and carries no direction. */
@@ -174,7 +192,7 @@ const PHONE_GEO: Geometry = {
   },
 }
 
-const compact = useMediaQuery('(max-width: 720px)')
+const compact = useMediaQuery(COMPACT_QUERY)
 const geo = computed(() => (compact.value ? PHONE_GEO : DESKTOP_GEO))
 
 const packReading = computed(() => props.packPhase === 'reading')
@@ -312,10 +330,58 @@ const solarNote = computed(() => {
 const packStoredFigure = computed(() =>
   props.packStored === null ? '—' : storedWattHours(props.packStored.wattHours),
 )
+/**
+ * How long the charge above lasts at the rate the window measured. The threshold for a rate worth
+ * projecting is not decided here: project() withholds a figure under 0.15 A net — on the window's
+ * time-weighted mean, never on the latest sample — and hands back 'holding' instead.
+ */
+const packEta = computed(() => {
+  const projection = props.projection
+  if (projection === null || projection.kind === 'collecting') return ''
+  if (projection.kind === 'holding') return 'holding'
+  // Only a charge can end at 'full'. hoursToFull returns zero for a pack already at capacity, and
+  // hoursToEmpty returns it for a pack that has reached the bottom of its count — the one moment
+  // the word would be the exact opposite of what the reader is looking at.
+  if (projection.kind === 'toFull' && projection.hours === 0) return 'full'
+  const destination = projection.kind === 'toFull' ? 'to full' : 'to empty'
+  const about = projection.settled ? '' : '~'
+  return `${about}${duration(projection.hours * 3600)} ${destination}`
+})
+
+/**
+ * The reason the figure is what it is. On a phone the row has about a third of the width the
+ * sentence needs, and an ellipsis two words in abbreviates nothing — so the phone gets the clause
+ * that carries the basis and the aria summary keeps the whole of it.
+ *
+ * A phone with a runtime beside the charge has no room even for the clause: three nowrap figures
+ * already fill the row, and the basis would be squeezed to nothing while still holding its gap.
+ * The runtime is the more useful of the two, so the basis stands down and the aria summary — which
+ * carries the whole sentence at every width — is where it stays reachable.
+ */
 const packStoredBasis = computed(() => {
   if (!packReading.value) return 'the pack is not connected'
   if (props.packStored === null) return 'the pack has not reported its series count'
-  return `charge valued at ${volts(props.packStored.nominalVoltage, 1)} nominal, so a switching load cannot move it`
+  if (compact.value && packEta.value !== '') return ''
+  const nominal = volts(props.packStored.nominalVoltage, 1)
+  return compact.value
+    ? `at ${nominal}`
+    : `charge valued at ${nominal} nominal, so a switching load cannot move it`
+})
+
+/** The word the row's own label carries once the figures stop being a measurement. */
+const storedPlate = computed(() => (props.stale ? 'Stored (last seen)' : 'Stored'))
+
+/**
+ * The clock time rather than an age, because this caption is read once and never re-read. It is a
+ * computed over a capturedAt that does not move, so a relative age would be evaluated at mount and
+ * then sit there claiming "moments ago" for as long as the page is open — and the banner that does
+ * tick its own age is the first thing off the top of a phone. A wall-clock time cannot go stale,
+ * and it holds its width, which a counting age does not. Remembered snapshots expire at twelve
+ * hours, so an hour and a minute is all the resolution the reader needs.
+ */
+const staleNote = computed(() => {
+  if (!props.stale) return 'solar · bus · boat · pack'
+  return props.capturedAt === null ? 'not live' : `not live · last seen ${clockTime(props.capturedAt)}`
 })
 
 const housePrimary = computed(() => (props.housePower !== null ? watts(props.housePower) : '—'))
@@ -394,10 +460,21 @@ const busPhrase = computed(() =>
     : `, bus ${volts(props.busVoltage, 1)} as the controller reports it`,
 )
 
+/** The full basis sentence, which the phone's own row no longer has the width to print. */
+const storedPhrase = computed(() => {
+  if (props.packStored === null) return ''
+  const nominal = volts(props.packStored.nominalVoltage, 1)
+  const sentence =
+    `. ${packStoredFigure.value} stored, charge valued at ${nominal} nominal, ` +
+    'so a switching load cannot move it'
+  return packEta.value === '' ? `${sentence}.` : `${sentence}. ${packEta.value}.`
+})
+
 const summary = computed(
   () =>
+    (props.stale ? `${cap(staleNote.value)}. ` : '') +
     `${cap(solarPhrase.value)}, ${packPhrase.value}, ${housePhrase.value}${busPhrase.value}` +
-    (props.packStored === null ? '.' : `. ${packStoredFigure.value} stored.`),
+    (props.packStored === null ? '.' : storedPhrase.value),
 )
 </script>
 
@@ -405,15 +482,17 @@ const summary = computed(
   <section class="flow-card">
     <header class="head">
       <h2 class="plate">Energy flow</h2>
-      <p class="muted">solar · bus · boat · pack</p>
+      <p class="muted" :class="{ stale }">{{ staleNote }}</p>
     </header>
 
     <svg
       :viewBox="geo.viewBox"
       class="diagram"
+      :class="{ stale }"
       role="img"
       :aria-label="summary"
       data-testid="energy-flow"
+      :data-live="stale ? 'false' : 'true'"
     >
       <!-- Edges first, so their pipes tuck under the node rects at each end. -->
       <g class="edge solar" :class="solarState" :style="{ '--flow-period': solarPeriod }">
@@ -568,9 +647,10 @@ const summary = computed(
     <!-- The one figure on this card that is a level rather than a flow, so it sits outside the
          diagram rather than competing with the three rates inside it. -->
     <p class="stored">
-      <span class="plate">Stored</span>
+      <span class="plate">{{ storedPlate }}</span>
       <span class="figure">{{ packStoredFigure }}</span>
-      <span class="muted basis">{{ packStoredBasis }}</span>
+      <span v-if="packEta" class="figure eta">{{ packEta }}</span>
+      <span v-if="packStoredBasis" class="muted basis">{{ packStoredBasis }}</span>
     </p>
   </section>
 </template>
@@ -756,6 +836,16 @@ const summary = computed(
   color: var(--pack-ink);
 }
 
+/* The runtime is a consequence of the charge beside it, so it reads as the secondary of the pair.
+   It gives way before the row does: with the basis already stood down on a phone, this is the only
+   child left that can absorb a fourteen-day figure without pushing the card off the screen. */
+.stored .eta {
+  color: var(--ink-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* The basis is a footnote to the figure, so it is the part that gives way when the card is narrow. */
 .stored .basis {
   min-width: 0;
@@ -779,6 +869,42 @@ const summary = computed(
     stroke-dasharray: 7 10;
     animation-name: march-phone;
   }
+}
+
+/*
+ * Not live. The marching dashes are the strongest claim on this card that something is happening
+ * now, and over a restored snapshot the claim is false — so they go, through the same channel
+ * reduced motion already proves the picture survives. The arrowheads stay: they are static
+ * geometry and the only direction channel solar and boat have. What is withdrawn beyond the motion
+ * is the confidence — the colour-coded ink recedes to the secondary, and the pipes dim — because
+ * the figures themselves are still true, just not true of now.
+ *
+ * Opacity and fill only. Nothing here moves a coordinate, so the card cannot shift on the flip.
+ */
+.diagram.stale .flow {
+  display: none;
+}
+
+/* The geometry recedes and the text does not. Opacity on the edge group as a whole would take the
+   readout with it, and a channel ink at two thirds strength drops under 4.5:1 on the card — so the
+   pipe and its arrowhead carry the dimming, and the readout recedes by swapping to the secondary
+   ink at full strength, which is the same channel the nodes already use. */
+.diagram.stale .pipe {
+  opacity: 0.36;
+}
+
+.diagram.stale .head {
+  opacity: 0.65;
+}
+
+.diagram.stale .edge-read,
+.diagram.stale .node-primary,
+.diagram.stale .node-sub {
+  fill: var(--ink-secondary);
+}
+
+.head p.stale {
+  color: var(--ink-secondary);
 }
 
 /*

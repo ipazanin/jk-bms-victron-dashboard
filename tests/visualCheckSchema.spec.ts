@@ -32,11 +32,10 @@ interface DeclaredStore {
   readonly indexes: readonly DeclaredIndex[]
 }
 
+const raw = readFileSync(new URL('../scripts/visual-check.mjs', import.meta.url), 'utf8')
+
 /** Whitespace-flattened, so a wrapped declaration reads the same as a one-line one. */
-const source = readFileSync(new URL('../scripts/visual-check.mjs', import.meta.url), 'utf8').replace(
-  /\s+/g,
-  ' ',
-)
+const source = raw.replace(/\s+/g, ' ')
 
 const STORE_DECLARATION =
   /(?:const (\w+) = )?created\.createObjectStore\('([^']+)', \{ keyPath: (\[[^\]]*\]|'[^']*'),? \}\)/g
@@ -133,5 +132,23 @@ describe('the visual check seeds the archive the adapter reads', () => {
 
   it("builds every store on the adapter's own key paths and indexes", () => {
     expect(sorted(schemaSeededByCheck())).toEqual(sorted(schemaBuiltByAdapter()))
+  })
+})
+
+/**
+ * The other hand copy in the same file: `readPage` returns one flat object and every pass reads
+ * fields off it by name. A grader naming a field the page read never returns reads `undefined`,
+ * and `undefined` is a check that quietly passes over whatever it was meant to catch.
+ */
+describe('every field the visual check grades is a field the page read returns', () => {
+  it('finds all of them in the report readPage builds', () => {
+    // The report's own keys are the only ones at this depth in the file: two braces for the
+    // function and the evaluate callback, one for the object literal itself.
+    const body = raw.slice(raw.indexOf('function readPage('), raw.indexOf('function readSeeds('))
+    const declared = new Set([...body.matchAll(/^ {6}(\w+)[,:]/gm)].map((field) => field[1]))
+    const graded = new Set([...source.matchAll(/\breport\.(\w+)/g)].map((field) => field[1]))
+
+    expect([...graded].filter((field) => !declared.has(field))).toEqual([])
+    expect(declared.size).toBeGreaterThan(0)
   })
 })

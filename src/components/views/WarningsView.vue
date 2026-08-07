@@ -249,9 +249,23 @@ summary::-webkit-details-marker {
   font-weight: 600;
 }
 
+/* A stamp broken across two lines — 'Jul 12,' over '08:21:30 AM' — is not a time. It holds its
+   width against the title beside it and, on a phone, drops to a row of its own intact. */
 .when {
+  flex: none;
+  white-space: nowrap;
   color: var(--ink-muted);
   font-size: 0.8125rem;
+}
+
+@media (max-width: 720px) {
+  summary {
+    flex-wrap: wrap;
+  }
+
+  .when {
+    margin-left: auto;
+  }
 }
 
 .detail {

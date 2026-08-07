@@ -1392,14 +1392,21 @@ function utcLabel(offsetMinutes: number): string {
   margin: 0 0 1rem;
 }
 
+/* Inline in a sentence and still a control, so it carries the same --tap floor as every button. */
 .state a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  padding-inline: 0.25rem;
   color: var(--pack-ink);
 }
 
 /* Lifetime — inset chips on the card, a step down from the summary tiles above. */
 .lifetime-tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  /* 11rem rather than 9: at 9 a 390px phone fits two ~135px columns and every figure in them
+     wraps its unit onto a second line. One column reads. */
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
   gap: 0.75rem;
   margin: 0;
 }
@@ -1613,9 +1620,12 @@ function utcLabel(offsetMinutes: number): string {
   white-space: nowrap;
 }
 
+/* 6.5rem cannot hold 'Jun 11, 04:14 AM' and split it down the middle. The column stops ruling
+   here and the stamps simply take the width they need, which is the lesser loss. */
 @container (max-width: 560px) {
   .when {
-    width: 6.5rem;
+    width: auto;
+    white-space: nowrap;
   }
 }
 </style>

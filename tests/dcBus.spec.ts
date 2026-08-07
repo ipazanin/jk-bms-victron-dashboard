@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import { hoursToEmpty, hoursToFull, reconcile, storedEnergy } from '../src/domain/dcBus'
+import { hoursToEmpty, hoursToFull, project, reconcile, storedEnergy } from '../src/domain/dcBus'
+import { reachOf } from '../src/domain/reach'
+import type { Reach } from '../src/domain/reach'
 import type { BatterySnapshot } from '../src/domain/bms/types'
 import type { SolarReading } from '../src/domain/solar/types'
 
@@ -150,5 +152,109 @@ describe('projections', () => {
     // A 0.04 A draw sits inside the deadband, so time-to-empty stays blank.
     expect(hoursToEmpty(battery({ current: -0.04 }), -0.04)).toBeNull()
     expect(hoursToFull(battery({ current: 0.04 }), 0.04)).toBeNull()
+  })
+})
+
+/**
+ * The window the projection is taken over widens from empty toward five minutes, and the gate is
+ * what decides how much of that widening the owner has to wait through before any figure appears.
+ */
+describe('the window a projection is willing to answer over', () => {
+  /** `count` samples at `stepMs`, so the span is one step short of the sample count times the step. */
+  function stream(count: number, stepMs: number, current = -8.4): Reach {
+    const samples = Array.from({ length: count }, (_unused, index) => ({
+      at: index * stepMs,
+      value: current,
+    }))
+    return reachOf(samples)!
+  }
+
+  /** A stream whose current moves, so the window's mean and its last sample can disagree. */
+  function varying(stepMs: number, currents: readonly number[]): Reach {
+    return reachOf(currents.map((value, index) => ({ at: index * stepMs, value })))!
+  }
+
+  it('answers once the window spans fifteen seconds with eight samples', () => {
+    const projection = project(battery({ remainingCapacity: 300 }), stream(8, 2_200), false)
+
+    expect(projection).toEqual({
+      kind: 'toEmpty',
+      hours: expect.closeTo(300 / 8.4, 6),
+      overMs: 15_400,
+      settled: false,
+    })
+  })
+
+  it('withholds a figure until both bounds are met', () => {
+    // Seven samples across twenty seconds clears the span and not the count.
+    expect(project(battery(), stream(7, 3_400), false)).toEqual({ kind: 'collecting' })
+    // Thirty samples inside ten seconds clears the count and not the span.
+    expect(project(battery(), stream(30, 345), false)).toEqual({ kind: 'collecting' })
+  })
+
+  it('marks a twenty-second window unsettled and a minute-long one settled', () => {
+    expect(project(battery(), stream(21, 1_000), false)).toMatchObject({ settled: false })
+    expect(project(battery(), stream(62, 1_000), false)).toMatchObject({ settled: true })
+  })
+
+  it('holds inside the deadband over a short window, and says how short', () => {
+    expect(project(battery({ current: -0.1 }), stream(20, 1_000, -0.1), false)).toEqual({
+      kind: 'holding',
+      overMs: 19_000,
+      settled: false,
+    })
+  })
+
+  it('holds a rate parked between the two edges only for a pack that was already holding', () => {
+    // 0.2 A clears the 0.15 A entry edge and sits under the 0.25 A exit edge, which is the whole
+    // width of the deadband: the same window answers differently depending on the last verdict,
+    // and that is what stops a boundary rate flipping between a runtime and 'holding' every second.
+    const boundary = stream(20, 1_000, -0.2)
+
+    expect(project(battery(), boundary, true)).toMatchObject({ kind: 'holding' })
+    expect(project(battery(), boundary, false)).toMatchObject({ kind: 'toEmpty' })
+  })
+
+  it('names a charging window to full, over the deficit rather than over the charge', () => {
+    expect(project(battery({ remainingCapacity: 300 }), stream(20, 1_000, 5), false)).toEqual({
+      kind: 'toFull',
+      hours: expect.closeTo((315 - 300) / 5, 6),
+      overMs: 19_000,
+      settled: false,
+    })
+  })
+
+  it('answers from the window mean, not from whichever sample happened to arrive last', () => {
+    // A galley load cycling ±6 A around a small negative bias. The newest sample is charging at
+    // +6 A while the pack is really losing 0.3 A, so an implementation reading the latest sample
+    // would print a time to FULL on a bank that is emptying.
+    const cycling = varying(
+      1_000,
+      Array.from({ length: 20 }, (_unused, index) => (index % 2 === 0 ? -6.6 : 6)),
+    )
+
+    expect(cycling.latest).toBe(6)
+    expect(cycling.net).toBeCloseTo(-0.3, 6)
+    expect(project(battery({ remainingCapacity: 300 }), cycling, false)).toMatchObject({
+      kind: 'toEmpty',
+      hours: expect.closeTo(300 / 0.3, 6),
+    })
+  })
+
+  it('walks toward the settled figure as the window widens under it', () => {
+    // Twenty seconds of a 20 A draw that then falls away to 6 A. The short window sees only the
+    // draw and names fifteen hours; the minute-long one has integrated the fall and names double
+    // that. This is what the unsettled tilde is warning about, and why it is dropped at a minute.
+    const currents = Array.from({ length: 90 }, (_unused, index) => (index < 20 ? -20 : -6))
+    const pack = battery({ remainingCapacity: 300 })
+
+    const early = project(pack, varying(1_000, currents.slice(0, 20)), false)
+    const late = project(pack, varying(1_000, currents), false)
+
+    expect(early).toMatchObject({ kind: 'toEmpty', settled: false })
+    expect(late).toMatchObject({ kind: 'toEmpty', settled: true })
+    // 300 Ah at a flat 20 A, against 300 Ah at the 89-second window's own mean of 9.07 A.
+    expect((early as { hours: number }).hours).toBeCloseTo(15, 6)
+    expect((late as { hours: number }).hours).toBeCloseTo((300 * 89) / 807, 6)
   })
 })

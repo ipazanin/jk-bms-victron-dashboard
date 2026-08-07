@@ -20,6 +20,7 @@
  */
 import { computed, useId } from 'vue'
 
+import { COMPACT_QUERY } from '../../application/breakpoints'
 import { ampHoursSigned } from '../../application/format'
 import { useMediaQuery } from '../../application/useMediaQuery'
 import {
@@ -35,7 +36,7 @@ const props = defineProps<{
   solarSeen: boolean
   /**
    * The dashboard's live band: a footnote to the ammeter above it rather than a peer. No tick
-   * ladder, no poles, half-height bars, and the figures in `.readout` rather than `.ledger-figure`.
+   * ladder, no poles, half-height bars, and the figures at readout weight rather than at its own.
    */
   recessive?: boolean
 }>()
@@ -85,7 +86,7 @@ const RECESSIVE = {
   bar: 7,
 }
 
-const compact = useMediaQuery('(max-width: 720px)')
+const compact = useMediaQuery(COMPACT_QUERY)
 const box = computed(() => (props.recessive ? RECESSIVE : compact.value ? FULL_PHONE : FULL_DESKTOP))
 
 /** Each instance owns its hatch, so two ledgers on one page cannot share a definition. */

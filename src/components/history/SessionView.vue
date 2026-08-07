@@ -20,6 +20,7 @@ import SessionRibbon from './SessionRibbon.vue'
 import ShuntLedger from './ShuntLedger.vue'
 import ShuntAmmeter from '../ShuntAmmeter.vue'
 import StatusChip from '../StatusChip.vue'
+import { COMPACT_QUERY } from '../../application/breakpoints'
 import { ampHoursSigned, clockTime, clockTimeWithSeconds, groupedCount } from '../../application/format'
 import { useHistoryBrowser } from '../../application/history/historyBrowser'
 import { hashOf, navigate, route } from '../../application/route'
@@ -48,7 +49,7 @@ const TABLE_PAGE_ROWS = 240
 const browser = useHistoryBrowser()
 const { loaded, loading, missing, failure, account, selection, exportSize, exportState } = browser
 
-const compact = useMediaQuery('(max-width: 720px)')
+const compact = useMediaQuery(COMPACT_QUERY)
 
 const cursorAt = ref<number | null>(null)
 const confirmingDelete = ref(false)
@@ -492,6 +493,7 @@ function tightSpan(elapsedMs: number): string {
           :solar-reach="null"
           :pack-phase="'reading'"
           :solar-phase="activeSample.solar ? 'reading' : 'absent'"
+          :stale="true"
         />
         <p v-else class="copy">No samples at this instant.</p>
 

@@ -77,7 +77,9 @@ const hasEvents = computed(() => props.summary.events > 0)
 <style scoped>
 .tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  /* 11rem rather than 9: at 9 a 390px phone fits two ~135px columns and every figure in them
+     wraps its unit onto a second line. One column reads. */
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
   gap: 1rem;
   margin: 0;
 }

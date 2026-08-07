@@ -20,6 +20,7 @@
  */
 import { computed, ref, useId } from 'vue'
 
+import { COMPACT_QUERY } from '../../application/breakpoints'
 import { amps, clockTime, clockTimeWithSeconds, groupedCount } from '../../application/format'
 import { useMediaQuery } from '../../application/useMediaQuery'
 import { deriveHouse } from '../../domain/dcBus'
@@ -77,7 +78,7 @@ const TARGET_TIME_TICKS = 7
 const DESKTOP = { width: 1000, height: 250, left: 56, right: 946, top: 26, bottom: 196 }
 const PHONE = { width: 420, height: 230, left: 40, right: 396, top: 24, bottom: 178 }
 
-const compact = useMediaQuery('(max-width: 720px)')
+const compact = useMediaQuery(COMPACT_QUERY)
 const box = computed(() => (compact.value ? PHONE : DESKTOP))
 
 const plot = ref<SVGSVGElement | null>(null)

@@ -22,6 +22,7 @@
  */
 import { computed, ref, watch } from 'vue'
 
+import { COMPACT_QUERY } from '../application/breakpoints'
 import { amps, ampsAbsolute, volts, watts } from '../application/format'
 import { isPending, type LinkPhase } from '../application/linkPhase'
 import { useMediaQuery } from '../application/useMediaQuery'
@@ -45,6 +46,9 @@ const props = defineProps<{
   pvPower: number | null
   packReach: Reach | null
   solarReach: Reach | null
+  /** The rows print a restored snapshot rather than a measurement in progress. `powered` stays
+   *  what it was — a row still prints a figure — but the figure no longer describes now. */
+  stale: boolean
 }>()
 
 /*
@@ -63,7 +67,7 @@ const props = defineProps<{
 const DESKTOP = { width: 1000, height: 196, margin: 128, axisY: 58, packY: 96, solarY: 128, spanY: 170, bar: 13 }
 const PHONE = { width: 420, height: 208, margin: 92, axisY: 54, packY: 100, solarY: 138, spanY: 184, bar: 12 }
 
-const compact = useMediaQuery('(max-width: 720px)')
+const compact = useMediaQuery(COMPACT_QUERY)
 const box = computed(() => (compact.value ? PHONE : DESKTOP))
 
 const WIDTH = computed(() => box.value.width)
@@ -272,7 +276,7 @@ const bandSentence = computed(() => {
   return ` Shaded, over the last ${Math.round(windowMs / 1000)} seconds: ${spans.join(', and ')}.`
 })
 
-const summary = computed(() => {
+const readingSentence = computed(() => {
   // Nothing measured. The chassis speaks for itself, and any radio on its way says so after it.
   if (!powered.value) {
     const coming = [
@@ -316,22 +320,35 @@ const summary = computed(() => {
   }
   return `${pack} Solar delivers ${ampsAbsolute(props.solarCurrent!)}. Boat load is unavailable.${bandSentence.value}`
 })
+
+/**
+ * Provenance leads. A listener gets one pass at the label, and whether these figures were measured
+ * now or restored from a page load ago changes what every sentence after it means.
+ */
+const summary = computed(() =>
+  props.stale ? `Not live. ${readingSentence.value}` : readingSentence.value,
+)
+
+/** The caption says it too, so the claim is not carried by muted ink alone. */
+const caption = computed(() => (props.stale ? 'not live · boat = solar − pack' : 'boat = solar − pack'))
 </script>
 
 <template>
   <section class="shunt">
     <header class="head">
       <h2 class="plate">DC bus reconciliation</h2>
-      <p class="muted">boat = solar − pack</p>
+      <p class="muted">{{ caption }}</p>
     </header>
 
     <svg
       :viewBox="`0 0 ${WIDTH} ${HEIGHT}`"
       class="chart"
+      :class="{ stale }"
       role="img"
       :aria-label="summary"
       data-testid="shunt-ammeter"
       :data-powered="powered ? 'true' : 'false'"
+      :data-live="stale ? 'false' : 'true'"
     >
       <text :x="MARGIN" :y="AXIS_Y - 30" text-anchor="start" class="pole">− discharge</text>
       <text :x="WIDTH - MARGIN" :y="AXIS_Y - 30" text-anchor="end" class="pole">charge +</text>
@@ -576,6 +593,29 @@ const summary = computed(() => {
 }
 .house-ink {
   fill: var(--house-ink);
+}
+
+/*
+ * Not live: the rows still print what was last measured, so the geometry is untouched and every
+ * figure stays readable. What is withdrawn is the confidence — full-strength channel colour is
+ * this instrument's way of saying a radio is reporting, and over a restored snapshot none is.
+ */
+.chart.stale .bar,
+.chart.stale .band,
+.chart.stale .span .cap,
+.chart.stale .span .rule {
+  opacity: 0.6;
+}
+
+/* The dimming stops at the geometry. Putting it on the whole span group would take the boat
+   readout and its row label with it, and a channel ink at six tenths falls under 4.5:1 on this
+   surface — so the text recedes by fill alone, at full strength. */
+.chart.stale .value {
+  fill: var(--ink-secondary);
+}
+
+.chart.stale .row-label {
+  fill: var(--ink-muted);
 }
 
 /* Filled geometry rather than strokes, so the bracket lives in the same coordinate system as

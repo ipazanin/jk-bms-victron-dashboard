@@ -241,16 +241,6 @@ body {
   line-height: 1.05;
 }
 
-/* Signed amp-hours stacked in a column, where the digits have to line up vertically and
-   .secondary-figure's proportional Plex Sans will not. */
-.ledger-figure {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  font-size: 1.375rem;
-  line-height: 1.1;
-}
-
 .muted {
   color: var(--ink-muted);
   font-family: var(--font-mono);
@@ -299,9 +289,23 @@ button {
   border-radius: 2px;
 }
 
+/* The compact width, mirroring COMPACT_QUERY in src/application/breakpoints.ts — CSS cannot import
+   it, and an instrument whose script and stylesheet disagree lays itself out twice. */
 @media (max-width: 720px) {
+  /* A 390px phone hands a card a 358px content box, and 44px of that went on the card's own inset
+     before anything was printed in it. */
+  :root {
+    --pad: 1rem;
+  }
+
   .hero-figure {
     font-size: 2.75rem;
+  }
+
+  /* At 2rem a two-part figure breaks its unit onto a second line inside a phone-width tile —
+     '122.0' over 'h' is not a reading. */
+  .secondary-figure {
+    font-size: 1.625rem;
   }
 }
 

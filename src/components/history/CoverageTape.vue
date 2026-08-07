@@ -17,6 +17,7 @@
  */
 import { computed, ref } from 'vue'
 
+import { COMPACT_QUERY } from '../../application/breakpoints'
 import { clockTime } from '../../application/format'
 import { useMediaQuery } from '../../application/useMediaQuery'
 import { coverageSegments, linearScale } from '../../domain/history/geometry'
@@ -59,7 +60,7 @@ const COVERAGE_GLYPHS: Readonly<Record<CoverageClass, string>> = {
   none: '··',
 }
 
-const compact = useMediaQuery('(max-width: 720px)')
+const compact = useMediaQuery(COMPACT_QUERY)
 
 const track = ref<HTMLElement | null>(null)
 /** The edge the pointer is moving, or 'new' while a fresh drag is being drawn. */

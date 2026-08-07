@@ -57,6 +57,14 @@ const solarPhase = computed(() => linkPhase(solarState.value, solar.value !== nu
 /** Something to show, or something on its way: the page has left the cold landing. */
 const engaged = computed(() => packPhase.value !== 'absent' || solarPhase.value !== 'absent')
 
+/**
+ * Not live. `linkPhase` reads a snapshot in hand ahead of the link state, which is correct — a
+ * reading IS in hand — but it leaves every instrument painting a restored session exactly as it
+ * paints a measured one, marching dashes and all. The banner above says so and scrolls away on a
+ * phone, so each instrument that paints these figures has to say so on its own surface.
+ */
+const stale = computed(() => source.value === 'remembered' || source.value === 'history')
+
 const sessionCount = computed(() => log.archive.value.sessions)
 
 /** The configured series count wins; the domain falls back to the cell frame's own when it is absent. */
@@ -121,8 +129,11 @@ const recordedSummary = computed(() => {
       :house-power="bus?.housePower ?? null"
       :house-load-plausible="bus?.houseLoadPlausible ?? null"
       :pack-stored="packStored"
+      :projection="projection"
       :pack-reach="packReach"
       :solar-reach="solarReach"
+      :stale="stale"
+      :captured-at="rememberedAt"
     />
 
     <ShuntAmmeter
@@ -138,6 +149,7 @@ const recordedSummary = computed(() => {
       :pv-power="solar?.pvPower ?? null"
       :pack-reach="packReach"
       :solar-reach="solarReach"
+      :stale="stale"
     />
 
     <div v-if="battery" class="instruments">

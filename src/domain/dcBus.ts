@@ -143,14 +143,25 @@ const HOLDING_ENTER = 0.15
 /** Amps. The wider edge, so a rate parked on the boundary cannot flip the verdict every second. */
 const HOLDING_LEAVE = 0.25
 /** A window shorter than this describes the last few seconds, which is not a rate worth extending
- *  over hours. Both bounds must be met: thirty samples can arrive inside a single noisy second. */
-const PROJECTION_MIN_SAMPLES = 30
-const PROJECTION_MIN_SPAN_MS = 60_000
+ *  over hours. Both bounds must be met: eight samples can arrive inside a single noisy second. */
+const PROJECTION_MIN_SAMPLES = 8
+const PROJECTION_MIN_SPAN_MS = 15_000
+/**
+ * The span at which the trapezoid mean stops walking as the window widens. Under it the figure is
+ * honest but provisional — a load cycling through zero can put a fifteen-second mean well off the
+ * five-minute one — so the flag rides out with it and every renderer marks what it prints.
+ */
+const PROJECTION_SETTLED_SPAN_MS = 60_000
 
 export type Projection =
   | { readonly kind: 'collecting' }
-  | { readonly kind: 'holding'; readonly overMs: number }
-  | { readonly kind: 'toFull' | 'toEmpty'; readonly hours: number; readonly overMs: number }
+  | { readonly kind: 'holding'; readonly overMs: number; readonly settled: boolean }
+  | {
+      readonly kind: 'toFull' | 'toEmpty'
+      readonly hours: number
+      readonly overMs: number
+      readonly settled: boolean
+    }
 
 /**
  * A projection in hours is a claim about a sustained current, never about the latest sample.
@@ -175,14 +186,15 @@ export function project(
     return { kind: 'collecting' }
   }
 
+  const settled = reach.spanMs >= PROJECTION_SETTLED_SPAN_MS
   const floor = wasHolding ? HOLDING_LEAVE : HOLDING_ENTER
-  if (Math.abs(reach.net) < floor) return { kind: 'holding', overMs: reach.spanMs }
+  if (Math.abs(reach.net) < floor) return { kind: 'holding', overMs: reach.spanMs, settled }
 
   const charging = reach.net > 0
   const hours = charging ? hoursToFull(battery, reach.net) : hoursToEmpty(battery, reach.net)
   // Unreachable while the holding floor sits above the two deadbands, and cheaper to honour than
   // to prove: a widened deadband must withhold the figure, never print a null through toFixed.
-  if (hours === null) return { kind: 'holding', overMs: reach.spanMs }
+  if (hours === null) return { kind: 'holding', overMs: reach.spanMs, settled }
 
-  return { kind: charging ? 'toFull' : 'toEmpty', hours, overMs: reach.spanMs }
+  return { kind: charging ? 'toFull' : 'toEmpty', hours, overMs: reach.spanMs, settled }
 }
