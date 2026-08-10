@@ -51,8 +51,10 @@ onUnmounted(() => {
 })
 
 /**
- * A write that failed is not recording, whatever the session id still says — and neither is a
- * session opened on an observation whose lease is not this tab's.
+ * A session whose archive stopped taking its rows is not recording, whatever the session id still
+ * says — and neither is one opened on an observation whose lease is not this tab's. The line that
+ * then prints is the archive's own, below, because a store that went away can say why and a refused
+ * write cannot.
  */
 const recording = computed(
   () =>

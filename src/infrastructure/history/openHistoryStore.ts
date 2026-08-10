@@ -9,6 +9,11 @@
  * Chrome incognito is the awkward middle case and there is no API for it: IndexedDB works, but it
  * is in memory and dies with the window. `persisted: false` is the closest honest signal there is,
  * and it is reported as-is rather than dressed up as durability.
+ *
+ * The database is named by the caller, so a build serving its own playback radios can record for
+ * real into an archive of its own instead of writing fabricated sessions into the boat's. Nothing
+ * below cares which name it is handed, but the channel is opened under the same one: two tabs of one
+ * archive have to hear each other, and two archives must never hear each other at all.
  */
 
 import { unavailableHistoryStore } from '../../application/history/port'
@@ -27,11 +32,11 @@ type OpenAttempt =
   | { readonly kind: 'opened'; readonly database: IDBDatabase }
   | { readonly kind: 'failed'; readonly reason: HistoryUnavailableReason }
 
-export async function openHistoryStore(): Promise<HistoryStore> {
+export async function openHistoryStore(databaseName: string = DATABASE_NAME): Promise<HistoryStore> {
   const factory = typeof indexedDB === 'undefined' ? null : indexedDB
   if (factory === null) return unavailableHistoryStore('no-indexeddb')
 
-  const attempt = await openDatabase(factory)
+  const attempt = await openDatabase(factory, databaseName)
   if (attempt.kind === 'failed') return unavailableHistoryStore(attempt.reason)
 
   const availability: HistoryAvailability = {
@@ -40,18 +45,18 @@ export async function openHistoryStore(): Promise<HistoryStore> {
     persisted: await requestPersistence(),
     ...(await measureStorage()),
   }
-  const store = new IdbHistoryStore(attempt.database, availability, openArchiveChannel())
+  const store = new IdbHistoryStore(attempt.database, availability, openArchiveChannel(databaseName))
   // A failed sweep is not a failed archive: reads and writes still work, the tidying simply did not
   // happen on this load and will be attempted again on the next one.
   await store.recover(Date.now()).catch(() => undefined)
   return store
 }
 
-function openDatabase(factory: IDBFactory): Promise<OpenAttempt> {
+function openDatabase(factory: IDBFactory, databaseName: string): Promise<OpenAttempt> {
   return new Promise<OpenAttempt>((resolve) => {
     let request: IDBOpenDBRequest
     try {
-      request = factory.open(DATABASE_NAME, DATABASE_VERSION)
+      request = factory.open(databaseName, DATABASE_VERSION)
     } catch {
       // Safari in private browsing throws from open() rather than rejecting it.
       resolve({ kind: 'failed', reason: 'open-denied' })

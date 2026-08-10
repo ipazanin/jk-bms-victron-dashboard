@@ -98,7 +98,8 @@ export const DATABASE_VERSION = 5
 const SESSIONS = 'sessions'
 const CHUNKS = 'chunks'
 const DEVICES = 'devices'
-const META = 'meta'
+/** The archive's own totals live here. Named outside because no port method moves them. */
+export const META = 'meta'
 const WARNINGS = 'warnings'
 const RING_RECORDS = 'ringRecords'
 const RING_READS = 'ringReads'
@@ -115,7 +116,8 @@ const BY_SESSION = 'bySession'
 const BY_LAST_SEEN = 'byLastSeen'
 const BY_TIME = 'byTime'
 
-const TOTALS_KEY = 'totals'
+/** The meta store's one row, named outside for the same reason the store is. */
+export const TOTALS_KEY = 'totals'
 
 /**
  * The domain's own target, read here for one purpose only: deciding whether a second and much more
@@ -198,6 +200,12 @@ export function applySchema(database: IDBDatabase, oldVersion: number): void {
 export class IdbHistoryStore implements HistoryStore {
   private readonly database: IDBDatabase
   private readonly channel: ArchiveChannel
+  /**
+   * Everyone watching this store, held here as well as on the channel. Measured: BroadcastChannel
+   * delivers to every other channel object of that name and never to the one that posted, so the
+   * tab whose own connection stood down is precisely the tab its own post cannot reach.
+   */
+  private readonly watchers = new Set<() => void>()
   private state: HistoryAvailability
   /** The session on screen in this tab, if the view said so. Pruning never evicts it. */
   private viewedSessionId: SessionId | null
@@ -242,7 +250,7 @@ export class IdbHistoryStore implements HistoryStore {
         return this.announce(await this.writeChunk(chunk, patch))
       } catch (retried) {
         if (classifyWriteFailure(retried) !== 'quota') return this.refusedCommit(null)
-        this.state = { ...this.state, usable: false, reason: 'quota-exhausted' }
+        this.reportUnusable('quota-exhausted')
         return this.refusedCommit('quota-exhausted')
       }
     }
@@ -698,7 +706,12 @@ export class IdbHistoryStore implements HistoryStore {
   }
 
   watch(onChanged: () => void): () => void {
-    return this.channel.subscribe(() => onChanged())
+    const stopHearingOtherTabs = this.channel.subscribe(() => onChanged())
+    this.watchers.add(onChanged)
+    return () => {
+      stopHearingOtherTabs()
+      this.watchers.delete(onChanged)
+    }
   }
 
   /**
@@ -1382,10 +1395,27 @@ export class IdbHistoryStore implements HistoryStore {
   /**
    * Lets go of the connection so another tab's upgrade can proceed, and says why the archive went
    * quiet rather than throwing an InvalidStateError out of the next write.
+   *
+   * The connection goes first and the reason is announced after it: a watcher re-reads the archive
+   * the moment it hears, and every one of those reads has to find the store already stood down or it
+   * is a read of an archive that is on its way out.
    */
   private standDown(): void {
-    this.state = { ...this.state, usable: false, reason: 'version-newer' }
     this.close()
+    this.reportUnusable('version-newer')
+  }
+
+  /**
+   * Records why this connection can no longer be written to, and tells whoever is watching.
+   *
+   * Only a change is announced. A full disk brings `commitChunk` here on every checkpoint for as
+   * long as it stays full, and a page re-reading the whole archive for each of those would spend the
+   * rest of the session doing it.
+   */
+  private reportUnusable(reason: HistoryUnavailableReason): void {
+    if (!this.state.usable && this.state.reason === reason) return
+    this.state = { ...this.state, usable: false, reason }
+    for (const watcher of [...this.watchers]) watcher()
   }
 }
 

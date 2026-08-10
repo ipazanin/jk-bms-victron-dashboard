@@ -8,13 +8,14 @@
  */
 
 import type { SolarLiveTransport } from '../infrastructure/ble/solarScan'
+import { storageKey } from './storageKey'
 
 const KEY_STORAGE = 'victron.advertisementKey'
 const TRANSPORT_STORAGE = 'victron.liveTransport'
 
 export function loadAdvertisementKey(): string {
   try {
-    return localStorage.getItem(KEY_STORAGE) ?? ''
+    return localStorage.getItem(storageKey(KEY_STORAGE)) ?? ''
   } catch {
     return ''
   }
@@ -22,7 +23,7 @@ export function loadAdvertisementKey(): string {
 
 export function saveAdvertisementKey(key: string): void {
   try {
-    localStorage.setItem(KEY_STORAGE, key.trim().toLowerCase())
+    localStorage.setItem(storageKey(KEY_STORAGE), key.trim().toLowerCase())
   } catch {
     // Private browsing denies storage; the key simply will not persist.
   }
@@ -30,7 +31,7 @@ export function saveAdvertisementKey(key: string): void {
 
 export function forgetAdvertisementKey(): void {
   try {
-    localStorage.removeItem(KEY_STORAGE)
+    localStorage.removeItem(storageKey(KEY_STORAGE))
   } catch {
     // Nothing to clear.
   }
@@ -39,7 +40,7 @@ export function forgetAdvertisementKey(): void {
 /** The remembered verdict, or null when this browser has not proven a transport yet. */
 export function loadSolarLiveTransport(): SolarLiveTransport | null {
   try {
-    const stored = localStorage.getItem(TRANSPORT_STORAGE)
+    const stored = localStorage.getItem(storageKey(TRANSPORT_STORAGE))
     return stored === 'watch' || stored === 'scan' ? stored : null
   } catch {
     return null
@@ -48,7 +49,7 @@ export function loadSolarLiveTransport(): SolarLiveTransport | null {
 
 export function saveSolarLiveTransport(transport: SolarLiveTransport): void {
   try {
-    localStorage.setItem(TRANSPORT_STORAGE, transport)
+    localStorage.setItem(storageKey(TRANSPORT_STORAGE), transport)
   } catch {
     // Private browsing denies storage; the verdict simply will not persist.
   }

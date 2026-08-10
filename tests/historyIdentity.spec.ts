@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { decodeDeviceInfo } from '../src/domain/bms/decode'
+import { hexToBytes } from '../src/domain/bytes'
 import {
   UNIDENTIFIED_PACK_KEY,
   UNIDENTIFIED_PACK_LABEL,
@@ -15,7 +16,6 @@ import {
 } from '../src/domain/history/identity'
 import { readAdvertisementModelId } from '../src/domain/solar/advertisement'
 import fixtures from './fixtures.json'
-import { hexToBytes } from './support/bytes'
 import { deviceRecord } from './support/samples'
 
 /**

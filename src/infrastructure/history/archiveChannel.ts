@@ -8,9 +8,10 @@
  * BroadcastChannel does not deliver a message back to the object that posted it, so a store can
  * both post and subscribe on one channel without hearing its own echo. Absent — some in-app
  * browsers, older WebKit — every call is a no-op and the page behaves like the single tab it is.
+ *
+ * The channel is named after the archive it announces, so a build recording into an archive of its
+ * own cannot tell tabs of the shipping archive that something they hold changed.
  */
-
-const CHANNEL_NAME = 'shunt.log'
 
 export type ArchiveMessage =
   | 'session-opened'
@@ -23,7 +24,7 @@ export type ArchiveMessage =
 
 export interface ArchiveChannel {
   post(message: ArchiveMessage): void
-  /** Returns an unsubscribe, like `watchAdapter`. */
+  /** Returns an unsubscribe. */
   subscribe(onMessage: (message: ArchiveMessage) => void): () => void
   /**
    * Under Node — which is what the specs run on — an open BroadcastChannel keeps the event loop
@@ -32,10 +33,10 @@ export interface ArchiveChannel {
   close(): void
 }
 
-export function openArchiveChannel(): ArchiveChannel {
+export function openArchiveChannel(channelName: string): ArchiveChannel {
   if (typeof BroadcastChannel !== 'function') return silentChannel()
 
-  let channel: BroadcastChannel | null = new BroadcastChannel(CHANNEL_NAME)
+  let channel: BroadcastChannel | null = new BroadcastChannel(channelName)
 
   return {
     post(message) {

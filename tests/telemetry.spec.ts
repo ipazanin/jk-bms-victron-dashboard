@@ -16,6 +16,7 @@ import type { BatterySnapshot } from '../src/domain/bms/types'
 import type { RingRecordBytes } from '../src/domain/history/RingRecordBytes'
 import type { DeviceKey } from '../src/domain/history/types'
 import { SNAPSHOT_SCHEMA_VERSION } from '../src/domain/schemaVersion'
+import { browserBleEnvironment } from '../src/infrastructure/ble/capabilities'
 import { JkBmsClient } from '../src/infrastructure/ble/JkBmsClient'
 import { VictronScanner } from '../src/infrastructure/ble/VictronScanner'
 import { MemoryHistoryStore } from './support/MemoryHistoryStore'
@@ -33,8 +34,9 @@ import type { FakeBmsLink, FakeSolarScan } from './support/fakeRadios'
 
 // Each case builds its own telemetry and throws it away, so nothing leaks between them: the
 // windows, the fault latch and the recorder are all per-instance. The failure-path cases run
-// against the REAL adapters, because jsdom exposes no navigator.bluetooth and both radios
-// therefore genuinely throw — which is exactly the restore/fallback path under test.
+// against the REAL adapters and the real environment, because jsdom exposes no navigator.bluetooth
+// and both radios therefore genuinely throw — which is exactly the restore/fallback path under
+// test. An environment that claimed more would quietly change what those cases assert.
 
 const KEY = 'shunt.rememberedSession'
 const VALID_ADVERTISEMENT_KEY = '0123456789abcdef0123456789abcdef'
@@ -48,6 +50,7 @@ function radioDeps(): TelemetryDeps {
     createBmsLink: (handlers) => new JkBmsClient(handlers),
     createSolarScan: (handlers) => new VictronScanner(handlers),
     createSolarHistoryLink: fakeSolarHistoryLink().create,
+    bleEnvironment: browserBleEnvironment(),
     historyStore: () => null,
     refreshRingLedger: async () => undefined,
     refreshSolarLedger: async () => undefined,
@@ -235,6 +238,7 @@ describe('what reaches the archive is raw', () => {
       createBmsLink: bms.create,
       createSolarScan: solar.create,
       createSolarHistoryLink: fakeSolarHistoryLink().create,
+      bleEnvironment: browserBleEnvironment(),
       historyStore: () => null,
       refreshRingLedger: async () => undefined,
       refreshSolarLedger: async () => undefined,
@@ -313,6 +317,7 @@ describe('browsing a stored session', () => {
       createBmsLink: bms.create,
       createSolarScan: solar.create,
       createSolarHistoryLink: fakeSolarHistoryLink().create,
+      bleEnvironment: browserBleEnvironment(),
       historyStore: () => null,
       refreshRingLedger: async () => undefined,
       refreshSolarLedger: async () => undefined,
@@ -380,6 +385,7 @@ describe('reading the pack’s stored detail log', () => {
       createBmsLink: bms.create,
       createSolarScan: solar.create,
       createSolarHistoryLink: fakeSolarHistoryLink().create,
+      bleEnvironment: browserBleEnvironment(),
       historyStore: () => null,
       refreshRingLedger: async () => undefined,
       refreshSolarLedger: async () => undefined,
@@ -475,6 +481,7 @@ describe('filing a stored-log read against the pack that answered it', () => {
       createBmsLink: bms.create,
       createSolarScan: solar.create,
       createSolarHistoryLink: fakeSolarHistoryLink().create,
+      bleEnvironment: browserBleEnvironment(),
       historyStore,
       refreshRingLedger: async (deviceKey) => {
         refreshed.push(deviceKey)
@@ -646,6 +653,7 @@ describe('fetching a stale stored log without being asked', () => {
       createBmsLink: bms.create,
       createSolarScan: solar.create,
       createSolarHistoryLink: fakeSolarHistoryLink().create,
+      bleEnvironment: browserBleEnvironment(),
       historyStore: () => store,
       refreshRingLedger: async () => undefined,
       refreshSolarLedger: async () => undefined,
@@ -739,6 +747,7 @@ describe('the windows never outlive the pack they describe', () => {
       createBmsLink: bms.create,
       createSolarScan: solar.create,
       createSolarHistoryLink: fakeSolarHistoryLink().create,
+      bleEnvironment: browserBleEnvironment(),
       historyStore: () => null,
       refreshRingLedger: async () => undefined,
       refreshSolarLedger: async () => undefined,

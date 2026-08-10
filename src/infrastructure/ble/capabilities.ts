@@ -33,6 +33,17 @@ export interface BleCapabilities {
 }
 
 /**
+ * What the browser can do and whether its radio is on, as one dependency rather than two direct
+ * reads of `navigator`. The pair decides every disabled button and every requirements row, and
+ * taking them as a port is the only way a caller can stand in for a browser it is not running in.
+ */
+export interface BleEnvironment {
+  readonly capabilities: BleCapabilities
+  /** Reports availability once straight away, then on every toggle. Returns an unsubscribe. */
+  watchAdapter(onChange: (available: boolean | null) => void): () => void
+}
+
+/**
  * `@types/web-bluetooth` declares the `BluetoothDevice` interface but no value of that name, so
  * the prototype has to be reached through `globalThis`.
  */
@@ -74,10 +85,11 @@ export function detectCapabilities(): BleCapabilities {
   }
 }
 
-/** Whether a Bluetooth radio exists and is switched on. Null means the browser won't say. */
-export async function adapterAvailable(): Promise<boolean | null> {
-  const bluetooth = navigator.bluetooth
-  if (!bluetooth) return false
+/**
+ * Whether the radio is switched on. Null means the browser won't say — it takes the radio it was
+ * handed rather than reading `navigator` again, so the caller's guard is the only one needed.
+ */
+async function adapterAvailable(bluetooth: Bluetooth): Promise<boolean | null> {
   if (typeof bluetooth.getAvailability !== 'function') return null
   try {
     return await bluetooth.getAvailability()
@@ -86,14 +98,29 @@ export async function adapterAvailable(): Promise<boolean | null> {
   }
 }
 
-/** Re-reads availability whenever the user toggles the radio. Returns an unsubscribe. */
-export function watchAdapter(onChange: (available: boolean | null) => void): () => void {
-  const bluetooth = navigator.bluetooth
-  if (!bluetooth || typeof bluetooth.addEventListener !== 'function') return () => undefined
+/**
+ * Reports availability at once and re-reads it whenever the user toggles the radio. Returns an
+ * unsubscribe.
+ *
+ * A browser with no Bluetooth at all is never reported on, not reported as off: the caller's
+ * tri-state stays unknown, so the UI can say this browser will not answer instead of blaming a
+ * radio that was never there.
+ */
+function watchAdapter(onChange: (available: boolean | null) => void): () => void {
+  const bluetooth = typeof navigator !== 'undefined' ? navigator.bluetooth : undefined
+  if (!bluetooth) return () => undefined
 
-  const handler = (): void => {
-    void adapterAvailable().then(onChange)
+  const reportAvailability = (): void => {
+    void adapterAvailable(bluetooth).then(onChange)
   }
-  bluetooth.addEventListener('availabilitychanged', handler)
-  return () => bluetooth.removeEventListener('availabilitychanged', handler)
+  reportAvailability()
+  if (typeof bluetooth.addEventListener !== 'function') return () => undefined
+
+  bluetooth.addEventListener('availabilitychanged', reportAvailability)
+  return () => bluetooth.removeEventListener('availabilitychanged', reportAvailability)
+}
+
+/** The environment as this browser really is. */
+export function browserBleEnvironment(): BleEnvironment {
+  return { capabilities: detectCapabilities(), watchAdapter }
 }

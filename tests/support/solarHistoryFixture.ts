@@ -11,6 +11,7 @@
  * changing the named bytes of a real record and nothing else, and each says which byte.
  */
 
+import { hexToBytes } from '../../src/domain/bytes'
 import { calendarDateBefore } from '../../src/domain/history/calendarDays'
 import { decodeSolarHistoryDay, decodeSolarHistoryTotals } from '../../src/domain/solar/history'
 import { HISTORY_DAY_REGISTERS } from '../../src/domain/solar/SolarHistoryRegister'
@@ -18,7 +19,6 @@ import type { CalendarDate } from '../../src/domain/history/CalendarDate'
 import type { DeviceKey } from '../../src/domain/history/types'
 import type { SolarHistoryDayReading } from '../../src/domain/solar/SolarHistoryDayReading'
 import type { SolarHistorySnapshot } from '../../src/domain/history/SolarHistorySnapshot'
-import { hexToBytes } from './bytes'
 import wire from '../fixtures/solarHistoryWire.json'
 
 const RECORD_FLAG_OFFSET = 0

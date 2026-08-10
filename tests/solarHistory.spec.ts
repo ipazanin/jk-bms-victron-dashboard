@@ -21,7 +21,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { hexToBytes } from './support/bytes'
+import { hexToBytes } from '../src/domain/bytes'
 import { decodeSolarHistoryDay, decodeSolarHistoryTotals } from '../src/domain/solar/history'
 import {
   HISTORY_DAY_REGISTERS,

@@ -21,7 +21,8 @@
  *
  * > A session is one continuous recording period, bounded by the radios, not by the pack link.
  * > It ends when both links are idle, or when the pack identity changes, or when the idle timer
- * > fires. Nothing else ends it.
+ * > fires, or when an archive that stopped taking its rows comes back to seal it. Nothing else
+ * > ends it.
  *
  * So a BMS that drops and comes back while the solar scan is still up produces one session with a
  * gap in its pack stream, not two sessions — and the solar rows recorded across that gap, which the
@@ -55,6 +56,7 @@ import { MAX_PAIRING_AGE_MS } from '../../domain/history/join'
 import type { PairedSample } from '../../domain/history/join'
 import { EMPTY_FOLD, pushSample } from '../../domain/history/ledger'
 import type { AccountFold } from '../../domain/history/ledger'
+import { packSampleOf, solarSampleOf } from '../../domain/history/samples'
 import {
   CHUNK_CAPACITY,
   MAX_SESSION_WARNINGS,
@@ -77,6 +79,7 @@ import type {
 import { SNAPSHOT_SCHEMA_VERSION } from '../../domain/schemaVersion'
 import type { SolarReading } from '../../domain/solar/types'
 import type { Fault, FaultLevel } from '../severity'
+import { storageKey } from '../storageKey'
 import type {
   HistoryStore,
   HistoryUnavailableReason,
@@ -108,7 +111,15 @@ const MAX_COMMIT_ATTEMPTS = 2
  */
 export const MAX_SESSION_ENTRIES = 500
 
-/** The Web Lock one recorder holds while it is the one writing the archive. */
+/**
+ * The Web Lock one recorder holds while it is the one writing the archive.
+ *
+ * Namespaced where it is asked for, for the same reason the archive and the localStorage entries
+ * are: a lock is scoped by origin and name, and playback is served from the origin the real page is
+ * served from. On one shared name a playback session holds the real page off the lease for as long
+ * as it runs, and a refused recorder drops the session it had opened along with every row it had
+ * buffered — rows the holder is not storing, because the holder is storing a fixture.
+ */
 const RECORDING_LEASE = 'shunt.recording'
 
 /**
@@ -146,14 +157,18 @@ export type RecordingLease = 'undecided' | 'held' | 'refused'
 
 /** What the recording plate needs, and nothing the plate does not need. */
 export interface RecorderState {
-  /** Null when nothing is being recorded, which is also the answer when the store is unusable. */
+  /**
+   * Null when no session is open. Not on its own a claim that one is being written down: a session
+   * outlives the archive going away underneath it, and `failure` is what says so.
+   */
   readonly sessionId: SessionId | null
   readonly startedAt: number | null
   readonly packSamples: number
   readonly solarSamples: number
   readonly droppedChunks: number
   /**
-   * Set once the archive refused a write. No further rows are appended to this session; the
+   * Set once the archive stopped taking this session's rows — a write it refused, or a store that
+   * stopped being usable underneath it. No further rows are appended to this session; the
    * instruments carry on untouched.
    */
   readonly failure: HistoryUnavailableReason | null
@@ -175,6 +190,11 @@ export function endReasonPhrase(reason: SessionEndReason): string {
       return 'the BMS went quiet'
     case 'device-changed':
       return 'a different pack connected'
+    case 'archive-lost':
+      // Borrowed from the recording plate's own failure line, so a log this page could not write is
+      // described one way wherever it is described. The plate does not show that line for this
+      // cause — an unusable archive wins the branch above it — but the sentence is the true one.
+      return 'the log could not be written to'
     case 'abandoned':
       return 'this tab was closed'
   }
@@ -255,6 +275,14 @@ export class SessionRecorder {
 
   private session: OpenSession | null = null
   private failure: HistoryUnavailableReason | null = null
+  /**
+   * Whether `failure` came from the store reporting itself unusable, rather than from a write it
+   * refused while still reporting itself usable. Only the first is recovered from, and the
+   * distinction is load-bearing rather than tidy: a refused write leaves `availability.usable` true
+   * throughout, so a recovery that turned on `failure` alone would end the session on the next
+   * observation after every refused chunk. Measured, by weakening exactly that condition.
+   */
+  private archiveLost = false
   private published: RecorderState
   private chain: Promise<void> = Promise.resolve()
   private ticker: ReturnType<typeof setInterval> | null = null
@@ -281,6 +309,8 @@ export class SessionRecorder {
   /** The archive said something changed, which is the direct signal that the holder let go. */
   private leaseReleaseAnnounced = false
   private stopWatchingArchive: (() => void) | null = null
+  /** The store the subscription above is on, so a store swapped for another is followed to it. */
+  private watchedStore: HistoryStore | null = null
 
   constructor(options: SessionRecorderOptions) {
     this.resolveStore = options.store
@@ -590,6 +620,7 @@ export class SessionRecorder {
     this.stopClock()
     this.stopWatchingArchive?.()
     this.stopWatchingArchive = null
+    this.watchedStore = null
     this.releaseRecordingLease()
     this.session = null
     this.publish()
@@ -604,8 +635,12 @@ export class SessionRecorder {
    * nothing, which is the honest outcome.
    */
   private ensureOpen(at: number): OpenSession | null {
-    if (this.session !== null) return this.session
     if (this.disposed) return null
+    // The one place a store that went away underneath an open session is noticed. `upsertDevice`
+    // resolves one too, off this same path, but it does nothing with an unusable store and
+    // publishes nothing — so noticing has to happen here or not at all.
+    this.followArchive()
+    if (this.session !== null) return this.session
     if (!this.mayClaimLease()) return null
     const store = this.usableStore()
     if (store === null) return null
@@ -664,6 +699,7 @@ export class SessionRecorder {
 
     this.session = session
     this.failure = null
+    this.archiveLost = false
     this.continuesSessionId = null
     this.startClock()
 
@@ -727,7 +763,6 @@ export class SessionRecorder {
     this.stopClock()
     this.leaseRefusedMonotonic = this.clock.monotonic()
     this.leaseReleaseAnnounced = false
-    this.watchForLeaseRelease()
     this.publish()
   }
 
@@ -1122,7 +1157,7 @@ export class SessionRecorder {
     if (locks === null) return Promise.resolve(true)
 
     return new Promise<boolean>((answer) => {
-      const settled = locks.request(RECORDING_LEASE, { ifAvailable: true }, (lock) => {
+      const settled = locks.request(storageKey(RECORDING_LEASE), { ifAvailable: true }, (lock) => {
         if (lock === null) {
           answer(false)
           return Promise.resolve()
@@ -1160,18 +1195,90 @@ export class SessionRecorder {
     release()
   }
 
+  // ── the archive underneath ─────────────────────────────────────────────────
+
   /**
-   * The archive's own cross-tab channel is the release signal: the holder closes its session, the
-   * store announces it, and the next observation here takes the lease with nothing asked of the
-   * owner. Any other announcement costs one refused claim, which is cheaper than a poll.
+   * Re-reads what the archive can answer, and keeps this recorder subscribed to whichever store
+   * answers it.
+   *
+   * Two different endings reach an open session and only one of them speaks. A connection asked to
+   * stand aside for another tab's upgrade, or one whose writes have started aborting, revises its
+   * own availability and announces it on `watch`; a store replaced wholesale is a different object
+   * that announces nothing at all. So the store is resolved again here rather than remembered.
+   *
+   * A usable archive arriving under a wounded session is the same news the other way round, and it
+   * is the first moment this recorder can seal that session at all. It is ended rather than
+   * resumed: `failure` means no further row is appended to it, and a session left open here goes on
+   * heartbeating with its sample count frozen — measured, the disk row's stamp moved on the next
+   * checkpoint while its count stayed put — which the Log reads as a watch still being written to.
+   * `finish` writes the closure through the archive that came back, and the next observation opens
+   * a clean session.
+   *
+   * Measured over fifty observations with a session open: one store resolution and one availability
+   * read each, and no set operation at all on the synchronous path. The subscribe is the one part
+   * of this that touches a set, and the branch above runs it on a change of store identity rather
+   * than on an observation.
    */
-  private watchForLeaseRelease(): void {
-    if (this.stopWatchingArchive !== null) return
-    const store = this.usableStore()
-    if (store === null) return
-    this.stopWatchingArchive = store.watch(() => {
-      this.leaseReleaseAnnounced = true
-    })
+  private followArchive(): void {
+    const store = this.resolveStore()
+    if (store !== this.watchedStore) {
+      this.stopWatchingArchive?.()
+      this.watchedStore = store
+      this.stopWatchingArchive = store?.watch(() => this.archiveAnnounced()) ?? null
+    }
+    if (this.session === null || store === null) return
+    const { usable, reason } = store.availability
+    if (usable) {
+      if (!this.archiveLost) return
+      // Cleared before the close rather than after, so the state `finish` publishes carries no
+      // failure: the session is over and the archive it is being sealed through is not failing.
+      this.archiveLost = false
+      this.failure = null
+      this.finish('archive-lost')
+      return
+    }
+    if (reason === null) return
+    this.loseArchive(reason)
+  }
+
+  /**
+   * The archive announced something.
+   *
+   * Whatever it was, it is also the release signal the lease waits on: the holder closes its
+   * session, the store announces it, and the next observation here takes the lease with nothing
+   * asked of the owner. An announcement that was about something else costs one refused claim,
+   * which is cheaper than a poll.
+   */
+  private archiveAnnounced(): void {
+    this.leaseReleaseAnnounced = true
+    this.followArchive()
+  }
+
+  /**
+   * The archive this session's rows were going to stopped being one, mid-watch.
+   *
+   * The session is marked and kept rather than closed, because closing is a write and there is
+   * nothing here to write it through — but the two routes in reach that by different roads, and
+   * only one of them shuts anything. `IdbHistoryStore.standDown()` closes the connection before it
+   * announces: measured at the instant a watcher hears that one, the store answers a read with no
+   * rows at all. `reportUnusable('quota-exhausted')` announces without closing, and measured the
+   * same way, that store still answers every row it holds. What settles both is not the connection
+   * but `usableStore()`, which every write this recorder makes is resolved through and which
+   * answers null for any store that has reported itself unusable, whatever its connection is doing.
+   *
+   * So what is on disk stays as the last commit left it — open, holding the rows it accepted —
+   * until `followArchive` finds a usable archive to seal it through, and failing that, for the
+   * recovery sweep on the next load that can open the database at all.
+   *
+   * Keeping it is also what hands the lease back. A recorder that dropped its session here would
+   * take the empty-handed early return out of `finish` and hold the lock against every other tab
+   * for the life of this one, while recording nothing.
+   */
+  private loseArchive(reason: HistoryUnavailableReason): void {
+    if (this.failure !== null) return
+    this.failure = reason
+    this.archiveLost = true
+    this.publish()
   }
 
   // ── plumbing ───────────────────────────────────────────────────────────────
@@ -1201,6 +1308,11 @@ export class SessionRecorder {
   }
 
   private tick(): void {
+    // A watch whose radios have gone quiet reaches the observation path no more, so the heartbeat
+    // is the only thing left that would notice the archive being swapped out from under it. The
+    // session is read after it and not before, because it is now a route to `finish`: a local taken
+    // first would carry a session this recorder has already closed into the flush below.
+    this.followArchive()
     const session = this.session
     if (session === null) return
     if (this.clock.monotonic() - this.lastObservationMonotonic >= SESSION_IDLE_TIMEOUT_MS) {
@@ -1273,38 +1385,6 @@ function lockManager(): LockManager | null {
 /** The same bound the read-side join applies, so the recorded rows and a re-read agree. */
 function pairedWithin<T extends { readonly at: number }>(sample: T | null, at: number): T | null {
   return sample !== null && at - sample.at <= MAX_PAIRING_AGE_MS ? sample : null
-}
-
-function packSampleOf(snapshot: BatterySnapshot, at: number): PackSample {
-  return {
-    at,
-    currentA: snapshot.current,
-    packVoltageV: snapshot.packVoltage,
-    stateOfCharge: snapshot.stateOfCharge,
-    remainingCapacityAh: snapshot.remainingCapacity,
-    cellDeltaV: snapshot.cellDelta,
-    highestCell: snapshot.highestCell,
-    lowestCell: snapshot.lowestCell,
-    mosfetTemperatureC: snapshot.mosfetTemperature,
-    temperatureSensor1C: snapshot.temperatureSensor1,
-    temperatureSensor2C: snapshot.temperatureSensor2,
-    chargingEnabled: snapshot.chargingEnabled,
-    dischargingEnabled: snapshot.dischargingEnabled,
-  }
-}
-
-function solarSampleOf(reading: SolarReading, rssi: number, at: number): SolarSample {
-  return {
-    at,
-    chargeState: reading.chargeState,
-    chargerError: reading.chargerError,
-    batteryVoltageV: reading.batteryVoltage,
-    batteryCurrentA: reading.batteryCurrent,
-    yieldTodayKwh: reading.yieldTodayKwh,
-    pvPowerW: reading.pvPower,
-    loadCurrentA: reading.loadCurrent,
-    rssi,
-  }
 }
 
 function packGapPhrase(reason: PackStreamEndReason | null): string {

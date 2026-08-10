@@ -119,8 +119,15 @@ export interface ExportSize {
  * every access, on arrays tens of thousands of rows long.
  */
 export interface HistoryBrowser {
-  /** Null until the storage probe answers — which is not the same as unavailable. */
-  readonly availability: ComputedRef<HistoryAvailability | null>
+  /**
+   * Null until the storage probe answers — which is not the same as unavailable.
+   *
+   * Held rather than derived from the store. A connection that stands aside for another tab's
+   * upgrade, or one whose writes start aborting, revises what it can do without becoming a different
+   * object, so anything computed off the store reference would answer what the archive was at first
+   * paint for the rest of the tab's life.
+   */
+  readonly availability: Readonly<Ref<HistoryAvailability | null>>
   readonly sessions: Readonly<Ref<readonly SessionListing[]>>
   readonly devices: Readonly<Ref<readonly DeviceRecord[]>>
   /** Warnings across every session, most recent first, refreshed with the session list. */
@@ -274,7 +281,7 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   let unsubscribe: (() => void) | null = null
   let subscribedTo: HistoryStore | null = null
 
-  const availability = computed<HistoryAvailability | null>(() => deps.store()?.availability ?? null)
+  const availability = shallowRef<HistoryAvailability | null>(null)
 
   const groups = computed<readonly SessionGroup[]>(() => {
     const byKey = new Map<DeviceKey, SessionListing[]>()
@@ -666,10 +673,20 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   /**
    * The store, subscribed to the first time the probe offers one. Called from each entry point
    * rather than from a watcher, so this model needs no reactive effect scope to work.
+   *
+   * What the store says about itself is taken here, on every touch, because it is the store's own
+   * answer and not a fact about which store this is: a connection that stood aside for another tab's
+   * upgrade is the same object saying something different. Free to re-read — an unchanged store
+   * hands back the same object, and assigning that wakes nothing. The subscription is what makes a
+   * change reach the screen unasked: it carries the store's own availability as well as a foreign
+   * tab's write, and `refresh` comes back through here before it reads a row.
    */
   function activeStore(): HistoryStore | null {
     const store = deps.store()
-    if (store === null || store === subscribedTo) return store
+    if (store === null) return null
+
+    availability.value = store.availability
+    if (store === subscribedTo) return store
 
     unsubscribe?.()
     subscribedTo = store

@@ -145,6 +145,17 @@ export function classifyWriteFailure(error: unknown): WriteFailure {
   return 'unknown'
 }
 
+/**
+ * The stand-in for a failure the platform attributes to nothing.
+ *
+ * `IDBRequest.error` and `IDBTransaction.error` are both `DOMException | null` — a browser that
+ * gives up without pinning it on anything leaves them null — and null is the least debuggable thing
+ * a rejection can carry.
+ */
+export function abortFailure(message: string = 'The transaction was aborted.'): DOMException {
+  return new DOMException(message, 'AbortError')
+}
+
 function abortQuietly(transaction: IDBTransaction | null): void {
   if (transaction === null) return
   try {
@@ -152,11 +163,6 @@ function abortQuietly(transaction: IDBTransaction | null): void {
   } catch {
     // Already finished. The rollback this was asking for has happened either way.
   }
-}
-
-/** The stand-in for the case the platform aborts and names no cause. */
-function abortFailure(): DOMException {
-  return new DOMException('The transaction was aborted.', 'AbortError')
 }
 
 function errorName(error: unknown): string {

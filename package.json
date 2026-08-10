@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc -b && vite build",
+    "dev:fake": "vite --mode fake",
+    "dev:fake:tunnel": "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=.trycloudflare.com vite --mode fake --host",
+    "build": "vue-tsc -b && vite build && node scripts/assert-no-fake-bytes.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "vue-tsc -b --noEmit",

@@ -1001,6 +1001,7 @@ describe('one archive, one recorder', () => {
     second.dispose()
     store.close()
     vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
   })
 
   it('says nothing about recording on the frame before the lease answers', async () => {
@@ -1113,5 +1114,56 @@ describe('one archive, one recorder', () => {
     await second.recorder.drain()
 
     expect(await store.listSessions()).toHaveLength(2)
+  })
+
+  /** One lock taken and kept, as the other tab in a case keeps it. */
+  function heldThroughout(locks: LockManager, name: string): () => void {
+    let letGo = (): void => undefined
+    void locks.request(name, { ifAvailable: true }, (lock) => {
+      if (lock === null) throw new Error(`${name} was already held`)
+      return new Promise<void>((release) => {
+        letGo = release
+      })
+    })
+    return () => letGo()
+  }
+
+  it('contends for the lease only with tabs recording into the same archive', async () => {
+    // A lock is scoped by origin and name, and playback is served from the origin the real page is
+    // served from. On one shared name the playback tab claims the lease the moment its first frame
+    // plays and keeps it for the whole run, and the real page — which has an actual pack on the
+    // other end — drops the session it opened along with every row it had buffered.
+    const answers: Record<string, string> = {}
+    const cases = [
+      { what: 'real page, playback holding its own', fake: false, taken: 'shunt.recording.fake' },
+      { what: 'real page, a second real tab', fake: false, taken: 'shunt.recording' },
+      { what: 'playback, the real page holding its own', fake: true, taken: 'shunt.recording' },
+      { what: 'playback, a second playback tab', fake: true, taken: 'shunt.recording.fake' },
+    ]
+
+    for (const attempt of cases) {
+      vi.unstubAllEnvs()
+      if (attempt.fake) vi.stubEnv('VITE_FAKE_BLE', 'true')
+      const locks = browserLocks()
+      vi.stubGlobal('navigator', { locks })
+      const letGo = heldThroughout(locks, attempt.taken)
+
+      const archive = new MemoryHistoryStore()
+      const tab = tabOn(archive, 'under-test')
+      tab.drivePack(1)
+      await tab.recorder.drain()
+
+      answers[attempt.what] = tab.recorder.state.lease
+      tab.dispose()
+      archive.close()
+      letGo()
+    }
+
+    expect(answers).toEqual({
+      'real page, playback holding its own': 'held',
+      'real page, a second real tab': 'refused',
+      'playback, the real page holding its own': 'held',
+      'playback, a second playback tab': 'refused',
+    })
   })
 })

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import fixtures from './fixtures.json'
-import { hexToBytes } from './support/bytes'
+import { hexToBytes } from '../src/domain/bytes'
 import {
   decodeSolarAdvertisement,
   decryptRecord,

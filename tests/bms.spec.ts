@@ -3,7 +3,6 @@
 import { describe, expect, it } from 'vitest'
 
 import fixtures from './fixtures.json'
-import { hexToBytes } from './support/bytes'
 import { decodeCellInfo, decodeDeviceInfo, decodeSettings } from '../src/domain/bms/decode'
 import {
   CMD_CELL_INFO,
@@ -19,6 +18,7 @@ import {
   frameType,
   isChecksumValid,
 } from '../src/domain/bms/protocol'
+import { hexToBytes } from '../src/domain/bytes'
 
 const cellInfo = hexToBytes(fixtures.bmsCellInfoHex)
 const cellInfoDischarge = hexToBytes(fixtures.bmsCellInfoDischargeHex)

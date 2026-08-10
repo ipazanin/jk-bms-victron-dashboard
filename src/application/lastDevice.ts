@@ -7,6 +7,8 @@
  * path needs to find the device again in `navigator.bluetooth.getDevices()`.
  */
 
+import { storageKey } from './storageKey'
+
 const STORAGE_KEY = 'shunt.lastBmsDevice'
 
 export interface LastDevice {
@@ -17,7 +19,7 @@ export interface LastDevice {
 
 export function loadLastDevice(): LastDevice | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(storageKey(STORAGE_KEY))
     if (raw === null) return null
     const parsed = JSON.parse(raw) as Partial<LastDevice>
     if (typeof parsed.id !== 'string' || parsed.id === '') return null
@@ -34,7 +36,7 @@ export function loadLastDevice(): LastDevice | null {
 export function saveLastDevice(id: string, name: string | null, at: number): void {
   if (id === '') return
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ id, name, at }))
+    localStorage.setItem(storageKey(STORAGE_KEY), JSON.stringify({ id, name, at }))
   } catch {
     // Private browsing denies storage; the device simply will not be remembered.
   }
@@ -42,7 +44,7 @@ export function saveLastDevice(id: string, name: string | null, at: number): voi
 
 export function forgetLastDevice(): void {
   try {
-    localStorage.removeItem(STORAGE_KEY)
+    localStorage.removeItem(storageKey(STORAGE_KEY))
   } catch {
     // Nothing to clear.
   }

@@ -228,6 +228,12 @@ export function renderWindowFor(available: TimeWindow, requested?: TimeWindow): 
 }
 
 export interface HistoryStore {
+  /**
+   * What this store can answer, which is not settled for its lifetime. A connection asked to stand
+   * aside for another tab's upgrade, or one whose writes have started aborting, revises this and
+   * says so on `watch` — the store keeps its identity through both, so nothing derived from that
+   * identity would ever notice.
+   */
   readonly availability: HistoryAvailability
 
   openSession(record: SessionRecord): Promise<void>
@@ -344,11 +350,15 @@ export interface HistoryStore {
     readonly ringRecords: number
   }>
   /**
-   * Fires when another tab changed the archive. Returns an unsubscribe, like watchAdapter.
+   * Fires when what this store can answer changed: another tab wrote to the archive, or this store
+   * stopped being usable. Returns an unsubscribe. Nothing is handed over — the archive is the shared
+   * state and a receiver re-reads what it needs from it, `availability` included.
    *
-   * A store never notifies its own writer: this is carried by BroadcastChannel, which does not
-   * deliver to the context that posted, and a view refreshing itself off its own writes would
-   * reload the list under the user on every checkpoint.
+   * A store never notifies its own writer. News of another tab is carried by BroadcastChannel, which
+   * does not deliver to the object that posted, and a view refreshing itself off its own writes would
+   * reload the list under the user on every checkpoint. Its own availability is the one thing it must
+   * announce locally, for that same reason: the tab that stands down is the one tab a broadcast of
+   * its own can never reach.
    */
   watch(onChanged: () => void): () => void
   close(): void

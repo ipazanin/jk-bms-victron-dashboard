@@ -19,7 +19,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { hexToBytes } from './support/bytes'
+import { hexToBytes } from '../src/domain/bytes'
 import {
   HISTORY_TOTALS_REGISTER,
   SOLAR_HISTORY_REGISTERS,

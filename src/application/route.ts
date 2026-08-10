@@ -92,7 +92,7 @@ export function navigate(next: Route): void {
 
 /**
  * Starts listening, after resolving the hash the page was opened with — a deep link must land on
- * its session on the first paint, not on the second. Returns an unsubscribe, like `watchAdapter`.
+ * its session on the first paint, not on the second. Returns an unsubscribe.
  */
 export function startRouting(): () => void {
   if (typeof window === 'undefined') return () => undefined

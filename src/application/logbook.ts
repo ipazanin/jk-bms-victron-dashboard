@@ -7,6 +7,7 @@
  */
 
 import type { LogbookEvent } from '../domain/bms/logbook'
+import { storageKey } from './storageKey'
 
 const STORAGE_KEY = 'shunt.logbook'
 
@@ -19,7 +20,7 @@ export interface StoredLogbook {
 
 export function loadLogbook(): StoredLogbook | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(storageKey(STORAGE_KEY))
     if (raw === null) return null
     const parsed = JSON.parse(raw) as Partial<StoredLogbook>
     if (typeof parsed.fetchedAt !== 'number' || !Array.isArray(parsed.events)) return null
@@ -42,7 +43,7 @@ export function loadLogbook(): StoredLogbook | null {
 
 export function saveLogbook(logbook: StoredLogbook): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(logbook))
+    localStorage.setItem(storageKey(STORAGE_KEY), JSON.stringify(logbook))
   } catch {
     // Private browsing denies storage; the logbook simply will not persist.
   }
@@ -50,7 +51,7 @@ export function saveLogbook(logbook: StoredLogbook): void {
 
 export function forgetLogbook(): void {
   try {
-    localStorage.removeItem(STORAGE_KEY)
+    localStorage.removeItem(storageKey(STORAGE_KEY))
   } catch {
     // Nothing to clear.
   }

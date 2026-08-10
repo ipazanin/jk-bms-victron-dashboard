@@ -29,7 +29,8 @@ import type { DeviceKey, SessionEndReason, SessionRecord, WarningSnapshot } from
 import { SNAPSHOT_SCHEMA_VERSION } from '../domain/schemaVersion'
 import type { SolarHistoryTransfer } from '../domain/solar/SolarHistoryTransfer'
 import type { SolarReading } from '../domain/solar/types'
-import { adapterAvailable, detectCapabilities, watchAdapter } from '../infrastructure/ble/capabilities'
+import { browserBleEnvironment } from '../infrastructure/ble/capabilities'
+import type { BleEnvironment } from '../infrastructure/ble/capabilities'
 import { JkBmsClient } from '../infrastructure/ble/JkBmsClient'
 import type { BmsLink, JkBmsHandlers } from '../infrastructure/ble/JkBmsClient'
 import { VictronHistoryClient } from '../infrastructure/ble/VictronHistoryClient'
@@ -37,6 +38,7 @@ import type { SolarHistoryHandlers, SolarHistoryLink } from '../infrastructure/b
 import { SolarLiveScan } from '../infrastructure/ble/SolarLiveScan'
 import type { SolarScan, VictronHandlers } from '../infrastructure/ble/solarScan'
 import { BridgeSolarScan } from '../infrastructure/ble/BridgeSolarScan'
+import { fakeRadioDeps } from '../infrastructure/ble/fake/fakeDeps'
 import { resolveSolarBridgeUrl } from '../infrastructure/ble/solarBridge'
 import { browserStandardUtcOffsetMinutes } from './browserZone'
 import { describeConnectError, describeScanError } from './errors'
@@ -95,6 +97,12 @@ export interface TelemetryDeps {
    * other connects and cannot listen.
    */
   readonly createSolarHistoryLink: (handlers: SolarHistoryHandlers) => SolarHistoryLink
+  /**
+   * What the browser can do and whether its radio is on. A dependency and not a probe of
+   * `navigator`, because it decides every disabled button and every requirements row, and those
+   * states are otherwise reachable only on a machine that answers the way the case needs.
+   */
+  readonly bleEnvironment: BleEnvironment
   /** Lazy: the archive is probed asynchronously and may answer that it cannot be had. */
   readonly historyStore: () => HistoryStore | null
   /**
@@ -143,17 +151,13 @@ const UNNAMEABLE_CONTROLLER_NOTE =
 
 export function createTelemetry(deps: TelemetryDeps) {
   const now = deps.now
-  const capabilities = detectCapabilities()
+  const capabilities = deps.bleEnvironment.capabilities
 
   /** null until the browser answers, and again if it refuses to. */
   const adapterOn = ref<boolean | null>(null)
-  let stopWatchingAdapter: (() => void) | null = null
-  if (capabilities.hasBluetooth) {
-    void adapterAvailable()
-      .then((value) => (adapterOn.value = value))
-      .catch(() => undefined)
-    stopWatchingAdapter = watchAdapter((value) => (adapterOn.value = value))
-  }
+  let stopWatchingAdapter: (() => void) | null = deps.bleEnvironment.watchAdapter(
+    (available) => (adapterOn.value = available),
+  )
 
   const source = ref<Source>('none')
   const bmsState = ref<LinkState>('idle')
@@ -1083,7 +1087,31 @@ export function attachHistoryStore(store: HistoryStore): void {
   attachedStore = store
 }
 
-function browserDeps(): TelemetryDeps {
+/**
+ * Everything that is not a radio. The store and the two ledger refreshes read state this module
+ * keeps to itself, so no other module could supply them — which is why swapping the radios out
+ * composes two halves rather than handing over one object.
+ */
+function archiveDeps(): Pick<
+  TelemetryDeps,
+  'historyStore' | 'refreshRingLedger' | 'refreshSolarLedger' | 'now' | 'monotonic' | 'newId'
+> {
+  return {
+    historyStore: () => attachedStore,
+    refreshRingLedger: (deviceKey) => useHistoryBrowser().refreshRingLedger(deviceKey),
+    refreshSolarLedger: (deviceKey) => useHistoryBrowser().refreshSolarLedger(deviceKey),
+    now: () => Date.now(),
+    // Not derived from the wall clock: the whole point of a monotonic reading is that a clock
+    // step cannot move it.
+    monotonic: () => performance.now(),
+    newId: () => crypto.randomUUID(),
+  }
+}
+
+function realRadioDeps(): Pick<
+  TelemetryDeps,
+  'createBmsLink' | 'createSolarScan' | 'createSolarHistoryLink' | 'bleEnvironment'
+> {
   // A `?bridge=` in the URL swaps the browser's own radio for the native helper — the route that
   // needs no chooser tap. Absent it, SolarLiveScan picks between the browser's scan and a watched
   // device by itself.
@@ -1096,15 +1124,15 @@ function browserDeps(): TelemetryDeps {
     // Not bridged. A GATT connect is unaffected by whatever the advertisement scan does, so the
     // tunnel is the browser's own radio either way.
     createSolarHistoryLink: (handlers) => new VictronHistoryClient(handlers),
-    historyStore: () => attachedStore,
-    refreshRingLedger: (deviceKey) => useHistoryBrowser().refreshRingLedger(deviceKey),
-    refreshSolarLedger: (deviceKey) => useHistoryBrowser().refreshSolarLedger(deviceKey),
-    now: () => Date.now(),
-    // Not derived from the wall clock: the whole point of a monotonic reading is that a clock
-    // step cannot move it.
-    monotonic: () => performance.now(),
-    newId: () => crypto.randomUUID(),
+    bleEnvironment: browserBleEnvironment(),
   }
+}
+
+function browserDeps(): TelemetryDeps {
+  // Compared in place, here and at every other site that reads the flag: behind a shared constant it
+  // no longer folds and the fake ships. `scripts/assert-no-fake-bytes.mjs` has the measurement.
+  if (import.meta.env.VITE_FAKE_BLE === 'true') return { ...archiveDeps(), ...fakeRadioDeps() }
+  return { ...archiveDeps(), ...realRadioDeps() }
 }
 
 const shared = createTelemetry(browserDeps())

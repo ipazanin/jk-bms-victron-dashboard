@@ -6,21 +6,21 @@ import { loadLastDevice, saveLastDevice } from '../src/application/lastDevice'
 import { saveRememberedSession } from '../src/application/rememberedSession'
 import { createTelemetry } from '../src/application/telemetry'
 import type { Telemetry } from '../src/application/telemetry'
+import { browserBleEnvironment } from '../src/infrastructure/ble/capabilities'
+import type { BleEnvironment } from '../src/infrastructure/ble/capabilities'
 import { rememberedSession } from './support/samples'
 import { MemoryHistoryStore } from './support/MemoryHistoryStore'
 import { fakeBmsLink, fakeSolarHistoryLink, fakeSolarScan } from './support/fakeRadios'
 import type { FakeBmsLink } from './support/fakeRadios'
 
-// createTelemetry reads its capabilities from navigator.bluetooth, so canReconnect is only true when
-// getDevices exists. The fake link performs the reconnect itself; this stub only makes the browser
-// look capable enough for the guard to let the attempt through.
-const bluetoothStub = {
-  getDevices: async () => [],
-  requestDevice: async () => ({}),
-  requestLEScan: async () => ({}),
-  getAvailability: async () => true,
-  addEventListener: () => undefined,
-  removeEventListener: () => undefined,
+/**
+ * Rejoining without the chooser is gated on getDevices existing, which jsdom has no radio to
+ * provide. The fake link performs the reconnect itself, so raising the one flag is all the guard
+ * needs and everything else stays as honest as the browser running the spec.
+ */
+function browserThatCanRejoin(): BleEnvironment {
+  const environment = browserBleEnvironment()
+  return { ...environment, capabilities: { ...environment.capabilities, canReconnect: true } }
 }
 
 let clock = 0
@@ -38,6 +38,7 @@ function spawn(options: { deviceId?: string | null; deviceName?: string | null }
     createBmsLink: bms.create,
     createSolarScan: solar.create,
     createSolarHistoryLink: fakeSolarHistoryLink().create,
+    bleEnvironment: browserThatCanRejoin(),
     historyStore: () => store,
     refreshRingLedger: async () => undefined,
     refreshSolarLedger: async () => undefined,
@@ -57,12 +58,10 @@ beforeEach(() => {
   localStorage.clear()
   clock = Date.now()
   ids = 0
-  Object.defineProperty(navigator, 'bluetooth', { configurable: true, value: bluetoothStub })
 })
 
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()
-  Reflect.deleteProperty(navigator as unknown as Record<string, unknown>, 'bluetooth')
   localStorage.clear()
 })
 

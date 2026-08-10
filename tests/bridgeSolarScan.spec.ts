@@ -3,9 +3,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import fixtures from './fixtures.json'
-import { hexToBytes } from './support/bytes'
 import { holdDecrypt } from './support/pendingDecrypt'
-import { toArrayBuffer } from '../src/domain/bytes'
+import { hexToBytes, toArrayBuffer } from '../src/domain/bytes'
 import { BridgeSolarScan } from '../src/infrastructure/ble/BridgeSolarScan'
 import type { VictronHandlers } from '../src/infrastructure/ble/solarScan'
 

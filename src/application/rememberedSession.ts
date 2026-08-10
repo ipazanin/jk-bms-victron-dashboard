@@ -18,6 +18,7 @@ import type { ChargeState, SolarReading } from '../domain/solar/types'
 // Type-only: FaultLevel is erased at build, so this leaves no runtime import edge back
 // into telemetry.ts. Importing a *value* from telemetry here would create a cycle.
 import type { FaultLevel } from './telemetry'
+import { storageKey } from './storageKey'
 
 const SESSION_STORAGE = 'shunt.rememberedSession'
 
@@ -64,7 +65,7 @@ export interface RememberedSession {
 
 export function saveRememberedSession(session: RememberedSession): void {
   try {
-    localStorage.setItem(SESSION_STORAGE, JSON.stringify(session))
+    localStorage.setItem(storageKey(SESSION_STORAGE), JSON.stringify(session))
   } catch {
     // Private browsing denies storage; the session simply will not persist.
   }
@@ -73,7 +74,7 @@ export function saveRememberedSession(session: RememberedSession): void {
 export function loadRememberedSession(): RememberedSession | null {
   let raw: string | null
   try {
-    raw = localStorage.getItem(SESSION_STORAGE)
+    raw = localStorage.getItem(storageKey(SESSION_STORAGE))
   } catch {
     return null
   }
@@ -90,7 +91,7 @@ export function loadRememberedSession(): RememberedSession | null {
 
 export function forgetRememberedSession(): void {
   try {
-    localStorage.removeItem(SESSION_STORAGE)
+    localStorage.removeItem(storageKey(SESSION_STORAGE))
   } catch {
     // Nothing to clear.
   }

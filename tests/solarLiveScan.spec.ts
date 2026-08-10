@@ -4,8 +4,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import fixtures from './fixtures.json'
-import { hexToBytes } from './support/bytes'
 import { advertisementEvent } from './support/watchRadio'
+import { hexToBytes } from '../src/domain/bytes'
 import { SolarLiveScan } from '../src/infrastructure/ble/SolarLiveScan'
 import { VICTRON_COMPANY_ID } from '../src/domain/solar/types'
 

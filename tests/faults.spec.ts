@@ -7,6 +7,7 @@ import type { Telemetry, TelemetryDeps } from '../src/application/telemetry'
 import { MOSFET_CRITICAL, MOSFET_SERIOUS, MOSFET_WARNING } from '../src/application/severity'
 import type { BatterySnapshot } from '../src/domain/bms/types'
 import { STEP_EXCLUSION_A } from '../src/domain/cellBalance'
+import { browserBleEnvironment } from '../src/infrastructure/ble/capabilities'
 import { battery as capturedBattery, solarReading } from './support/samples'
 import { fakeBmsLink, fakeSolarHistoryLink, fakeSolarScan } from './support/fakeRadios'
 import type { FakeBmsLink, FakeSolarScan } from './support/fakeRadios'
@@ -97,6 +98,7 @@ function deps(): TelemetryDeps {
     createBmsLink: bms.create,
     createSolarScan: solar.create,
     createSolarHistoryLink: fakeSolarHistoryLink().create,
+    bleEnvironment: browserBleEnvironment(),
     historyStore: () => null,
     refreshRingLedger: async () => undefined,
     refreshSolarLedger: async () => undefined,

@@ -206,6 +206,7 @@ the 2-byte nonce little-endian, then fourteen zero bytes.
 ```bash
 npm install
 npm run dev            # http://localhost:5173/jk-bms-victron-dashboard/
+npm run dev:fake       # the same page, driven by a recording instead of radios
 npm test               # decoder tests against real captured frames
 npm run typecheck
 npm run build
@@ -251,6 +252,76 @@ src/infrastructure/  Web Bluetooth adapters and the IndexedDB session store.
 src/application/     reactive store, fault derivation, the recorder, rolling history.
 src/components/      hand-rolled inline SVG. No chart library.
 ```
+
+## Fake radios
+
+`npm run dev:fake` serves the whole page with every Bluetooth adapter swapped for playback of a
+recording taken off the boat. No hardware, no chooser, no key — and a dev panel bottom-right that
+makes the hardware-only states reachable by clicking.
+
+```bash
+npm run dev:fake
+npm run dev:fake:tunnel   # the same, reachable from a phone through a cloudflared tunnel
+```
+
+The tunnel variant exists because the panel is worth driving from the phone, and a phone needs the
+tunnel host allowed — the same variable as the `npm run dev` note above.
+
+Across the top is a playback strip — the two scenarios, pause, single step, 0.5×/1×/4× — and under
+it nine groups of controls:
+
+- **Capabilities** — the nine flags the page feature-detects, and the adapter as on, off or unknown.
+  The flags take effect on reload; the adapter is live, as it is on real hardware. It also remembers
+  or forgets a last pack, which is what gives the silent reconnect below anything to try.
+- **Pack link** — every way a connection or a silent reconnect can settle, including the one that
+  raises no banner at all; a slow attempt; a link that connects and then says nothing; drops, stalls,
+  a frame that will not decode, and a pack with no name to file it under.
+- **Solar link** — the three ways a scan can fail, advertisements going stale, a neighbour's Victron
+  answering, an identity announcement, a reading that will not decrypt, and the key present or gone.
+- **Pack values** — cell spread, path resistance on one cell, MOSFET and cell temperature, both
+  switches, state of charge.
+- **Solar values** — charger error, every charge stage, a load output, blanked measurements, a bus
+  voltage that disagrees with the pack's, an implausible house load, no signal.
+- **Stored log** — each way the `0xA7` read can answer, and each way filing the result can land: a
+  gap, an overlap, a shifted ring, a run too short to place.
+- **Stored solar history** — each way the sweep of the controller's 31 days can answer.
+- **Source and view** — review a stored session, restore or forget the remembered one, move the
+  clock (only while both radios are down, so the recorder cannot write into the future).
+- **Archive** — each reason it can be unavailable, an archive that rejects every call, seeded rows
+  playback cannot reach on its own, a sample count pushed up against the storage budget, and wipe.
+
+Two things behave differently from `npm run dev`, both deliberate:
+
+- **It records for real.** Sessions, chunks, warnings and ring reads go through the same recorder
+  and the same store the real page uses, so the Log, Stats and export all work and survive a reload.
+- **Nothing it writes can reach the real page.** The archive is the separate database `shunt.log.fake`,
+  and every `localStorage` key holding a measurement or a device is suffixed `.fake`, so a playback
+  session cannot overwrite the remembered snapshot, the last connected pack, the logbook, or — the
+  one that costs real effort to recover — the Victron advertisement key. The recording lease is
+  suffixed too: it is a Web Lock, scoped by origin and name, and on one shared name a playback run
+  would hold the real page off its own archive for as long as it played. Theme and sidebar layout
+  are chrome and stay shared on purpose.
+
+None of this reaches a deployed build. The recording and the panel's stylesheet both carry a marker
+string, and `npm run build` fails if either appears in `dist/`.
+
+### Regenerating the fixture
+
+```bash
+node --import ./scripts/support/typescriptResolve.mjs scripts/distill-fake-fixture.mjs
+node --import ./scripts/support/typescriptResolve.mjs scripts/distill-fake-fixture.mjs --pack-hz 1
+```
+
+Reads the gitignored `captures/` and writes three files under
+`src/infrastructure/ble/fake/fixture/`: the live streams as decoded production types, and the pack's
+stored log and the controller's stored history as wire bytes the real transports parse back. It
+refuses to write anything carrying a device serial, and the committed fixture names the pack
+`DEMO00000000001`.
+
+The pack records at about 3.76 Hz and native is what is committed (475 KB). `--pack-hz 1` thins it to
+146 KB, at the cost of two things worth knowing: the fixture then emits on the app's own sampling
+interval and hides the jitter the dashboard exists to absorb, and float's cell spread collapses from
+46 mV to 5 mV, because the imbalance excursions live between the samples.
 
 ## Credits
 

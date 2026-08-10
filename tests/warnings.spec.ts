@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { createTelemetry } from '../src/application/telemetry'
 import type { Telemetry } from '../src/application/telemetry'
+import { browserBleEnvironment } from '../src/infrastructure/ble/capabilities'
 import { battery, solarReading } from './support/samples'
 import { MemoryHistoryStore } from './support/MemoryHistoryStore'
 import { fakeBmsLink, fakeSolarHistoryLink, fakeSolarScan } from './support/fakeRadios'
@@ -32,6 +33,7 @@ beforeEach(() => {
     createBmsLink: bms.create,
     createSolarScan: solar.create,
     createSolarHistoryLink: fakeSolarHistoryLink().create,
+    bleEnvironment: browserBleEnvironment(),
     historyStore: () => store,
     refreshRingLedger: async () => undefined,
     refreshSolarLedger: async () => undefined,

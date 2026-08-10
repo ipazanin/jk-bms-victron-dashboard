@@ -4,11 +4,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import fixtures from './fixtures.json'
-import { hexToBytes } from './support/bytes'
 import { holdDecrypt } from './support/pendingDecrypt'
 import { fakeWatchRadio } from './support/watchRadio'
 import type { FakeWatchRadio } from './support/watchRadio'
-import { toArrayBuffer } from '../src/domain/bytes'
+import { hexToBytes, toArrayBuffer } from '../src/domain/bytes'
 import { SolarWatchScanner } from '../src/infrastructure/ble/SolarWatchScanner'
 import { VICTRON_COMPANY_ID } from '../src/domain/solar/types'
 

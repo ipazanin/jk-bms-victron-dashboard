@@ -39,9 +39,9 @@ import {
   frameType,
   isChecksumValid,
 } from '../src/domain/bms/protocol'
+import { hexToBytes } from '../src/domain/bytes'
 import capturedFrames from './fixtures/detailLogFrame.json'
 import vendorExport from './fixtures/detailLogRows.json'
-import { hexToBytes } from './support/bytes'
 
 interface SampledRow {
   /** The pack's clock face in the fixture's `recordedTimeZone`, exactly as the vendor app rendered it. */

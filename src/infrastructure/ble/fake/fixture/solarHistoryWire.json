@@ -1,0 +1,130 @@
+{
+  "note": "One sweep of a SmartSolar MPPT 100/50 over the 306b tunnel on 2026-08-02: the totals record and all thirty-one daily registers, newest first, as the controller answered them. Only the history registers are taken from the probe — the controller answered its serial in the same session and that register is not read here.",
+  "totals": "0100000000004117000041170000d1089a051ef104ffffffffffffffffffffffffff",
+  "days": [
+    {
+      "register": 4176,
+      "bytes": "0086000000ffffffff70052a0500000000004101f000790034010000db004d084b00"
+    },
+    {
+      "register": 4177,
+      "bytes": "0088000000ffffffff8d05040500000000009201f000ef0027010000d00041084a00"
+    },
+    {
+      "register": 4178,
+      "bytes": "0063000000ffffffff8d052605000000000046017800b90113010000bf003f084900"
+    },
+    {
+      "register": 4179,
+      "bytes": "0067000000ffffffff97050f0500000000003d018d00b1010e010000bb004d084800"
+    },
+    {
+      "register": 4180,
+      "bytes": "005f000000ffffffff98052b05000000000042017f00b90113010000be004a084700"
+    },
+    {
+      "register": 4181,
+      "bytes": "005a000000ffffffff9a052105000000000062018600950103010000b3005f084600"
+    },
+    {
+      "register": 4182,
+      "bytes": "0059000000ffffffff8d052b05000000000039017800cf0115010000bf006a084500"
+    },
+    {
+      "register": 4183,
+      "bytes": "0052000000ffffffff98051a0500000000000501bc00a30122010000ce00b6084400"
+    },
+    {
+      "register": 4184,
+      "bytes": "0065000000ffffffff8d051c0500000000004a017800c30139010000dc0082084300"
+    },
+    {
+      "register": 4185,
+      "bytes": "0082000000ffffffff99052a0500000000007e01810082013a010000dc004c084200"
+    },
+    {
+      "register": 4186,
+      "bytes": "0084000000ffffffff9405f4040000000000a7017a00650152010000f200ca084100"
+    },
+    {
+      "register": 4187,
+      "bytes": "005e000000ffffffff8d052c0500000000003c017800d9010a010000b90076084000"
+    },
+    {
+      "register": 4188,
+      "bytes": "005d000000ffffffff8e052c05000000000026027800c30061010000f5005e083f00"
+    },
+    {
+      "register": 4189,
+      "bytes": "006f000000ffffffff8d052b05000000000076017800990154010000f30061083e00"
+    },
+    {
+      "register": 4190,
+      "bytes": "007a000000ffffffff8d050005000000000080017800960122010000d7006a083d00"
+    },
+    {
+      "register": 4191,
+      "bytes": "006a000000ffffffff8d05090500000000003b017800d30111010000bc0052083c00"
+    },
+    {
+      "register": 4192,
+      "bytes": "005e000000ffffffff8d052c05000000000040017800d8010b010000b80047083b00"
+    },
+    {
+      "register": 4193,
+      "bytes": "0064000000ffffffff8d052c05000000000035017800d20116010000c0002e083a00"
+    },
+    {
+      "register": 4194,
+      "bytes": "005d000000ffffffff8d052c05000000000052017800c60107010000b70059083900"
+    },
+    {
+      "register": 4195,
+      "bytes": "0061000000ffffffff8d052c05000000000024017a00f3011c010000cf0076083800"
+    },
+    {
+      "register": 4196,
+      "bytes": "005b000000ffffffff8d052805000000000022017800ff010d010000ba00ad083700"
+    },
+    {
+      "register": 4197,
+      "bytes": "0073000000ffffffff8d051a050000000000fc017800e3007d010000120187083600"
+    },
+    {
+      "register": 4198,
+      "bytes": "00a6000000ffffffff8e0522050000000000c701a50032016a01000004019b083500"
+    },
+    {
+      "register": 4199,
+      "bytes": "0075000000ffffffff8e052505000000000054017800d0010f010000bd0075083400"
+    },
+    {
+      "register": 4200,
+      "bytes": "0082000000ffffffff91051e05000000000051017a00d60145010000e700aa083300"
+    },
+    {
+      "register": 4201,
+      "bytes": "0096000000ffffffff8d05f5040000000000da0179004d0149010000e900a5083200"
+    },
+    {
+      "register": 4202,
+      "bytes": "009a000000ffffffff8e05f7040000000000e4017800440150010000f10053083100"
+    },
+    {
+      "register": 4203,
+      "bytes": "0084000000ffffffff8e052b050000000000990178008d018d010000180124083000"
+    },
+    {
+      "register": 4204,
+      "bytes": "00a2000000ffffffff92050205000000000042027800e70049010000e7007b082f00"
+    },
+    {
+      "register": 4205,
+      "bytes": "0047000000ffffffff8d0511050000000000850178009c014d010000f40083082e00"
+    },
+    {
+      "register": 4206,
+      "bytes": "000e000000ffffffff8d05340500000000008e0078009a02840000005b0087082d00"
+    }
+  ]
+}

@@ -13,13 +13,17 @@ import LogView from './components/history/LogView.vue'
 import SessionView from './components/history/SessionView.vue'
 import { useIsDesktop } from './application/breakpoints'
 import { provideHistoryEnvironment, useHistoryBrowser } from './application/history/historyBrowser'
+import type { HistoryStore } from './application/history/port'
 import { route, startRouting } from './application/route'
 import { loadSidebarCollapsed, saveSidebarCollapsed } from './application/sidebarLayout'
 import { applyTheme, loadThemeChoice, resolveTheme, saveThemeChoice, themeFromQuery } from './application/theme'
 import type { Theme } from './application/theme'
 import { attachHistoryStore, useTelemetry } from './application/telemetry'
 import { useMediaQuery } from './application/useMediaQuery'
+import { fakeRadioController } from './infrastructure/ble/fake/fakeDeps'
 import { downloadJson } from './infrastructure/history/downloadJson'
+import { FAKE_ARCHIVE_NAME } from './infrastructure/history/fakeArchiveName'
+import { DATABASE_NAME } from './infrastructure/history/IdbHistoryStore'
 import { openHistoryStore } from './infrastructure/history/openHistoryStore'
 
 const telemetry = useTelemetry()
@@ -124,7 +128,21 @@ const onKeydown = (event: KeyboardEvent): void => {
 
 let stopRouting: (() => void) | null = null
 let stopReconnectWatch: (() => void) | null = null
+let stopArchiveLevers: (() => void) | null = null
 let reconnectTried = false
+
+/**
+ * One store, handed to both halves: the recorder writes through telemetry, the views read through
+ * the browser model, and neither reaches into the other.
+ *
+ * Called again whenever the store is replaced, which under playback is whenever an archive lever
+ * moves. Each of those is a store of its own with the lever already read into it, so a page still
+ * holding the last one reads and writes the archive it was wired with rather than the one it has.
+ */
+function wireArchive(store: HistoryStore): void {
+  attachHistoryStore(store)
+  provideHistoryEnvironment({ store, downloadJson })
+}
 
 // main.ts sets the attribute before the mount so nothing paints on the wrong plane; this keeps it
 // in step afterwards, when the owner toggles or the machine changes its mind.
@@ -154,12 +172,21 @@ onMounted(() => {
 
   stopRouting = startRouting()
 
-  // One store, handed to both halves: the recorder writes through telemetry, the views read
-  // through the browser model, and neither reaches into the other.
-  void openHistoryStore()
+  const archiveName = import.meta.env.VITE_FAKE_BLE === 'true' ? FAKE_ARCHIVE_NAME : DATABASE_NAME
+  void openHistoryStore(archiveName)
     .then((store) => {
-      attachHistoryStore(store)
-      provideHistoryEnvironment({ store, downloadJson })
+      // The playback controls stand in front of the archive rather than beside it: this is the one
+      // place the page opens a store, so it is the only place a lever can put a browser that keeps
+      // no log, one that fails every call, or one that turns rows away, where both halves meet it.
+      const archive =
+        import.meta.env.VITE_FAKE_BLE === 'true' ? fakeRadioController().archiveFor(store) : store
+      wireArchive(archive)
+      // And they stay subscribed to, because each of those is a store of its own rather than a mood
+      // the one store is in. A page that kept the first would be wired to an archive it no longer
+      // writes to.
+      if (import.meta.env.VITE_FAKE_BLE === 'true') {
+        stopArchiveLevers = fakeRadioController().onArchiveChange(wireArchive)
+      }
     })
     .catch(() => undefined)
 
@@ -171,6 +198,8 @@ onBeforeUnmount(() => {
   stopRouting = null
   stopReconnectWatch?.()
   stopReconnectWatch = null
+  stopArchiveLevers?.()
+  stopArchiveLevers = null
   window.removeEventListener('keydown', onKeydown)
   document.documentElement.style.overflow = ''
 })

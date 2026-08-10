@@ -6,10 +6,10 @@
  * paging fields the decoder reads, and into runs by contiguity of ring index.
  */
 
+import { hexToBytes } from '../../src/domain/bytes'
 import type { RingRun } from '../../src/domain/history/RingRun'
 import type { RingSnapshot } from '../../src/domain/history/RingSnapshot'
 import fixture from '../fixtures/ringMerge.json'
-import { hexToBytes } from './bytes'
 
 const FIRST_RECORD_INDEX = 6
 const RECORD_COUNT = 8
