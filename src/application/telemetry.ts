@@ -957,10 +957,14 @@ export function createTelemetry(deps: TelemetryDeps) {
     if (solarDeviceKey !== null) return solarDeviceKey
     const stored = loadAdvertisementKey()
     if (stored === '') return null
+    return await nameableSolarDevice(stored)
+  }
+
+  /** A key that will not parse names nothing, which is the same finding as holding none. */
+  async function nameableSolarDevice(key: string): Promise<DeviceKey | null> {
     try {
-      return await solarDeviceKeyFor(stored)
+      return await solarDeviceKeyFor(key)
     } catch {
-      // A key that will not parse names nothing, which is the same finding as holding none.
       return null
     }
   }
@@ -986,13 +990,11 @@ export function createTelemetry(deps: TelemetryDeps) {
       solarState.value = 'listening'
       source.value = 'live'
       // The transient activation is already spent, so hashing the key costs nothing here. The key
-      // itself never reaches the archive; only a digest of it does.
-      void solarDeviceKeyFor(key)
-        .then((deviceKey) => {
-          solarDeviceKey = deviceKey
-          recorder.identifySolar(deviceKey, solarModelId)
-        })
-        .catch(() => undefined)
+      // itself never reaches the archive; only a digest of it does. Awaited rather than left to
+      // settle on its own, so that a scan which has started is a scan whose controller the archive
+      // can already name — an identity arriving right behind it has somewhere to land.
+      solarDeviceKey = await nameableSolarDevice(key)
+      if (solarDeviceKey !== null) recorder.identifySolar(solarDeviceKey, solarModelId)
     } catch (error) {
       solarState.value = 'idle'
       solarError.value = describeScanError(error as Error)

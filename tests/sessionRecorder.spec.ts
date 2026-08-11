@@ -501,6 +501,27 @@ describe('naming the pack', () => {
     expect(solar?.key).toBe('victron:3f9a17c40b2e')
     expect(solar?.defaultLabel).toBe('SmartSolar · 0xa057')
   })
+
+  it('names the controller a session opened without one, and counts that session once', async () => {
+    // The model id rides its own advertisement and may trail the first reading by minutes, so the
+    // row this session wrote is sitting there as a nameless controller until it arrives.
+    harness = harnessFor()
+    harness.recorder.identifySolar('victron:3f9a17c40b2e', null)
+    drivePack(4)
+    driveSolar(2)
+    await harness.recorder.drain()
+
+    const unnamed = (await harness.store.listDevices()).find((device) => device.kind === 'solar')
+    expect(unnamed?.defaultLabel).toBe('Solar controller')
+
+    harness.recorder.identifySolar('victron:3f9a17c40b2e', 0xa057)
+    harness.recorder.checkpoint()
+    await harness.recorder.drain()
+
+    const named = (await harness.store.listDevices()).find((device) => device.kind === 'solar')
+    expect(named?.defaultLabel).toBe('SmartSolar · 0xa057')
+    expect(named?.sessionCount).toBe(1)
+  })
 })
 
 describe('a pack link that goes away mid-watch', () => {

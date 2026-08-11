@@ -265,6 +265,12 @@ interface OpenSession {
 
 type CommitResult = 'stored' | 'retry' | 'lost'
 
+/**
+ * Whether a device write is this session's first for that device. Only the first raises the
+ * device's session tally; a later one correcting what the row says must leave the count alone.
+ */
+type DeviceTally = 'opens-a-session' | 'already-counted'
+
 export class SessionRecorder {
   private readonly resolveStore: () => HistoryStore | null
   private readonly clock: RecorderClock
@@ -402,19 +408,30 @@ export class SessionRecorder {
     this.publish()
   }
 
-  /** The controller's key digest, computed once per scan after `start()` has already resolved. */
+  /**
+   * The controller's key digest, computed once per scan after `start()` has already resolved.
+   *
+   * The model id arrives on its own advertisement and may trail the first reading, so the row this
+   * session already wrote can be sitting there unnamed. It is rewritten under the name rather than
+   * left for a later session to correct: the archive would otherwise show a nameless controller
+   * against readings that plainly came from a named one.
+   */
   identifySolar(key: DeviceKey, modelId: number | null): void {
     if (this.disposed) return
+    const label = solarDefaultLabel(modelId)
+    const renamed = label !== this.solarLabel
     this.solarDeviceKey = key
-    this.solarLabel = solarDefaultLabel(modelId)
+    this.solarLabel = label
 
     const session = this.session
     if (session === null) return
     session.solarDeviceKey = key
     if (!session.solarDeviceCounted) {
       session.solarDeviceCounted = true
-      this.rememberSolarDevice(session, key, this.clock.now())
+      this.rememberSolarDevice(session, key, this.clock.now(), 'opens-a-session')
+      return
     }
+    if (renamed) this.rememberSolarDevice(session, key, this.clock.now(), 'already-counted')
   }
 
   /** The settings frame is not in the read commands, so it arrives if the BMS volunteers it, or never. */
@@ -744,7 +761,9 @@ export class SessionRecorder {
     // Enqueued behind the claim, so a session that never took the lease leaves the device rows —
     // and the session count they carry — exactly as it found them.
     if (session.packDeviceKey !== null) this.rememberPackDevice(session, session.packDeviceKey, at)
-    if (session.solarDeviceKey !== null) this.rememberSolarDevice(session, session.solarDeviceKey, at)
+    if (session.solarDeviceKey !== null) {
+      this.rememberSolarDevice(session, session.solarDeviceKey, at, 'opens-a-session')
+    }
 
     this.publish()
     return session
@@ -1042,7 +1061,7 @@ export class SessionRecorder {
    */
   private rememberPackDevice(session: OpenSession, key: DeviceKey, at: number): void {
     const info = this.deviceInfo
-    this.upsertDevice(session, key, (sessionCount) => ({
+    this.upsertDevice(session, key, 'opens-a-session', (sessionCount) => ({
       key,
       kind: 'pack',
       defaultLabel: this.packLabel,
@@ -1059,8 +1078,13 @@ export class SessionRecorder {
     }))
   }
 
-  private rememberSolarDevice(session: OpenSession, key: DeviceKey, at: number): void {
-    this.upsertDevice(session, key, (sessionCount) => ({
+  private rememberSolarDevice(
+    session: OpenSession,
+    key: DeviceKey,
+    at: number,
+    tally: DeviceTally,
+  ): void {
+    this.upsertDevice(session, key, tally, (sessionCount) => ({
       key,
       kind: 'solar',
       defaultLabel: this.solarLabel,
@@ -1080,6 +1104,7 @@ export class SessionRecorder {
   private upsertDevice(
     session: OpenSession,
     key: DeviceKey,
+    tally: DeviceTally,
     build: (sessionCount: number) => DeviceRecord,
   ): void {
     const store = this.usableStore()
@@ -1090,7 +1115,8 @@ export class SessionRecorder {
       // rather than an increment. Reading it costs one scan of a handful of rows, once per
       // session, and it happens on the write chain rather than in a radio callback.
       const known = (await store.listDevices()).find((device) => device.key === key)
-      await store.upsertDevice(build((known?.sessionCount ?? 0) + 1))
+      const counted = known?.sessionCount ?? 0
+      await store.upsertDevice(build(tally === 'opens-a-session' ? counted + 1 : counted))
     })
   }
 
