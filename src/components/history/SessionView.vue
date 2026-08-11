@@ -491,6 +491,7 @@ function tightSpan(elapsedMs: number): string {
           :pv-power="activeSample.solar?.pvPowerW ?? null"
           :pack-reach="null"
           :solar-reach="null"
+          :readout-span-ms="null"
           :pack-phase="'reading'"
           :solar-phase="activeSample.solar ? 'reading' : 'absent'"
           :stale="true"

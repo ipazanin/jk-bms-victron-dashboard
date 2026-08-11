@@ -53,6 +53,7 @@ const AMMETER = {
   housePower: null as number | null,
   houseLoadPlausible: null as boolean | null,
   pvPower: null as number | null,
+  readoutSpanMs: null as number | null,
   packReach: null as Reach | null,
   solarReach: null as Reach | null,
   stale: false,
@@ -116,6 +117,7 @@ const FLOW = {
   projection: null as Projection | null,
   packReach: null as Reach | null,
   solarReach: null as Reach | null,
+  readoutSpanMs: null as number | null,
   stale: false,
   capturedAt: null as number | null,
 }

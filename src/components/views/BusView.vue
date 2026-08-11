@@ -12,6 +12,7 @@ import SocCluster from '../SocCluster.vue'
 import SolarRow from '../SolarRow.vue'
 import TempTrio from '../TempTrio.vue'
 import TrendStrips from '../TrendStrips.vue'
+import WarningLedger from '../bus/WarningLedger.vue'
 import { storedEnergy } from '../../domain/dcBus'
 import { deviceLabel, packDefaultLabel, packDeviceKeyFor } from '../../domain/history/identity'
 import { useHistoryBrowser } from '../../application/history/historyBrowser'
@@ -31,6 +32,7 @@ const {
   battery,
   solar,
   bus,
+  dampedBus,
   balance,
   cellReach,
   packReach,
@@ -46,7 +48,7 @@ const {
 
 const log = useHistoryBrowser()
 // Destructured so the template reads it as a top-level ref, which `<script setup>` unwraps.
-const { availability: archiveAvailability } = log
+const { availability: archiveAvailability, warnings } = log
 
 const connectHref = hashOf({ name: 'connect' })
 const logHref = hashOf({ name: 'log' })
@@ -72,6 +74,29 @@ const packStored = computed(() => {
   const snapshot = battery.value
   return snapshot === null ? null : storedEnergy(snapshot, settings.value?.cellCount ?? null)
 })
+
+/**
+ * The two cards are fed from opposite sides of the same reconciliation. The schematic prints how
+ * the boat is running, so every figure on it is a mean; the ammeter prints what the bus is doing
+ * this instant, so its bars, bands and amp rows stay raw and only its legend watts are damped.
+ *
+ * The raw fallbacks hold the invariant both components document — a figure is non-null exactly when
+ * its phase reads 'reading'. They carry two real states: the frame between the first snapshot
+ * landing and the readout being published, and a remembered or browsed session, which feeds no
+ * window at all and so is correctly printed raw and captioned as unwindowed.
+ */
+const flow = computed(() => ({
+  packCurrent: dampedBus.value?.packCurrentA ?? battery.value?.current ?? null,
+  packVoltage: dampedBus.value?.packVoltageV ?? battery.value?.packVoltage ?? null,
+  solarCurrent: dampedBus.value?.solarCurrentA ?? solar.value?.batteryCurrent ?? null,
+  pvPower: dampedBus.value?.pvPowerW ?? solar.value?.pvPower ?? null,
+  houseCurrent: dampedBus.value?.houseCurrentA ?? bus.value?.houseCurrent ?? null,
+  housePower: dampedBus.value?.housePowerW ?? bus.value?.housePower ?? null,
+  houseLoadPlausible: dampedBus.value?.houseLoadPlausible ?? bus.value?.houseLoadPlausible ?? null,
+  busVoltage:
+    dampedBus.value?.packVoltageV ?? battery.value?.packVoltage ?? solar.value?.batteryVoltage ?? null,
+  spanMs: dampedBus.value?.spanMs ?? null,
+}))
 
 /**
  * The live pack under whatever name the Log knows it by. Telemetry holds the device info the radio
@@ -118,20 +143,21 @@ const recordedSummary = computed(() => {
     <EnergyFlow
       v-if="engaged"
       class="card"
-      :pack-current="battery?.current ?? null"
-      :pack-voltage="battery?.packVoltage ?? null"
+      :pack-current="flow.packCurrent"
+      :pack-voltage="flow.packVoltage"
       :pack-phase="packPhase"
-      :solar-current="solar?.batteryCurrent ?? null"
+      :solar-current="flow.solarCurrent"
       :solar-phase="solarPhase"
-      :bus-voltage="battery?.packVoltage ?? solar?.batteryVoltage ?? null"
-      :pv-power="solar?.pvPower ?? null"
-      :house-current="bus?.houseCurrent ?? null"
-      :house-power="bus?.housePower ?? null"
-      :house-load-plausible="bus?.houseLoadPlausible ?? null"
+      :bus-voltage="flow.busVoltage"
+      :pv-power="flow.pvPower"
+      :house-current="flow.houseCurrent"
+      :house-power="flow.housePower"
+      :house-load-plausible="flow.houseLoadPlausible"
       :pack-stored="packStored"
       :projection="projection"
       :pack-reach="packReach"
       :solar-reach="solarReach"
+      :readout-span-ms="flow.spanMs"
       :stale="stale"
       :captured-at="rememberedAt"
     />
@@ -144,11 +170,12 @@ const recordedSummary = computed(() => {
       :solar-current="solar?.batteryCurrent ?? null"
       :solar-phase="solarPhase"
       :house-current="bus?.houseCurrent ?? null"
-      :house-power="bus?.housePower ?? null"
+      :house-power="flow.housePower"
       :house-load-plausible="bus?.houseLoadPlausible ?? null"
-      :pv-power="solar?.pvPower ?? null"
+      :pv-power="flow.pvPower"
       :pack-reach="packReach"
       :solar-reach="solarReach"
+      :readout-span-ms="flow.spanMs"
       :stale="stale"
     />
 
@@ -175,13 +202,17 @@ const recordedSummary = computed(() => {
       :can-listen-solar="capabilities.canListenSolar"
     />
 
-    <!-- The live trend sits last: a strip mounting when a series first arrives grows the panel,
+    <!-- The live trend sits late: a strip mounting when a series first arrives grows the panel,
          and from the foot of the stack that nudges only the footer, never the instruments above. -->
     <TrendStrips
       v-if="source === 'live' && packPhase !== 'absent'"
       class="card"
       :history="history"
     />
+
+    <!-- The record of what the annunciator has already stopped showing. Last in the stack and a
+         fixed height whatever the archive holds, so a fault filing itself moves nothing above it. -->
+    <WarningLedger v-if="engaged" class="card" :warnings="warnings" />
 
     <section v-if="!engaged" class="landing card">
       <h2>Read your DC bus.</h2>

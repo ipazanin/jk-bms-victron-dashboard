@@ -81,6 +81,18 @@ export function duration(seconds: number): string {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`
 }
 
+/**
+ * The window a windowed figure was measured over, to the minute.
+ *
+ * Every aperture on the page is a claim about a basis rather than a countdown, and a basis printed
+ * in seconds ticks once a second while telling the reader nothing they can act on. Floored, never
+ * rounded: a window holding ninety seconds must not round itself up into a claim about two minutes.
+ */
+export function aperture(spanMs: number): string {
+  const minutes = Math.floor(spanMs / 60_000)
+  return minutes < 1 ? 'over <1 min' : `over ${minutes} min`
+}
+
 export function hours(elapsedHours: number): string {
   if (elapsedHours < 1) return `${Math.round(elapsedHours * 60)} min`
   return `${elapsedHours.toFixed(1)} h`

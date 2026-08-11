@@ -7,8 +7,12 @@
  * carries the magnitude and whose marching dashes carry the direction; width is the channel that
  * survives with the dashes frozen, so the picture stays true under reduced motion.
  *
- * Purely presentational — every figure arrives as a prop, the same bindings that feed the shunt
- * beneath. The component never fabricates a flow it cannot measure: a pack whose radio has yet to
+ * Purely presentational — every figure arrives as a prop. They are the damped readouts rather than
+ * the latest samples the shunt beneath draws its bars from: this card answers how the boat is
+ * running, which is a rate, and the instrument below answers what the bus is doing this instant.
+ * Both apertures are printed, so neither is mistaken for the other.
+ *
+ * The component never fabricates a flow it cannot measure: a pack whose radio has yet to
  * deliver a frame, solar with no controller, and a house load the difference cannot vouch for all
  * render as static muted ghosts, each labelled with the reason it is one, rather than as a
  * confident line to nowhere.
@@ -23,6 +27,7 @@ import { COMPACT_QUERY } from '../../application/breakpoints'
 import {
   amps,
   ampsAbsolute,
+  aperture,
   clockTime,
   duration,
   storedWattHours,
@@ -60,6 +65,12 @@ const props = defineProps<{
   projection: Projection | null
   packReach: Reach | null
   solarReach: Reach | null
+  /**
+   * The window every figure above is a mean over, or null when they are raw — a restored snapshot
+   * and an archived session both arrive with no window behind them. The card prints it, because a
+   * figure whose basis is a minute and one taken this instant are different claims.
+   */
+  readoutSpanMs: number | null
   /** The figures are a restored snapshot or an archived session rather than a measurement in
    *  progress. Every channel that says "live" — the marching dashes above all — has to go quiet. */
   stale: boolean
@@ -380,8 +391,11 @@ const storedPlate = computed(() => (props.stale ? 'Stored (last seen)' : 'Stored
  * hours, so an hour and a minute is all the resolution the reader needs.
  */
 const staleNote = computed(() => {
-  if (!props.stale) return 'solar · bus · boat · pack'
-  return props.capturedAt === null ? 'not live' : `not live · last seen ${clockTime(props.capturedAt)}`
+  if (props.stale) {
+    return props.capturedAt === null ? 'not live' : `not live · last seen ${clockTime(props.capturedAt)}`
+  }
+  const basis = props.readoutSpanMs === null ? '' : ` · averaged ${aperture(props.readoutSpanMs)}`
+  return `solar · bus · boat · pack${basis}`
 })
 
 const housePrimary = computed(() => (props.housePower !== null ? watts(props.housePower) : '—'))

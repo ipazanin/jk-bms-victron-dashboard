@@ -50,8 +50,15 @@ import type {
   StoredRingLedger,
   StoredSession,
 } from './port'
-/** The standalone warnings log reads this many at most, most recent first. */
-const WARNING_LIST_LIMIT = 500
+/**
+ * The warnings list reads this many at most, most recent first. It feeds both the standalone log
+ * and the dashboard's ledger, so it is one read and one cap rather than two lists that could
+ * disagree about what the archive holds.
+ *
+ * It bounds the read, not the archive: warnings are bounded per session and die with the session
+ * that filed them, so what is reachable here is whatever the sample budget has not yet pruned.
+ */
+const WARNING_LIST_LIMIT = 1000
 
 /** The export is deliberately never windowed: a file holding part of a session would read as all
  *  of it, and on iOS it is the only copy anybody keeps. */

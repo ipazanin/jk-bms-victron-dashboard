@@ -24,6 +24,8 @@ import type { ShallowRef } from 'vue'
 import type { BatterySnapshot } from '../domain/bms/types'
 import { SLOPE_HOLD_MS, STEP_EXCLUSION_A, deviationsMv, gradeBalance, theilSen } from '../domain/cellBalance'
 import type { BalanceSample, BalanceVerdict } from '../domain/cellBalance'
+import { BusReadoutMeter } from '../domain/damping'
+import type { BusReadout } from '../domain/damping'
 import { project } from '../domain/dcBus'
 import type { Projection } from '../domain/dcBus'
 import { TrailingWindow } from '../domain/reach'
@@ -63,6 +65,11 @@ export interface Observations {
   /** Amps of pack-current span across the window the balance verdict was graded over. */
   readonly balanceSwingA: Readonly<ShallowRef<number>>
   readonly projection: Readonly<ShallowRef<Projection | null>>
+  /**
+   * The damped figures every watt on the page is built from, held between repaints. Null until a
+   * pack snapshot has landed, on the same terms as `packReach`.
+   */
+  readonly readout: Readonly<ShallowRef<BusReadout | null>>
 
   /** The one feed. Everything above is recomputed from it, in the caller's own time. */
   observe(snapshot: BatterySnapshot, solar: SolarReading | null, at: number): void
@@ -86,6 +93,7 @@ export function createObservations(): Observations {
   const solarCurrent = new TrailingWindow(REACH_WINDOW_MS)
   const cellDeviation = new TrailingWindow(REACH_WINDOW_MS)
   const projectionCurrent = new TrailingWindow(PROJECTION_WINDOW_MS)
+  const readoutMeter = new BusReadoutMeter()
 
   const packReach = shallowRef<Reach | null>(null)
   const solarReach = shallowRef<Reach | null>(null)
@@ -93,6 +101,7 @@ export function createObservations(): Observations {
   const balance = shallowRef<BalanceVerdict | null>(null)
   const balanceSwingA = shallowRef(0)
   const projection = shallowRef<Projection | null>(null)
+  const readout = shallowRef<BusReadout | null>(null)
 
   /** The balance fit needs whole samples rather than one number, so it keeps its own window. */
   let balanceSamples: BalanceSample[] = []
@@ -109,6 +118,13 @@ export function createObservations(): Observations {
     // the span between the two tips against one shared axis, so both reaches have to be taken
     // across the same instants or the span would bracket two different windows.
     if (solar?.batteryCurrent != null) solarCurrent.observe(at, solar.batteryCurrent)
+    readoutMeter.observe(
+      at,
+      snapshot.current,
+      snapshot.packVoltage,
+      solar?.batteryCurrent ?? null,
+      solar?.pvPower ?? null,
+    )
 
     const deviations = deviationsMv(snapshot.cellVoltages)
     if (deviations.length > 0) {
@@ -128,6 +144,9 @@ export function createObservations(): Observations {
     packReach.value = packCurrent.read(at)
     solarReach.value = solarCurrent.read(at)
     cellReach.value = cellDeviation.read(at)
+    // The meter hands back the object it already published while the gate holds, so this assignment
+    // is a no-op to the ref and the watt figures downstream do not repaint.
+    readout.value = readoutMeter.read(at)
 
     if (heldResistances !== null && at - heldResistancesAt > SLOPE_HOLD_MS) heldResistances = null
     const verdict = gradeBalance(balanceSamples, heldResistances)
@@ -181,6 +200,7 @@ export function createObservations(): Observations {
     solarCurrent.clear()
     cellDeviation.clear()
     projectionCurrent.clear()
+    readoutMeter.clear()
     balanceSamples = []
     heldResistances = null
     heldResistancesAt = 0
@@ -194,6 +214,7 @@ export function createObservations(): Observations {
     balance.value = null
     balanceSwingA.value = 0
     projection.value = null
+    readout.value = null
   }
 
   return {
@@ -203,6 +224,7 @@ export function createObservations(): Observations {
     balance,
     balanceSwingA,
     projection,
+    readout,
     observe,
     imbalanceAsserted,
     latchFaults,

@@ -23,7 +23,7 @@ import { computed, reactive, readonly, ref, shallowRef, watch } from 'vue'
 import type { DetailLogTransfer } from '../domain/bms/DetailLogTransfer'
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../domain/bms/types'
 import { JOINT_SERIOUS, JOINT_WARNING } from '../domain/cellBalance'
-import { reconcile } from '../domain/dcBus'
+import { deriveHouse, reconcile } from '../domain/dcBus'
 import { packDeviceKeyFor, solarDeviceKeyFor } from '../domain/history/identity'
 import type { DeviceKey, SessionEndReason, SessionRecord, WarningSnapshot } from '../domain/history/types'
 import { SNAPSHOT_SCHEMA_VERSION } from '../domain/schemaVersion'
@@ -85,6 +85,24 @@ export interface TrendPoint {
   readonly packVoltage: number
   readonly pvPower: number | null
   readonly housePower: number | null
+}
+
+/**
+ * The bus as a reader watches it: every member a mean over the readout window, published together
+ * so `boat = solar − pack` still reconciles across them. Never recorded, never persisted — the
+ * archive takes `BusReconciliation`, which is what the radios said.
+ */
+export interface DampedBus {
+  readonly packCurrentA: number
+  readonly packVoltageV: number
+  readonly packPowerW: number
+  readonly solarCurrentA: number | null
+  readonly pvPowerW: number | null
+  readonly houseCurrentA: number | null
+  readonly housePowerW: number | null
+  /** Null with no solar, false when another source is charging and the difference is not a load. */
+  readonly houseLoadPlausible: boolean | null
+  readonly spanMs: number
 }
 
 export interface TelemetryDeps {
@@ -205,6 +223,34 @@ export function createTelemetry(deps: TelemetryDeps) {
   const bus = computed(() =>
     battery.value && solar.value ? reconcile(battery.value, solar.value) : null,
   )
+  /**
+   * The same reconciliation over the damped inputs, for the figures a reader plans with. It is a
+   * second computed rather than a replacement because the two have different jobs and both are on
+   * screen: `bus` drives the ammeter's marks and everything that is recorded, this drives the watts.
+   *
+   * Derived here from `deriveHouse` — the same arithmetic the raw path and the archive use — so a
+   * correction to the noise floor lands on all three at once.
+   */
+  const dampedBus = computed<DampedBus | null>(() => {
+    const figures = observations.readout.value
+    if (figures === null) return null
+
+    const house =
+      figures.solarCurrentA === null
+        ? null
+        : deriveHouse(figures.packCurrentA, figures.solarCurrentA, figures.packVoltageV)
+    return {
+      packCurrentA: figures.packCurrentA,
+      packVoltageV: figures.packVoltageV,
+      packPowerW: figures.packCurrentA * figures.packVoltageV,
+      solarCurrentA: figures.solarCurrentA,
+      pvPowerW: figures.pvPowerW,
+      houseCurrentA: house?.currentA ?? null,
+      housePowerW: house?.powerW ?? null,
+      houseLoadPlausible: house?.plausible ?? null,
+      spanMs: figures.spanMs,
+    }
+  })
   const worstFault = computed<FaultLevel>(() => worstOf(faults.value.map((fault) => fault.level)))
 
   const recorder = new SessionRecorder({
@@ -1035,6 +1081,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     battery,
     solar,
     bus,
+    dampedBus,
     faults,
     worstFault,
     history,

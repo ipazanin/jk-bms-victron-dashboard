@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 
 import StatusChip from './StatusChip.vue'
-import { ampHours, duration, volts } from '../application/format'
+import { ampHours, aperture, duration, volts } from '../application/format'
 import type { BatterySnapshot } from '../domain/bms/types'
 import type { Projection } from '../domain/dcBus'
 
@@ -23,17 +23,6 @@ const meterLabel = computed(() => {
     ? `${charge}, at or under the ${LOW_MARK} percent low mark`
     : `${charge}, over the ${LOW_MARK} percent low mark`
 })
-
-/**
- * The window the projection was measured over. A projection without its aperture is not a
- * projection, and a row holding ninety seconds of data must not round itself up into a claim
- * about five minutes.
- */
-function aperture(overMs: number): string {
-  const seconds = Math.round(overMs / 1000)
-  if (seconds < 120) return `over ${seconds} s`
-  return `over ${Math.round(seconds / 60)} min`
-}
 
 /**
  * One row, always present, because two mutually exclusive rows that can both vanish move

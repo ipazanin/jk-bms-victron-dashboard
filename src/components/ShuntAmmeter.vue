@@ -19,11 +19,16 @@
  * envelope of the last thirty seconds — both edges samples a radio reported, nothing averaged.
  * The bar is the latest sample at full fidelity. The figure is that same sample to a tenth.
  * Only the band is windowed, and only the axis is derived from it.
+ *
+ * The legend is the exception, and deliberately so. Its watt figures are the damped readouts the
+ * schematic above prints, because power is a rate and a rate off one sample is a rate for nobody.
+ * They cannot be divided into the amps beside them and are not meant to be: the key names the
+ * window they are meant over, so the two claims stay distinguishable on one card.
  */
 import { computed, ref, watch } from 'vue'
 
 import { COMPACT_QUERY } from '../application/breakpoints'
-import { amps, ampsAbsolute, volts, watts } from '../application/format'
+import { amps, ampsAbsolute, aperture, volts, watts } from '../application/format'
 import { isPending, type LinkPhase } from '../application/linkPhase'
 import { useMediaQuery } from '../application/useMediaQuery'
 import type { Reach } from '../domain/reach'
@@ -43,7 +48,10 @@ const props = defineProps<{
   houseCurrent: number | null
   housePower: number | null
   houseLoadPlausible: boolean | null
+  /** Damped, like `housePower`: the legend's two watt figures are the only means on this card. */
   pvPower: number | null
+  /** The window those two are meant over, or null when the figures are raw and unwindowed. */
+  readoutSpanMs: number | null
   packReach: Reach | null
   solarReach: Reach | null
   /** The rows print a restored snapshot rather than a measurement in progress. `powered` stays
@@ -303,10 +311,13 @@ const readingSentence = computed(() => {
   }
 
   if (houseKnown.value) {
+    // The watt figure is a mean and the amps beside it are this instant, so the clause names its
+    // own basis rather than leaving a listener to divide one into the other and find they disagree.
+    const basis = props.readoutSpanMs === null ? '' : ` averaged ${aperture(props.readoutSpanMs)}`
     return (
       `Solar delivers ${ampsAbsolute(props.solarCurrent!)}, the pack is ${flow.value} at ` +
       `${ampsAbsolute(props.packCurrent!)}, so the boat is drawing ${ampsAbsolute(props.houseCurrent!)}, ` +
-      `about ${watts(props.housePower ?? 0)}.${bandSentence.value}`
+      `about ${watts(props.housePower ?? 0)}${basis}.${bandSentence.value}`
     )
   }
   // The pack is taking more than solar delivers, so another charger is on the bus and the
@@ -490,6 +501,10 @@ const caption = computed(() => (props.stale ? 'not live · boat = solar − pack
         <span v-else-if="houseCharged" class="key muted-key">Boat load unavailable — another source charging</span>
         <!-- A pending row is already pulsing its own line; saying it twice on one card is noise. -->
         <span v-else-if="solarPhase === 'absent'" class="key muted-key">Solar not connected</span>
+        <!-- Two apertures, both named: the rows are this instant, the watts above are a mean. -->
+        <span v-if="readoutSpanMs !== null" class="key muted-key">
+          watts averaged {{ aperture(readoutSpanMs) }}
+        </span>
         <span v-if="packBand || solarBand" class="key muted-key band-key">
           shaded — range over the last 30 s
         </span>

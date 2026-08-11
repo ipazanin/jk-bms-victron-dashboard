@@ -295,6 +295,20 @@ export class IdbHistoryStore implements HistoryStore {
     await runTransaction(this.database, [WARNINGS], 'readwrite', async (transaction) => {
       await requestAsPromise(transaction.objectStore(WARNINGS).put(record))
     })
+    this.announceWarning()
+  }
+
+  /**
+   * A filed warning reaches the tab that filed it as well as the others.
+   *
+   * Every other write announces only when it changes what a reader already holds — a chunk commit
+   * that pruned nothing changes no list anybody is looking at. A warning is different: it IS a new
+   * row in a list on screen, and the tab that wrote it is precisely the one BroadcastChannel cannot
+   * deliver to, so the local watchers are called directly alongside the post.
+   */
+  private announceWarning(): void {
+    this.channel.post('warning-filed')
+    for (const watcher of [...this.watchers]) watcher()
   }
 
   async warningsOf(id: SessionId): Promise<readonly WarningRecord[]> {

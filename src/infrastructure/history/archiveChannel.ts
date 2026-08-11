@@ -21,6 +21,9 @@ export type ArchiveMessage =
   /** One word for every change to a pack's ring: a merge, a clock correction, a prune, a delete.
    *  The archive is the shared state and the receiver re-reads, so nothing finer would be read. */
   | 'ring-read'
+  /** A fault was filed. The ledger on the dashboard is a list of these, so it is the one write
+   *  whose arrival a reader is watching for rather than reading past. */
+  | 'warning-filed'
 
 export interface ArchiveChannel {
   post(message: ArchiveMessage): void
@@ -77,6 +80,7 @@ function isArchiveMessage(value: unknown): value is ArchiveMessage {
     value === 'session-closed' ||
     value === 'pruned' ||
     value === 'device-renamed' ||
-    value === 'ring-read'
+    value === 'ring-read' ||
+    value === 'warning-filed'
   )
 }

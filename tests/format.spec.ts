@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ampHoursSigned,
   amps,
+  aperture,
   clockTimeWithSeconds,
   groupedCount,
   relativeAge,
@@ -90,6 +91,20 @@ describe('groupedCount', () => {
 
   it('separates a four-digit count with a non-breaking space', () => {
     expect(groupedCount(1234)).toBe('1 234')
+  })
+})
+
+describe('aperture', () => {
+  it('says so rather than printing seconds while the window is still filling', () => {
+    expect(aperture(0)).toBe('over <1 min')
+    expect(aperture(45 * SECOND)).toBe('over <1 min')
+  })
+
+  it('floors, so a window never rounds itself up into a wider claim', () => {
+    expect(aperture(MINUTE)).toBe('over 1 min')
+    expect(aperture(90 * SECOND)).toBe('over 1 min')
+    expect(aperture(5 * MINUTE - SECOND)).toBe('over 4 min')
+    expect(aperture(5 * MINUTE)).toBe('over 5 min')
   })
 })
 
