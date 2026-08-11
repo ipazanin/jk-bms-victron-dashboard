@@ -131,8 +131,14 @@ const regionLabel = computed(() =>
   margin-bottom: 0.75rem;
 }
 
+/* --tap is the floor for every control on the page, and this one is a link in a header rather
+   than a button. Inline-flex gives it the height without moving the heading it sits beside. */
 .more {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  padding-inline: 0.25rem;
 }
 
 .empty {
