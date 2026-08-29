@@ -48,13 +48,11 @@ describe('VictronScanner decode lifecycle', () => {
   it('reports a decoded reading from the device holding the key', async () => {
     const readings: number[] = []
     const errors: Error[] = []
-    let foreignDeviceCount = 0
+    const rejections: string[] = []
     const decryptSpy = vi.spyOn(crypto.subtle, 'decrypt')
     const scanner = new VictronScanner({
       onReading: (reading) => readings.push(reading.pvPower ?? -1),
-      onForeignDevice: () => {
-        foreignDeviceCount += 1
-      },
+      onUnreadable: (rejection) => rejections.push(rejection),
       onError: (error) => errors.push(error),
     })
     await scanner.start(KEY)
@@ -64,14 +62,14 @@ describe('VictronScanner decode lifecycle', () => {
     await vi.waitFor(() => expect(readings).toEqual([fixtures.victron.expected.pvPower]))
     // waitFor resolves on the first poll that sees a reading, which is a waypoint. stop() turns it
     // into an end state: the listener comes off and the processor drops any decode whose generation
-    // has moved on, so no second reading or foreign device can land for this advertisement.
+    // has moved on, so no second reading and no rejection can land for this advertisement.
     scanner.stop()
 
     // One advertisement in, one decrypt attempted. The payload reaches the decrypt synchronously,
     // so a listener left on twice fails here whether or not its second decode has resolved yet.
     expect(decryptSpy).toHaveBeenCalledTimes(1)
     expect(readings).toEqual([fixtures.victron.expected.pvPower])
-    expect(foreignDeviceCount).toBe(0)
+    expect(rejections).toEqual([])
     expect(errors).toEqual([])
   })
 

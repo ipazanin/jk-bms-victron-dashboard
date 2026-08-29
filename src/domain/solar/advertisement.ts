@@ -19,6 +19,7 @@ import {
   NOT_AVAILABLE_U9,
   RECORD_SOLAR_CHARGER,
 } from './types'
+import type { SolarAdvertisementOutcome } from './SolarAdvertisementOutcome'
 import type { AdvertisementHeader, SolarReading } from './types'
 
 const ADVERTISEMENT_PREFIX = 0x10
@@ -115,15 +116,21 @@ export function parseSolarRecord(plaintext: Uint8Array): SolarReading {
   }
 }
 
-/** Full path: raw manufacturer bytes to a reading. Returns null for other devices. */
+/**
+ * Full path: raw manufacturer bytes to a reading, or to the reason there is not one.
+ *
+ * The three rejections are checked in the order the bytes make them answerable, and each is
+ * reported under its own name. They look identical from above and they are not: one is the Instant
+ * Readout toggle, one is the wrong Victron product, and one is a key the controller has reissued.
+ */
 export async function decodeSolarAdvertisement(
   payload: Uint8Array,
   key: Uint8Array,
   cryptoKey: CryptoKey,
-): Promise<SolarReading | null> {
+): Promise<SolarAdvertisementOutcome> {
   const header = parseAdvertisement(payload)
-  if (!header) return null
-  if (header.recordType !== RECORD_SOLAR_CHARGER) return null
-  if (!matchesKey(header, key)) return null
-  return parseSolarRecord(await decryptRecord(header, cryptoKey))
+  if (!header) return { decoded: false, rejection: 'not-instant-readout' }
+  if (header.recordType !== RECORD_SOLAR_CHARGER) return { decoded: false, rejection: 'other-record' }
+  if (!matchesKey(header, key)) return { decoded: false, rejection: 'key-mismatch' }
+  return { decoded: true, reading: parseSolarRecord(await decryptRecord(header, cryptoKey)) }
 }

@@ -38,6 +38,49 @@ function installRadio(answers?: () => Promise<boolean>): EventTarget {
   return radio
 }
 
+/** A radio with both advertisement routes, which is what a platform verdict has to narrow. */
+function installListeningRadio(): void {
+  const radio = new EventTarget()
+  Object.assign(radio, {
+    requestDevice: async () => ({}),
+    getDevices: async () => [],
+    requestLEScan: async () => ({}),
+  })
+  Object.defineProperty(navigator, 'bluetooth', { configurable: true, value: radio })
+  Object.defineProperty(globalThis, 'BluetoothDevice', {
+    configurable: true,
+    value: class {
+      watchAdvertisements(): Promise<void> {
+        return Promise.resolve()
+      }
+    },
+  })
+}
+
+/**
+ * What Chromium says about the machine it is running on, for the length of one case.
+ *
+ * `platform` is left reading Linux throughout on purpose: it is what Chrome reports on Android and
+ * on ChromeOS as well as on a Linux desktop, so a probe that reached for it first would be wrong
+ * about two of the three. Passing `null` for `reported` is the older build with no `userAgentData`
+ * at all, which is the only case where the deprecated string is consulted.
+ */
+function onPlatform(reported: string | null, agent: string, run: () => void): void {
+  const navigatorWas = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const claimed: Record<string, unknown> = {
+    platform: 'Linux x86_64',
+    userAgent: agent,
+    bluetooth: navigator.bluetooth,
+  }
+  if (reported !== null) claimed.userAgentData = { platform: reported }
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: claimed })
+  try {
+    run()
+  } finally {
+    if (navigatorWas) Object.defineProperty(globalThis, 'navigator', navigatorWas)
+  }
+}
+
 function onAHostWithoutNavigator(run: () => void): void {
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: undefined })
   try {
@@ -65,6 +108,77 @@ describe('what the browser says it can do', () => {
 
   it('reports nothing available on a host with no radio', () => {
     expect(browserBleEnvironment().capabilities.hasBluetooth).toBe(false)
+  })
+})
+
+/**
+ * Linux is the one platform where feature detection lies. Both advertisement APIs are there, both
+ * resolve, and the observer underneath never fires — so the honest answer has to come from the
+ * platform rather than from the presence of the calls, or the page offers a control that can never
+ * do anything.
+ */
+describe('what the platform says about listening for a controller', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(globalThis, 'BluetoothDevice')
+  })
+
+  it('offers no solar on Linux, however much of the API is present', () => {
+    installListeningRadio()
+
+    onPlatform('Linux', 'Mozilla/5.0 (X11; Linux x86_64) Chrome/141.0.0.0', () => {
+      const capabilities = detectCapabilities()
+
+      expect(capabilities.canScan).toBe(true)
+      expect(capabilities.canWatchAdvertisements).toBe(true)
+      expect(capabilities.platformDeliversAdvertisements).toBe(false)
+      expect(capabilities.canListenSolar).toBe(false)
+      // The pack is a GATT connection and has nothing to do with any of this.
+      expect(capabilities.canConnect).toBe(true)
+    })
+  })
+
+  it('offers solar on macOS, where the watch route delivers and the scan does not', () => {
+    installListeningRadio()
+
+    onPlatform('macOS', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/141.0.0.0', () => {
+      const capabilities = detectCapabilities()
+
+      expect(capabilities.platformDeliversAdvertisements).toBe(true)
+      expect(capabilities.canListenSolar).toBe(true)
+      expect(capabilities.scanKnownSilent).toBe(true)
+    })
+  })
+
+  it('offers solar on Android, whose navigator.platform says Linux', () => {
+    installListeningRadio()
+
+    // The word Linux reaches the deprecated fallback from a phone that reads advertisements
+    // perfectly well, so believing it there would take the feature off the owner's own handset.
+    onPlatform('Android', 'Mozilla/5.0 (Linux; Android 15; SM-S926B) Chrome/141.0.0.0', () => {
+      const capabilities = detectCapabilities()
+
+      expect(capabilities.platformDeliversAdvertisements).toBe(true)
+      expect(capabilities.canListenSolar).toBe(true)
+      expect(capabilities.scanKnownSilent).toBe(false)
+    })
+  })
+
+  it('believes the deprecated platform string only once Android and ChromeOS are ruled out', () => {
+    installListeningRadio()
+    const delivers: Record<string, boolean> = {}
+    const agents: Record<string, string> = {
+      linux: 'Mozilla/5.0 (X11; Linux x86_64) Chrome/141.0.0.0',
+      android: 'Mozilla/5.0 (Linux; Android 15; SM-S926B) Chrome/141.0.0.0',
+      chromeos: 'Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) Chrome/141.0.0.0',
+    }
+
+    for (const [host, agent] of Object.entries(agents)) {
+      onPlatform(null, agent, () => {
+        delivers[host] = detectCapabilities().platformDeliversAdvertisements
+      })
+    }
+
+    expect(delivers).toEqual({ linux: false, android: true, chromeos: true })
   })
 })
 

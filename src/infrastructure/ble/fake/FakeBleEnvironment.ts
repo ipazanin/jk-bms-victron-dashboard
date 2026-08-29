@@ -2,15 +2,15 @@
  * What the app is told this browser can do, and whether it is told the radio is on.
  *
  * Every disabled button, every requirements row and two whole halves of the Connect page are
- * decided by these nine booleans and one tri-state, and on a real machine most of them are facts
+ * decided by these ten booleans and one tri-state, and on a real machine most of them are facts
  * about the machine: a browser without the experimental flag reports no scan whatever is running
- * inside it. So the fake forces the seven that describe a Bluetooth radio and leaves the two that
- * describe the host — a secure context and a crypto implementation — as they really are.
+ * inside it. So the fake forces the eight that describe a Bluetooth radio and the platform it runs
+ * on, and leaves the two that describe the host — a secure context and a crypto implementation — as
+ * they really are.
  *
  * The overrides are kept as a partial of the real capability type rather than as a shorter profile
- * of the interesting flags. All nine stay reachable for free that way, including the three that a
- * fake radio makes inert, which is what stops a later reader adding a second control for one of
- * them.
+ * of the interesting flags. All ten stay reachable for free that way, including the ones a fake
+ * radio makes inert, which is what stops a later reader adding a second control for one of them.
  *
  * They are persisted because they cannot be applied in place: the capability set is read once when
  * telemetry is built and handed to the templates as a plain object, so a change that rewrote it
@@ -37,6 +37,7 @@ const EVERY_ROUTE_WORKS: Partial<BleCapabilities> = {
   canScan: true,
   canWatchAdvertisements: true,
   scanKnownSilent: false,
+  platformDeliversAdvertisements: true,
   canListenSolar: true,
 }
 
@@ -48,6 +49,7 @@ const CAPABILITY_NAMES: readonly (keyof BleCapabilities)[] = [
   'canScan',
   'canWatchAdvertisements',
   'scanKnownSilent',
+  'platformDeliversAdvertisements',
   'canListenSolar',
   'hasSubtleCrypto',
 ]

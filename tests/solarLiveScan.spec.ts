@@ -21,18 +21,20 @@ interface FakeRadio {
   readonly target: EventTarget
   readonly requestLEScan: ReturnType<typeof vi.fn>
   readonly requestDevice: ReturnType<typeof vi.fn>
+  readonly getDevices: ReturnType<typeof vi.fn>
 }
 
 function installRadio(routes: { scan: boolean; watch: boolean }): FakeRadio {
   const target = new EventTarget()
   const requestLEScan = vi.fn(async () => ({ active: true, stop: () => undefined }))
   const device = new EventTarget()
-  Object.assign(device, { watchAdvertisements: vi.fn(async () => undefined) })
+  Object.assign(device, { id: 'victron-1', name: 'SmartSolar HQ', watchAdvertisements: vi.fn(async () => undefined) })
   const requestDevice = vi.fn(async () => device)
+  const getDevices = vi.fn(async () => [device])
 
   if (routes.scan) Object.assign(target, { requestLEScan })
   if (routes.watch) {
-    Object.assign(target, { requestDevice })
+    Object.assign(target, { requestDevice, getDevices })
     Object.defineProperty(globalThis, 'BluetoothDevice', {
       configurable: true,
       value: class {
@@ -44,7 +46,7 @@ function installRadio(routes: { scan: boolean; watch: boolean }): FakeRadio {
   }
   Object.defineProperty(navigator, 'bluetooth', { configurable: true, value: target })
 
-  return { target, requestLEScan, requestDevice }
+  return { target, requestLEScan, requestDevice, getDevices }
 }
 
 beforeEach(() => {
@@ -110,6 +112,67 @@ describe('which radio SolarLiveScan reaches for', () => {
 
     expect(radio.requestLEScan).toHaveBeenCalledTimes(1)
     expect(radio.requestDevice).not.toHaveBeenCalled()
+    scan.stop()
+  })
+})
+
+describe('coming back up without a press', () => {
+  it('resumes the remembered controller on the watch route, raising no chooser', async () => {
+    pretendMacos()
+    const radio = installRadio({ scan: true, watch: true })
+    const scan = new SolarLiveScan()
+
+    expect(scan.canResume('victron-1')).toBe(true)
+    await scan.resume(KEY, 'victron-1')
+
+    expect(radio.getDevices).toHaveBeenCalledTimes(1)
+    expect(radio.requestDevice).not.toHaveBeenCalled()
+    expect(radio.requestLEScan).not.toHaveBeenCalled()
+    expect(scan.scanning).toBe(true)
+    scan.stop()
+  })
+
+  it('refuses to resume where the browser has only its own scan, which needs the prompt', async () => {
+    const radio = installRadio({ scan: true, watch: false })
+    const scan = new SolarLiveScan()
+
+    expect(scan.canResume('victron-1')).toBe(false)
+    await expect(scan.resume(KEY, 'victron-1')).rejects.toThrow(/Connect solar/)
+
+    expect(radio.requestLEScan).not.toHaveBeenCalled()
+  })
+
+  it('keeps a proven scan verdict rather than taking the watch route for a free resume', async () => {
+    pretendMacos()
+    installRadio({ scan: true, watch: true })
+    localStorage.setItem('victron.liveTransport', 'scan')
+    const scan = new SolarLiveScan()
+
+    // This browser has heard an advertisement on its own scan, which outranks the platform default
+    // and outranks the convenience of a gesture-free start: the route is decided on the evidence,
+    // and only then asked whether it can resume.
+    expect(scan.canResume('victron-1')).toBe(false)
+  })
+
+  it('offers no resume when nothing has been remembered to resume to', () => {
+    pretendMacos()
+    installRadio({ scan: true, watch: true })
+    const scan = new SolarLiveScan()
+
+    expect(scan.canResume(null)).toBe(false)
+  })
+
+  it('reports the chosen device up through the relay, so the app can remember it', async () => {
+    pretendMacos()
+    installRadio({ scan: true, watch: true })
+    const watched: Array<[string, string | null]> = []
+    const scan = new SolarLiveScan({
+      onWatchedDevice: (deviceId, deviceName) => watched.push([deviceId, deviceName]),
+    })
+
+    await scan.start(KEY)
+
+    expect(watched).toEqual([['victron-1', 'SmartSolar HQ']])
     scan.stop()
   })
 })

@@ -84,6 +84,7 @@ const SOLAR_ROW = {
   packVoltage: null,
   rssi: 0,
   canListenSolar: true,
+  platformDeliversAdvertisements: true,
 }
 
 function solarRow(overrides: Partial<typeof SOLAR_ROW> = {}): string {
@@ -235,6 +236,17 @@ describe('what the solar panel says', () => {
     }
 
     expect(solarRow({ solarPhase: 'reading', solar: CONTROLLER, canListenSolar: false })).not.toContain(hint)
+  })
+
+  it('sends a Linux owner somewhere real instead of after a flag that cannot help', () => {
+    const text = solarRow({
+      solarPhase: 'absent',
+      canListenSolar: false,
+      platformDeliversAdvertisements: false,
+    })
+
+    expect(text).toContain('never delivers a Bluetooth advertisement to a page')
+    expect(text).not.toContain('enable-experimental-web-platform-features')
   })
 })
 

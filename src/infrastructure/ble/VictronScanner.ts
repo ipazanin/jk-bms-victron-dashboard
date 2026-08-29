@@ -6,8 +6,10 @@
  * the first one and the display freezes on a stale reading.
  *
  * Marinas are full of Victron hardware, all advertising under company id 0x02E1. The key-check
- * byte is what separates your controller from your neighbour's; the shared processor returns a
- * foreign-device signal for anything that fails it.
+ * byte is what separates your controller from your neighbour's, and anything that fails it is
+ * reported as a rejection heard from anything in range — which is what lets the page say a
+ * mismatch here is most likely the boat next door, where on the watch route it could only be
+ * this controller's own key.
  *
  * This is the scan route `SolarLiveScan` picks; it never wires itself. `requestLEScan` is
  * unreliable on some desktop platforms — on macOS Chrome it opens its prompt and then never
@@ -26,7 +28,7 @@ export class VictronScanner implements SolarScan {
   private readonly processor: SolarAdvertisementProcessor
 
   constructor(handlers: VictronHandlers = {}) {
-    this.processor = new SolarAdvertisementProcessor(handlers)
+    this.processor = new SolarAdvertisementProcessor(handlers, 'anything-in-range')
   }
 
   get scanning(): boolean {
@@ -57,6 +59,21 @@ export class VictronScanner implements SolarScan {
     // ahead of it. The listener goes on last, once the processor is ready to decode.
     await this.processor.begin(keyHex)
     navigator.bluetooth.addEventListener('advertisementreceived', this.handleAdvertisement)
+  }
+
+  /**
+   * Never. `requestLEScan` raises a permission prompt that needs transient activation, and it
+   * needs it however many times this browser has answered it before — there is no permitted-device
+   * list for a scan to be found on, because a scan is not about a device at all.
+   */
+  canResume(): boolean {
+    return false
+  }
+
+  async resume(): Promise<void> {
+    throw new Error(
+      'The browser’s own scan cannot be started without a press. Use Connect solar.',
+    )
   }
 
   stop(): void {

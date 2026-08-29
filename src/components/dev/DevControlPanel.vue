@@ -29,6 +29,7 @@ import { useHistoryBrowser } from '../../application/history/historyBrowser'
 import type { HistoryStore, HistoryUnavailableReason } from '../../application/history/port'
 import { loadAdvertisementKey } from '../../application/storage'
 import { useTelemetry } from '../../application/telemetry'
+import type { SolarAdvertisementSource } from '../../domain/solar/SolarAdvertisementSource'
 import type { ChargeState } from '../../domain/solar/types'
 import type { BleCapabilities } from '../../infrastructure/ble/capabilities'
 import { fakeRadioController } from '../../infrastructure/ble/fake/fakeDeps'
@@ -76,6 +77,11 @@ const CAPABILITY_ROWS: readonly CapabilityRow[] = [
     inert: 'playback bypasses the transport choice',
   },
   { name: 'scanKnownSilent', label: 'scanKnownSilent', inert: 'nothing on the fake path reads it' },
+  {
+    name: 'platformDeliversAdvertisements',
+    label: 'platformDeliversAdvertisements',
+    inert: 'playback hands the page bytes whatever the platform would do',
+  },
   { name: 'canListenSolar', label: 'canListenSolar' },
   { name: 'hasSubtleCrypto', label: 'hasSubtleCrypto' },
 ]
@@ -296,6 +302,32 @@ function reportPackFrameError(): void {
   controller.reportPackFrameError(new Error('A frame from the pack would not decode.'))
 }
 
+// ── going back to the pack without being asked ───────────────────────────────
+
+const packOutOfRange = ref(false)
+watch(packOutOfRange, (away) => controller.setPackInRange(!away))
+
+const pageShowing = ref(true)
+watch(pageShowing, (showing) => controller.showPage(showing))
+
+const pageFocused = ref(true)
+watch(pageFocused, (focused) => controller.focusPage(focused))
+
+/** The intent, the hunt and whatever has stopped it, read off the app rather than off the levers. */
+const rejoinLine = computed(() => {
+  const armed = telemetry.rejoinArmed.value ? 'armed' : 'disarmed'
+  const hunting = telemetry.rejoinSearching.value ? 'looking' : 'idle'
+  const blocker = telemetry.rejoinBlocker.value
+  return `pack ${armed} · ${hunting}${blocker === null ? '' : ` · ${blocker}`}`
+})
+
+const solarRejoinLine = computed(() => {
+  const hunting = telemetry.solarRejoinSearching.value ? 'looking' : 'idle'
+  const blocker = telemetry.solarRejoinBlocker.value
+  const remembered = telemetry.lastController.value === null ? 'nothing remembered' : 'remembered'
+  return `solar ${remembered} · ${hunting}${blocker === null ? '' : ` · ${blocker}`}`
+})
+
 // ── the controller's link ────────────────────────────────────────────────────
 
 const solarStarts: readonly AttemptOutcome[] = [
@@ -327,6 +359,16 @@ function startSolar(): void {
 function reportSolarError(): void {
   controller.reportSolarError(new Error('The advertisement would not decrypt.'))
 }
+
+/**
+ * Which radio the three rejections below are heard by. The fake plays one controller back, so the
+ * marina is only reachable from here — and it is the route Android takes, where every one of the
+ * three means something else and the page has a different sentence for it.
+ */
+const marinaIsWhatIsHeard = ref(false)
+const solarHeardFrom = computed<SolarAdvertisementSource>(() =>
+  marinaIsWhatIsHeard.value ? 'anything-in-range' : 'this-controller',
+)
 
 // ── what the radios report ───────────────────────────────────────────────────
 
@@ -703,6 +745,36 @@ function wipeArchive(): void {
           </div>
         </DevControlGroup>
 
+        <DevControlGroup
+          title="Going back on its own"
+          note="The page looks for the remembered pack whenever it is armed, and stays silent about a pack that is merely out of range. Behind another window it drops to the straight attach — no watch, once a minute — and comes back to the fast schedule the moment the page does. Reconnect now arms it and asks for an attempt this second; Disconnect above is the only thing that disarms it, and it survives a reload. Out of range parks every attempt until the deadline stands it down, so the plate on the Bus keeps saying it is looking."
+        >
+          <p class="readout state">{{ rejoinLine }}</p>
+          <p class="readout state">{{ solarRejoinLine }}</p>
+
+          <div class="actions">
+            <button type="button" @click="telemetry.rejoinNow()">Reconnect now</button>
+            <button type="button" @click="telemetry.disconnectBms()">
+              Disconnect — and stop looking
+            </button>
+          </div>
+
+          <label class="toggle">
+            <input v-model="packOutOfRange" type="checkbox" />
+            <span>The pack is out of range — every silent attempt parks until it is back</span>
+          </label>
+
+          <label class="toggle">
+            <input v-model="pageShowing" type="checkbox" />
+            <span>The tab is showing</span>
+          </label>
+
+          <label class="toggle">
+            <input v-model="pageFocused" type="checkbox" />
+            <span>The window holds focus — Chromium kills a watch without it, silently</span>
+          </label>
+        </DevControlGroup>
+
         <DevControlGroup title="Solar link">
           <label class="row">
             <span class="label">The next start</span>
@@ -727,10 +799,27 @@ function wipeArchive(): void {
             <button type="button" @click="telemetry.stopSolar()">Stop</button>
           </div>
 
+          <label class="toggle">
+            <input v-model="marinaIsWhatIsHeard" type="checkbox" />
+            <span>
+              The marina is what is being heard — the scan route, where any of it may be a
+              neighbour’s
+            </span>
+          </label>
+
           <div class="actions">
             <button type="button" @click="controller.emitSolarStale()">Advertisements stop</button>
-            <button type="button" @click="controller.emitForeignDevice()">
-              Another Victron device answers
+            <button type="button" @click="controller.emitUnreadable('key-mismatch', solarHeardFrom)">
+              A key the controller has reissued
+            </button>
+            <button
+              type="button"
+              @click="controller.emitUnreadable('not-instant-readout', solarHeardFrom)"
+            >
+              Instant Readout switched off
+            </button>
+            <button type="button" @click="controller.emitUnreadable('other-record', solarHeardFrom)">
+              Another kind of Victron product
             </button>
             <button type="button" @click="controller.emitSolarIdentity(DEMO_SOLAR_MODEL_ID)">
               Announce its model id

@@ -73,13 +73,11 @@ describe('BridgeSolarScan', () => {
   it('decodes a relayed advertisement into a reading', async () => {
     const readings: number[] = []
     const errors: Error[] = []
-    let foreignDeviceCount = 0
+    const rejections: string[] = []
     const decryptSpy = vi.spyOn(crypto.subtle, 'decrypt')
     const { scan, socket } = await startScan({
       onReading: (reading) => readings.push(reading.pvPower ?? -1),
-      onForeignDevice: () => {
-        foreignDeviceCount += 1
-      },
+      onUnreadable: (rejection) => rejections.push(rejection),
       onError: (error) => errors.push(error),
     })
 
@@ -88,19 +86,19 @@ describe('BridgeSolarScan', () => {
     await vi.waitFor(() => expect(readings).toEqual([fixtures.victron.expected.pvPower]))
     // waitFor resolves on the first poll that sees a reading, which is a waypoint. stop() turns it
     // into an end state: the processor ingests nothing more and drops any decode whose generation
-    // has moved on, so no second reading or foreign device can land for this frame after here.
+    // has moved on, so no second reading and no rejection can land for this frame after here.
     scan.stop()
 
     // One frame in, one decrypt attempted. The frame reaches the decrypt synchronously, so a frame
     // fed to the processor twice fails here whether or not its second decode has resolved yet.
     expect(decryptSpy).toHaveBeenCalledTimes(1)
     expect(readings).toEqual([fixtures.victron.expected.pvPower])
-    expect(foreignDeviceCount).toBe(0)
+    expect(rejections).toEqual([])
     expect(errors).toEqual([])
   })
 
-  it('reports a foreign device for a payload whose key-check byte does not match', async () => {
-    let foreignDeviceCount = 0
+  it('names the key when a payload’s check byte does not match, rather than blaming the marina', async () => {
+    const rejections: string[] = []
     let readingCount = 0
     const errors: Error[] = []
     const decryptSpy = vi.spyOn(crypto.subtle, 'decrypt')
@@ -108,9 +106,7 @@ describe('BridgeSolarScan', () => {
     // Byte 7 is the key-check byte; flip it so matchesKey fails before any decrypt.
     foreignPayload[7] ^= 0xff
     const { scan, socket } = await startScan({
-      onForeignDevice: () => {
-        foreignDeviceCount += 1
-      },
+      onUnreadable: (rejection) => rejections.push(rejection),
       onReading: () => {
         readingCount += 1
       },
@@ -119,7 +115,7 @@ describe('BridgeSolarScan', () => {
 
     socket.deliver(JSON.stringify({ mfg: toHex(foreignPayload), rssi: -55 }))
 
-    await vi.waitFor(() => expect(foreignDeviceCount).toBe(1))
+    await vi.waitFor(() => expect(rejections).toEqual(['key-mismatch']))
     scan.stop()
 
     // The negatives stay outside waitFor: it resolves the moment its callback stops throwing, so a
@@ -128,7 +124,7 @@ describe('BridgeSolarScan', () => {
     // claim about the end state.
     expect(readingCount).toBe(0)
     expect(decryptSpy).not.toHaveBeenCalled()
-    expect(foreignDeviceCount).toBe(1)
+    expect(rejections).toEqual(['key-mismatch'])
     expect(errors).toEqual([])
   })
 

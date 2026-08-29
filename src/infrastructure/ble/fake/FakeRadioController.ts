@@ -22,6 +22,8 @@
  */
 
 import type { BatterySnapshot, DeviceInfo } from '../../../domain/bms/types'
+import type { SolarAdvertisementRejection } from '../../../domain/solar/SolarAdvertisementRejection'
+import type { SolarAdvertisementSource } from '../../../domain/solar/SolarAdvertisementSource'
 import type { ChargeState, SolarReading } from '../../../domain/solar/types'
 import { forgetLastDevice, saveLastDevice } from '../../../application/lastDevice'
 import {
@@ -36,6 +38,7 @@ import type { BmsLink, JkBmsHandlers } from '../JkBmsClient'
 import type { SolarHistoryHandlers, SolarHistoryLink } from '../VictronHistoryClient'
 import type { SolarScan, VictronHandlers } from '../solarScan'
 import { FakeBleEnvironment } from './FakeBleEnvironment'
+import { FakePageActivity } from './FakePageActivity'
 import { PlaybackClock } from './PlaybackClock'
 import { fakeBmsRadio, fakeSolarHistoryRadio, fakeSolarRadio } from './fakeRadios'
 import type { FakeBmsRadio, FakeSolarHistoryRadio, FakeSolarRadio } from './fakeRadios'
@@ -276,6 +279,8 @@ export class FakeRadioController {
   private fixture: PlaybackFixture | null = null
   private recordingFailure: string | null = null
   readonly bleEnvironment: FakeBleEnvironment
+  /** Handed to telemetry as its `pageActivity`, so both rejoin loops read the levers below. */
+  readonly pageActivity: FakePageActivity
   private readonly pack: FakeBmsRadio
   private readonly solar: FakeSolarRadio
   private readonly solarHistory: FakeSolarHistoryRadio
@@ -320,6 +325,7 @@ export class FakeRadioController {
 
   constructor(recording: Promise<PlaybackFixture>) {
     this.bleEnvironment = new FakeBleEnvironment()
+    this.pageActivity = new FakePageActivity()
     this.pack = fakeBmsRadio(() => this.packLinkChanged())
     this.solar = fakeSolarRadio(() => this.syncPlayback())
     this.solarHistory = fakeSolarHistoryRadio()
@@ -512,6 +518,24 @@ export class FakeRadioController {
   }
 
   /**
+   * The boat drifting out of earshot and back, which is the case automatic rejoin exists for: out
+   * of range every silent attempt parks until its deadline stands it down, so the page keeps looking
+   * and says nothing, and putting the pack back settles whichever attempt is parked at that moment.
+   */
+  setPackInRange(inRange: boolean): void {
+    this.pack.setInRange(inRange)
+  }
+
+  /** The tab put behind another, and the window left showing but no longer focused. */
+  showPage(showing: boolean): void {
+    this.pageActivity.showTab(showing)
+  }
+
+  focusPage(focused: boolean): void {
+    this.pageActivity.holdFocus(focused)
+  }
+
+  /**
    * The pack goes away inside the next attempt and the attempt then fails. Two banners are in play
    * and only one may be left standing: the drop names the event, and the rejection names its
    * symptom.
@@ -571,9 +595,14 @@ export class FakeRadioController {
     this.solar.emitStale()
   }
 
-  /** Something else on Victron's company id answered, which is a marina and not a fault. */
-  emitForeignDevice(): void {
-    this.solar.emitForeignDevice()
+  /**
+   * An advertisement that reached the decoder and did not come out of it as a reading, as heard by
+   * a radio watching this one controller or by one listening to every Victron in range. The route
+   * is the caller's to say: the same rejection is a statement about this boat on the one and a
+   * guess about the marina on the other, and only one of them is reachable on real hardware here.
+   */
+  emitUnreadable(rejection: SolarAdvertisementRejection, heardFrom: SolarAdvertisementSource): void {
+    this.solar.emitUnreadable(rejection, heardFrom)
   }
 
   /** The model id, which is the whole of what a controller we never connect to says about itself. */

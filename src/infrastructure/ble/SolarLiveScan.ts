@@ -9,9 +9,14 @@
  * no chooser can be raised inside the failing press; the verdict is remembered and applied to the
  * next one, and the user reads a sentence in the solar banner telling them to press again.
  *
- * The flag is self-correcting in the other direction too: any reading or foreign device that ever
- * lands on the scan path clears it, so an Android user whose controller merely happened to be
- * asleep is not pushed onto the chooser for good.
+ * The flag is self-correcting in the other direction too: any advertisement at all that lands on
+ * the scan path clears it — one that would not decode included, because hearing a neighbour still
+ * proves the scan delivers — so an Android user whose controller merely happened to be asleep is
+ * not pushed onto the chooser for good.
+ *
+ * A resume goes through the same choice. Only the watch can come up without a gesture, but a
+ * browser that has proven its own scan works keeps it: the route is decided by the evidence and
+ * then asked whether it can resume, never the other way round.
  */
 
 import { loadSolarLiveTransport, saveSolarLiveTransport } from '../../application/storage'
@@ -45,15 +50,17 @@ export class SolarLiveScan implements SolarScan {
         this.noteRadioHeard()
         this.handlers.onReading?.(reading, rssi)
       },
-      onForeignDevice: () => {
+      onUnreadable: (rejection, heardFrom) => {
         this.noteRadioHeard()
-        this.handlers.onForeignDevice?.()
+        this.handlers.onUnreadable?.(rejection, heardFrom)
       },
       onStale: () => {
         this.noteSilence()
         this.handlers.onStale?.()
       },
       onIdentity: (modelId) => this.handlers.onIdentity?.(modelId),
+      onWatchedDevice: (deviceId, deviceName) =>
+        this.handlers.onWatchedDevice?.(deviceId, deviceName),
       onError: (error) => this.handlers.onError?.(error),
     }
   }
@@ -62,24 +69,51 @@ export class SolarLiveScan implements SolarScan {
     return this.active?.scanning === true
   }
 
-  /**
-   * Deliberately not async. Everything ahead of the child's own `start` is synchronous, so the
-   * click's transient activation reaches `requestDevice` intact.
-   */
+  /** Deliberately not async, for the reason `reachForRadio` gives. */
   start(keyHex: string): Promise<void> {
-    this.stop()
-    this.heardAnything = false
-    this.activeTransport = this.chooseTransport()
-    this.active =
-      this.activeTransport === 'watch'
-        ? new SolarWatchScanner(this.relay)
-        : new VictronScanner(this.relay)
-    return this.active.start(keyHex)
+    return this.reachForRadio().start(keyHex)
+  }
+
+  /**
+   * Whether the route this browser would take can come up on its own.
+   *
+   * The verdict outranks the ability to resume, which is why this asks the same question `start`
+   * does rather than looking for any route that could. A browser whose own scan has been proven to
+   * work is not moved onto the chooser's transport by the back door — the price of a gesture-free
+   * link is not worth paying in a route this browser has evidence against.
+   */
+  canResume(rememberedDeviceId: string | null): boolean {
+    return this.transportFor(this.chooseTransport()).canResume(rememberedDeviceId)
+  }
+
+  resume(keyHex: string, rememberedDeviceId: string | null): Promise<void> {
+    return this.reachForRadio().resume(keyHex, rememberedDeviceId)
   }
 
   stop(): void {
     this.active?.stop()
     this.active = null
+  }
+
+  /**
+   * Picks the route afresh, hands back the radio for it and holds it as the active one. Everything
+   * ahead of the child's own call is synchronous, so a press's transient activation reaches
+   * `requestDevice` intact.
+   */
+  private reachForRadio(): SolarScan {
+    this.stop()
+    this.heardAnything = false
+    this.activeTransport = this.chooseTransport()
+    this.active = this.transportFor(this.activeTransport)
+    return this.active
+  }
+
+  /**
+   * A radio of the named kind. `canResume` asks one of these without ever starting it, which costs
+   * nothing: a scanner touches no radio until it is told to.
+   */
+  private transportFor(transport: SolarLiveTransport): SolarScan {
+    return transport === 'watch' ? new SolarWatchScanner(this.relay) : new VictronScanner(this.relay)
   }
 
   private chooseTransport(): SolarLiveTransport {

@@ -11,6 +11,7 @@ import {
   parseAdvertisementKey,
   parseSolarRecord,
 } from '../src/domain/solar/advertisement'
+import type { SolarReading } from '../src/domain/solar/types'
 
 const payload = hexToBytes(fixtures.victron.payloadHex)
 const key = parseAdvertisementKey(fixtures.victron.advertisementKey)
@@ -71,8 +72,10 @@ describe('decrypt and parse', () => {
 
   it('decodes every field to the expected value', async () => {
     const cryptoKey = await importAdvertisementKey(key)
-    const reading = (await decodeSolarAdvertisement(payload, key, cryptoKey))!
+    const outcome = await decodeSolarAdvertisement(payload, key, cryptoKey)
 
+    expect(outcome.decoded).toBe(true)
+    const reading = (outcome as { reading: SolarReading }).reading
     expect(reading.chargeState).toBe(expected.chargeState)
     expect(reading.chargerError).toBe(expected.chargerError)
     expect(reading.batteryVoltage).toBeCloseTo(expected.batteryVoltage, 3)
@@ -81,11 +84,49 @@ describe('decrypt and parse', () => {
     expect(reading.pvPower).toBe(expected.pvPower)
     expect(reading.loadCurrent).toBeNull()
   })
+})
 
-  it('returns null rather than garbage when decoded with the wrong key', async () => {
-    const wrongKey = parseAdvertisementKey('ff'.repeat(16))
-    const cryptoKey = await importAdvertisementKey(wrongKey)
-    expect(await decodeSolarAdvertisement(payload, wrongKey, cryptoKey)).toBeNull()
+/**
+ * Three unrelated things end the decode early, and an afternoon was spent on the boat because the
+ * page reported all of them with one sentence about neighbouring devices. Each one points at a
+ * different control in VictronConnect, so each has to arrive under its own name.
+ */
+describe('why an advertisement did not become a reading', () => {
+  it('names bytes that are not an Instant Readout frame at all', async () => {
+    const cryptoKey = await importAdvertisementKey(key)
+    const otherRecord = payload.slice()
+    otherRecord[0] = 0x11
+
+    expect(await decodeSolarAdvertisement(otherRecord, key, cryptoKey)).toEqual({
+      decoded: false,
+      rejection: 'not-instant-readout',
+    })
+  })
+
+  it('names a Victron record of some other kind', async () => {
+    const cryptoKey = await importAdvertisementKey(key)
+    // A battery monitor broadcasts Instant Readout on the same company id, under record type 0x02.
+    const batteryMonitor = payload.slice()
+    batteryMonitor[4] = 0x02
+
+    expect(await decodeSolarAdvertisement(batteryMonitor, key, cryptoKey)).toEqual({
+      decoded: false,
+      rejection: 'other-record',
+    })
+  })
+
+  it('names a key that does not match, which is the whole of what a check byte can say', async () => {
+    // The frame the owner's controller was actually broadcasting: a perfectly good solar record
+    // whose check byte was 0x45 while the stored key began 0xfb, because Victron reissues the key
+    // whenever Instant Readout is switched off and on.
+    const fromTheBoat = hexToBytes('100275a001388e458d3ffbcecbf57b554b0c7e25')
+    const staleKey = parseAdvertisementKey('fb'.repeat(16))
+    const cryptoKey = await importAdvertisementKey(staleKey)
+
+    expect(await decodeSolarAdvertisement(fromTheBoat, staleKey, cryptoKey)).toEqual({
+      decoded: false,
+      rejection: 'key-mismatch',
+    })
   })
 })
 

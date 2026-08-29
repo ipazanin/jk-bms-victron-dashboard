@@ -5,6 +5,7 @@ import AnnunciatorStrip from '../AnnunciatorStrip.vue'
 import BreakerPanel from '../BreakerPanel.vue'
 import CellLadder from '../CellLadder.vue'
 import EnergyFlow from '../bus/EnergyFlow.vue'
+import PackLinkPlate from '../bus/PackLinkPlate.vue'
 import RecordingPlate from '../RecordingPlate.vue'
 import RememberedBanner from '../RememberedBanner.vue'
 import ShuntAmmeter from '../ShuntAmmeter.vue'
@@ -44,6 +45,11 @@ const {
   rememberedAt,
   rememberedStatus,
   recording,
+  lastDevice,
+  rejoinArmed,
+  rejoinSearching,
+  rejoinBlocker,
+  rejoinPackName,
 } = telemetry
 
 const log = useHistoryBrowser()
@@ -68,6 +74,21 @@ const engaged = computed(() => packPhase.value !== 'absent' || solarPhase.value 
 const stale = computed(() => source.value === 'remembered' || source.value === 'history')
 
 const sessionCount = computed(() => log.archive.value.sessions)
+
+/**
+ * Whether the pack link is worth a word on this page.
+ *
+ * Only ever about a pack this browser has already met: a first visit has nothing to reconnect to
+ * and the landing below says what to do instead. A live link says its piece through the annunciator,
+ * and a browsed session is not a claim about any radio, so neither gets a plate. An attempt in
+ * flight does — that is the search, and it is the state this page had no way of showing at all.
+ */
+const packLinkWorthSaying = computed(
+  () =>
+    source.value !== 'history' &&
+    lastDevice.value !== null &&
+    (rejoinSearching.value || bmsState.value === 'idle'),
+)
 
 /** The configured series count wins; the domain falls back to the cell frame's own when it is absent. */
 const packStored = computed(() => {
@@ -140,6 +161,19 @@ const recordedSummary = computed(() => {
   </AnnunciatorStrip>
 
   <main>
+    <!-- First in the stack, because it is about whether the figures below it are being fed at all.
+         The tap arms automatic rejoin again and asks for an attempt now; it stays quiet either way,
+         and what it did shows up in this same plate rather than as a banner. -->
+    <PackLinkPlate
+      v-if="packLinkWorthSaying"
+      class="card"
+      :pack-name="rejoinPackName"
+      :armed="rejoinArmed"
+      :searching="rejoinSearching"
+      :blocker="rejoinBlocker"
+      @rejoin="telemetry.rejoinNow"
+    />
+
     <EnergyFlow
       v-if="engaged"
       class="card"
@@ -200,6 +234,7 @@ const recordedSummary = computed(() => {
       :pack-voltage="battery?.packVoltage ?? null"
       :rssi="solarRssi"
       :can-listen-solar="capabilities.canListenSolar"
+      :platform-delivers-advertisements="capabilities.platformDeliversAdvertisements"
     />
 
     <!-- The live trend sits late: a strip mounting when a series first arrives grows the panel,

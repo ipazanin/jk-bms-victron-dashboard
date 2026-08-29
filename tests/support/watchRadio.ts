@@ -25,10 +25,17 @@ const FOREIGN_COMPANY_ID = 0x004c
 
 export interface FakeWatchRadio {
   readonly requestDevice: MockInstance<(options: RequestDeviceOptions) => Promise<BluetoothDevice>>
+  /** What this origin is permitted to talk to, which is what a chooser-free resume goes through. */
+  readonly getDevices: MockInstance<() => Promise<BluetoothDevice[]>>
   readonly device: BluetoothDevice
   readonly watchCalls: readonly AbortSignal[]
   deliver(rssi?: number): void
   deliverForeign(): void
+  /**
+   * Drops the device off the permitted list, which is what a grant the user has revoked looks like
+   * — the browser still lists devices, this one is simply not among them.
+   */
+  revokePermission(): void
   install(): void
   uninstall(): void
 }
@@ -57,12 +64,15 @@ export function fakeWatchRadio(payload: Uint8Array): FakeWatchRadio {
   })
   const device = target as unknown as BluetoothDevice
   const requestDevice = vi.fn(async () => device)
+  let permitted = true
+  const getDevices = vi.fn(async () => (permitted ? [device] : []))
 
   const listening = (): boolean =>
     watchCalls.length > 0 && watchCalls.some((signal) => !signal.aborted)
 
   return {
     requestDevice: requestDevice as unknown as FakeWatchRadio['requestDevice'],
+    getDevices: getDevices as unknown as FakeWatchRadio['getDevices'],
     device,
     watchCalls,
     deliver(rssi = -55) {
@@ -73,8 +83,14 @@ export function fakeWatchRadio(payload: Uint8Array): FakeWatchRadio {
       if (!listening()) return
       target.dispatchEvent(advertisementEvent(payload, FOREIGN_COMPANY_ID, -70))
     },
+    revokePermission() {
+      permitted = false
+    },
     install() {
-      Object.defineProperty(navigator, 'bluetooth', { configurable: true, value: { requestDevice } })
+      Object.defineProperty(navigator, 'bluetooth', {
+        configurable: true,
+        value: { requestDevice, getDevices },
+      })
       Object.defineProperty(globalThis, 'BluetoothDevice', {
         configurable: true,
         value: class {

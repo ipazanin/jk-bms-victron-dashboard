@@ -175,6 +175,8 @@ export type SessionEndReason =
   | 'stalled'
   /** A different pack serial appeared on an open session. */
   | 'device-changed'
+  /** The owner looked away, the radios went back with them, and neither came back in time. */
+  | 'page-away'
   /** The archive stopped taking this session's rows, and a usable one came back to seal it with. */
   | 'archive-lost'
   /** Found open with a stale heartbeat on a later load. */

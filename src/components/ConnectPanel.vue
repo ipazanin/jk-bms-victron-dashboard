@@ -3,6 +3,11 @@ import { computed, ref } from 'vue'
 
 import RequirementsList from './RequirementsList.vue'
 import type { BleCapabilities } from '../infrastructure/ble/capabilities'
+import { rejoinBlockerNote } from '../application/rejoinBlockerNote'
+import type { RejoinBlocker } from '../application/RejoinBlocker'
+import { solarRejectionNote } from '../application/solarRejectionNote'
+import type { SolarAdvertisementRejection } from '../domain/solar/SolarAdvertisementRejection'
+import type { SolarAdvertisementSource } from '../domain/solar/SolarAdvertisementSource'
 import { hashOf } from '../application/route'
 import type { LinkState, Source } from '../application/telemetry'
 
@@ -12,14 +17,28 @@ const props = defineProps<{
   source: Source
   bmsState: LinkState
   solarState: LinkState
-  bmsError: string | null
+  /** The pack banner as the application layer says it should read, silences already applied. */
+  bmsBanner: string | null
   solarError: string | null
-  foreignDeviceSeen: boolean
+  /** Why the last advertisement did not decode, or null while nothing has failed to. */
+  solarRejection: SolarAdvertisementRejection | null
+  /** Which radio heard it, which is what decides whether the reason is about this boat at all. */
+  solarRejectionSource: SolarAdvertisementSource
   initialKey: string
   /** True when a last pack is remembered and this browser can rejoin it without the chooser. */
   canReconnect: boolean
   /** The remembered pack's name for the reconnect button, or null when it has none. */
   reconnectName: string | null
+  /** Whether this browser goes back to the pack on its own, as the owner last answered it. */
+  rejoinArmed: boolean
+  /** Looking for the pack right now, backoff waits included. Never an error — it is working. */
+  rejoinSearching: boolean
+  /** The one thing standing in the way that the owner could act on, or null while none is. */
+  rejoinBlocker: RejoinBlocker | null
+  /** The controller's side of the same two, and the name to call it by. */
+  solarRejoinSearching: boolean
+  solarRejoinBlocker: RejoinBlocker | null
+  controllerName: string | null
 }>()
 
 const emit = defineEmits<{
@@ -44,6 +63,34 @@ const logHref = hashOf({ name: 'log' })
  */
 const normalisedKey = computed(() => advertisementKey.value.trim().toLowerCase().replace(/\s+/g, ''))
 const keyLooksComplete = computed(() => /^[0-9a-f]{32}$/.test(normalisedKey.value))
+
+/**
+ * What each radio is called in a sentence about it. A pack that advertised no name still has to be
+ * referred to as something, and "the pack" is the honest stand-in — inventing an identifier out of
+ * the opaque browser id would name a thing the owner has never seen.
+ */
+const packSubject = computed(() => props.reconnectName ?? 'the pack')
+const controllerSubject = computed(() => props.controllerName ?? 'the controller')
+
+const packBlockerNote = computed(() =>
+  props.rejoinBlocker === null ? null : rejoinBlockerNote(props.rejoinBlocker, packSubject.value),
+)
+const solarBlockerNote = computed(() =>
+  props.solarRejoinBlocker === null
+    ? null
+    : rejoinBlockerNote(props.solarRejoinBlocker, controllerSubject.value),
+)
+const solarRejectionSentence = computed(() =>
+  props.solarRejection === null
+    ? null
+    : solarRejectionNote(props.solarRejection, props.solarRejectionSource),
+)
+/**
+ * A rejection is only the owner's to act on when the radio that heard it was following their own
+ * controller. Heard off the marina it is news about somebody else's equipment, and the error slot
+ * is reserved for what the owner has to do something about.
+ */
+const solarRejectionIsTheirs = computed(() => props.solarRejectionSource === 'this-controller')
 </script>
 
 <template>
@@ -61,9 +108,13 @@ const keyLooksComplete = computed(() => /^[0-9a-f]{32}$/.test(normalisedKey.valu
       <button v-if="bmsState === 'live'" type="button" @click="emit('disconnectBms')">
         Disconnect BMS
       </button>
-      <button v-else-if="bmsState === 'connecting'" type="button" class="primary" disabled>
-        Connecting…
-      </button>
+      <!-- An attempt in flight always has the way out beside it. A reconnect waits on the pack
+           being heard from, which on a boat can be minutes, and a row that offered nothing but a
+           disabled button would leave a page reload as the owner's only move. -->
+      <template v-else-if="bmsState === 'connecting'">
+        <button type="button" class="primary" disabled>Connecting…</button>
+        <button type="button" @click="emit('disconnectBms')">Cancel</button>
+      </template>
       <template v-else>
         <!-- The remembered pack, rejoined without the chooser. Primary when it exists; the chooser
              is then the escape hatch for connecting a different pack. -->
@@ -91,9 +142,43 @@ const keyLooksComplete = computed(() => /^[0-9a-f]{32}$/.test(normalisedKey.valu
       <a v-if="source !== 'history'" class="button" :href="logHref">Browse the log</a>
     </div>
 
-    <p v-if="canReconnect && bmsState === 'idle'" class="hint">
-      Reconnect rejoins the pack you used last without the chooser. It also tries once on its own
-      each time this page loads.
+    <!-- What Disconnect actually does, said next to the button rather than discovered afterwards.
+         It is the one control on this page that changes what the page will do tomorrow, and it is
+         one answer about the boat rather than about a radio: the controller stops coming back too,
+         so a page naming only the pack would be understating the press. -->
+    <p v-if="bmsState === 'live'" class="hint">
+      Disconnect drops the link <em>and</em> stops this page going back to {{ packSubject }} on its
+      own<template v-if="controllerName !== null">, {{ controllerSubject }} with it</template>. It
+      stays off until you connect again.
+    </p>
+
+    <!-- A blocker is the page saying it has stopped; the promise below is the page saying it has
+         not. Whichever is true, only one of them may be on screen, so the promise yields to it. -->
+    <template v-if="canReconnect && bmsState !== 'live'">
+      <p v-if="rejoinArmed && rejoinBlocker === null" class="hint">
+        Reconnect rejoins the pack you used last without the chooser. It is only ever a shortcut:
+        while this page is in front of you it keeps looking for {{ packSubject }} by itself, and
+        goes live the moment the pack answers.
+      </p>
+      <p v-else-if="!rejoinArmed" class="hint">
+        You pressed Disconnect, so this page has stopped looking for {{ packSubject }}. Connecting
+        again is what turns that back on.
+      </p>
+    </template>
+
+    <!-- Quiet, and never the error slot: a pack behind a bulkhead or halfway up the pontoon is the
+         ordinary case on a boat, and the honest thing to show for it is that the search is running. -->
+    <p v-if="rejoinSearching" class="searching">
+      <span class="pulse" aria-hidden="true" />
+      Looking for {{ packSubject }}…
+    </p>
+
+    <p v-if="packBlockerNote" class="hint acting">{{ packBlockerNote }}</p>
+    <!-- A browser with no list of allowed devices is never promised anything automatic, whether or
+         not a pack has ever been connected on it. -->
+    <p v-else-if="capabilities.canConnect && !capabilities.canReconnect" class="hint acting">
+      This browser cannot list the devices you have already allowed, so every connection starts from
+      the chooser and nothing here happens on its own.
     </p>
 
     <label v-if="capabilities.canConnect && bmsState !== 'live'" class="checkbox">
@@ -101,7 +186,7 @@ const keyLooksComplete = computed(() => /^[0-9a-f]{32}$/.test(normalisedKey.valu
       Show every nearby device — use this if your BMS doesn’t appear
     </label>
 
-    <p v-if="bmsError" class="error">{{ bmsError }}</p>
+    <p v-if="bmsBanner" class="error">{{ bmsBanner }}</p>
 
     <div class="solar">
       <h3 class="plate">Solar controller</h3>
@@ -152,17 +237,54 @@ const keyLooksComplete = computed(() => /^[0-9a-f]{32}$/.test(normalisedKey.valu
           </button>
         </div>
 
-        <p v-if="solarState === 'connecting'" class="hint">
+        <!-- Stop solar is the controller's Disconnect, and it forgets which controller this was —
+             otherwise the page would put the watch straight back up a second later. -->
+        <p v-if="solarState === 'listening' || solarState === 'live'" class="hint">
+          Stop solar ends the listening <em>and</em> forgets {{ controllerSubject }}, so the page
+          will not go back to it until you press Connect solar again.
+        </p>
+
+        <!-- The pack's pair, said about the controller. Disconnect disarms the one intent both
+             radios read, so a promise made without asking it would be a promise about the wrong
+             half of the boat. -->
+        <template v-if="solarState === 'idle' && controllerName !== null">
+          <p v-if="rejoinArmed && solarRejoinBlocker === null" class="hint">
+            Connect solar is a one-off. After it, this page puts the listening back up by itself
+            whenever it is in front of you — no chooser, no key to type again.
+          </p>
+          <p v-else-if="!rejoinArmed" class="hint">
+            You pressed Disconnect, so this page has stopped listening for
+            {{ controllerSubject }} by itself. Connect solar turns that back on, and the pack with
+            it.
+          </p>
+        </template>
+
+        <p v-if="solarRejoinSearching" class="searching">
+          <span class="pulse" aria-hidden="true" />
+          Listening again for {{ controllerSubject }}…
+        </p>
+
+        <p v-if="solarBlockerNote" class="hint acting">{{ solarBlockerNote }}</p>
+
+        <!-- Only ever true of a press: a watch this page put back up by itself raises no prompt at
+             all, and telling the owner to answer one that is not there is worse than silence. -->
+        <p v-if="solarState === 'connecting' && !solarRejoinSearching" class="hint">
           Your browser is asking about nearby Bluetooth devices. Allow the scan, or pick the
           controller from the list, to start listening; dismissing the prompt cancels.
         </p>
 
-        <p v-if="solarState === 'listening' && !foreignDeviceSeen" class="hint">
+        <p v-if="solarState === 'listening' && solarRejectionSentence === null" class="hint">
           Listening. Nothing has answered yet — the controller may be out of range.
         </p>
-        <p v-if="solarState === 'listening' && foreignDeviceSeen" class="error">
-          Receiving Victron broadcasts, but none match this key. They belong to other
-          devices nearby. Check the key against VictronConnect.
+        <!-- Which of the three reasons it was is decided in the domain, where the bytes are, and
+             whose broadcast it could have been by the transport, which is the only place that is
+             known. The panel prints the sentence they make between them, and files it as an error
+             only when the radio was following this boat's own controller. -->
+        <p
+          v-else-if="solarState === 'listening'"
+          :class="solarRejectionIsTheirs ? 'error' : 'hint'"
+        >
+          {{ solarRejectionSentence }}
         </p>
       </template>
 
@@ -295,6 +417,43 @@ input[type='text'] {
 
 .hint {
   color: var(--ink-muted);
+}
+
+/* Something the owner has to do about it — a chooser tap, a radio switched on. Full ink rather than
+   the error red: none of these is a fault, and painting them as one is what the boat asked us to
+   stop doing. */
+.hint.acting {
+  color: var(--ink);
+}
+
+/* The search running, which is work rather than a fault, so it wears the ordinary copy colour and
+   the annunciator's unassessed pulse instead of anything in the status palette. */
+.searching {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+  font-size: 0.875rem;
+  color: var(--ink-secondary);
+}
+
+.pulse {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--ink-muted);
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .error {

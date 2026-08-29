@@ -78,6 +78,8 @@ import type {
 } from '../../domain/history/types'
 import { SNAPSHOT_SCHEMA_VERSION } from '../../domain/schemaVersion'
 import type { SolarReading } from '../../domain/solar/types'
+import { browserSchedule } from '../schedule'
+import type { CancelScheduled, Schedule } from '../schedule'
 import type { Fault, FaultLevel } from '../severity'
 import { storageKey } from '../storageKey'
 import type {
@@ -99,6 +101,12 @@ export const CHECKPOINT_INTERVAL_MS = 10_000
  * 'stalled' whatever the link state says. Without it, a session opened by a stray frame during a
  * `connect()` that then threw would stay open forever — heartbeating, immune to recovery, and
  * protected from eviction by the very heartbeat that proves nothing is watching it.
+ *
+ * It is measured from the last observation and not from any link event, which is what makes it a
+ * guard rather than an ending: it is the answer for a session nobody is accounting for. A session
+ * somebody IS accounting for — one held open by `holdOpenForRejoin` while a rejoin is genuinely
+ * being pursued — is exempt, because a guard that fires while the owner of the session is still
+ * counting down to its real ending would beat that ending to it and call every gap 'stalled'.
  */
 export const SESSION_IDLE_TIMEOUT_MS = 120_000
 
@@ -142,6 +150,12 @@ export interface SessionRecorderOptions {
   readonly store: () => HistoryStore | null
   readonly clock?: RecorderClock
   readonly newId?: () => string
+  /**
+   * What the heartbeat waits on. The browser's own timer when it is left out, and the same
+   * scheduler the rest of the application waits on when a spec supplies one — the checkpoint tick
+   * and the idle sweep are behaviour, and behaviour nobody can drive is behaviour nobody can prove.
+   */
+  readonly schedule?: Schedule
   readonly onStateChange?: (state: RecorderState) => void
 }
 
@@ -190,6 +204,8 @@ export function endReasonPhrase(reason: SessionEndReason): string {
       return 'the BMS went quiet'
     case 'device-changed':
       return 'a different pack connected'
+    case 'page-away':
+      return 'the page was put away'
     case 'archive-lost':
       // Borrowed from the recording plate's own failure line, so a log this page could not write is
       // described one way wherever it is described. The plate does not show that line for this
@@ -275,6 +291,7 @@ export class SessionRecorder {
   private readonly resolveStore: () => HistoryStore | null
   private readonly clock: RecorderClock
   private readonly newId: () => string
+  private readonly schedule: Schedule
   private readonly onStateChange: ((state: RecorderState) => void) | null
   /** One per tab. A shared "current session" pointer across tabs is exactly what this avoids. */
   private readonly writerId: string
@@ -291,7 +308,13 @@ export class SessionRecorder {
   private archiveLost = false
   private published: RecorderState
   private chain: Promise<void> = Promise.resolve()
-  private ticker: ReturnType<typeof setInterval> | null = null
+  /** Undoes the heartbeat waiting to fire. Null whenever no session is open. */
+  private cancelHeartbeat: CancelScheduled | null = null
+  /**
+   * Whether somebody is accounting for this session's ending, which takes it out of the idle
+   * sweep for as long as that holds.
+   */
+  private heldForRejoin = false
   private disposed = false
 
   /** The tab's current knowledge of the two radios, used to seed the next session it opens. */
@@ -322,6 +345,7 @@ export class SessionRecorder {
     this.resolveStore = options.store
     this.clock = options.clock ?? browserClock()
     this.newId = options.newId ?? (() => crypto.randomUUID())
+    this.schedule = options.schedule ?? browserSchedule
     this.onStateChange = options.onStateChange ?? null
     this.writerId = this.newId()
     this.published = idleState()
@@ -546,6 +570,29 @@ export class SessionRecorder {
     this.flush(session)
   }
 
+  /**
+   * A rejoin is coming for a link that went away, and whoever armed it owns this session's ending.
+   *
+   * All it does is take the session out of the idle sweep; rows still land, the heartbeat still
+   * checkpoints, and nothing about the recording changes. The sweep and the window the caller is
+   * counting down are measured from different instants — one from the last row this session saw,
+   * the other from the drop that ended the stream — and a pack that goes quiet rather than dropping
+   * puts the best part of half a minute between the two. Left in, the guard would close the session
+   * under the caller and stamp 'stalled' on a gap whose real reason the caller was holding.
+   *
+   * The hold lasts as long as the pursuit and never outlives the session it was taken on. Whoever
+   * takes it owes the session an ending, which is the only thing that keeps the guard a guard.
+   */
+  holdOpenForRejoin(): void {
+    if (this.session === null) return
+    this.heldForRejoin = true
+  }
+
+  /** The pursuit is over, however it ended. The sweep is the session's guard again. */
+  releaseRejoinHold(): void {
+    this.heldForRejoin = false
+  }
+
   /** Push the buffered tails at the disk. Safe to call at any time and on no session at all. */
   checkpoint(): void {
     const session = this.session
@@ -599,6 +646,7 @@ export class SessionRecorder {
 
     this.session = null
     this.stopClock()
+    this.releaseRejoinHold()
     this.publish()
 
     this.enqueue(async () => {
@@ -635,6 +683,7 @@ export class SessionRecorder {
     this.checkpoint()
     this.disposed = true
     this.stopClock()
+    this.releaseRejoinHold()
     this.stopWatchingArchive?.()
     this.stopWatchingArchive = null
     this.watchedStore = null
@@ -780,6 +829,7 @@ export class SessionRecorder {
     if (this.session !== session) return
     this.session = null
     this.stopClock()
+    this.releaseRejoinHold()
     this.leaseRefusedMonotonic = this.clock.monotonic()
     this.leaseReleaseAnnounced = false
     this.publish()
@@ -796,6 +846,7 @@ export class SessionRecorder {
     this.continuesSessionId = session.id
     this.session = null
     this.stopClock()
+    this.releaseRejoinHold()
     this.publish()
   }
 
@@ -1322,15 +1373,31 @@ export class SessionRecorder {
     this.chain = this.chain.then(work).catch(() => undefined)
   }
 
+  /**
+   * One wait at a time, re-armed by the beat it just served, rather than a repeating timer: the
+   * seam the rest of this layer waits on is a single deferred run, and a heartbeat built out of it
+   * is driven by whatever drives the supervisors and the resume window.
+   */
   private startClock(): void {
-    if (this.ticker !== null || typeof setInterval !== 'function') return
-    this.ticker = setInterval(() => this.tick(), CHECKPOINT_INTERVAL_MS)
+    if (this.cancelHeartbeat !== null) return
+    this.armHeartbeat()
+  }
+
+  private armHeartbeat(): void {
+    this.cancelHeartbeat = this.schedule(() => {
+      this.cancelHeartbeat = null
+      this.tick()
+      // Only while there is still something to beat for, and through the guarded start so that a
+      // beat the tick itself armed is not doubled. `tick` is a route to `finish`, and a beat armed
+      // behind a session it just closed would outlive it.
+      if (this.session !== null && !this.disposed) this.startClock()
+    }, CHECKPOINT_INTERVAL_MS)
   }
 
   private stopClock(): void {
-    if (this.ticker === null) return
-    clearInterval(this.ticker)
-    this.ticker = null
+    if (this.cancelHeartbeat === null) return
+    this.cancelHeartbeat()
+    this.cancelHeartbeat = null
   }
 
   private tick(): void {
@@ -1341,7 +1408,8 @@ export class SessionRecorder {
     this.followArchive()
     const session = this.session
     if (session === null) return
-    if (this.clock.monotonic() - this.lastObservationMonotonic >= SESSION_IDLE_TIMEOUT_MS) {
+    const idleFor = this.clock.monotonic() - this.lastObservationMonotonic
+    if (!this.heldForRejoin && idleFor >= SESSION_IDLE_TIMEOUT_MS) {
       this.finish('stalled')
       return
     }

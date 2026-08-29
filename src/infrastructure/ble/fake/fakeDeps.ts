@@ -25,7 +25,12 @@ export function fakeRadioController(): FakeRadioController {
 
 export function fakeRadioDeps(): Pick<
   TelemetryDeps,
-  'createBmsLink' | 'createSolarScan' | 'createSolarHistoryLink' | 'bleEnvironment' | 'now'
+  | 'createBmsLink'
+  | 'createSolarScan'
+  | 'createSolarHistoryLink'
+  | 'bleEnvironment'
+  | 'pageActivity'
+  | 'now'
 > {
   const radios = fakeRadioController()
   return {
@@ -33,6 +38,9 @@ export function fakeRadioDeps(): Pick<
     createSolarScan: (handlers) => radios.createSolarScan(handlers),
     createSolarHistoryLink: (handlers) => radios.createSolarHistoryLink(handlers),
     bleEnvironment: radios.bleEnvironment,
+    // The page as the two rejoin loops are told to see it. It answers with the browser's own truth
+    // until a lever takes the page away, which is a state one screen cannot both cause and watch.
+    pageActivity: radios.pageActivity,
     now: () => radios.now(),
   }
 }

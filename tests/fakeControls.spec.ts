@@ -7,7 +7,7 @@ import type { App as MountedApp, Component } from 'vue'
 
 import { MOSFET_CRITICAL } from '../src/application/severity'
 import { loadAdvertisementKey } from '../src/application/storage'
-import { createTelemetry } from '../src/application/telemetry'
+import { REJOIN_RESUME_WINDOW_MS, createTelemetry } from '../src/application/telemetry'
 import type { FaultLevel, Telemetry, TelemetryDeps } from '../src/application/telemetry'
 import { CHECKPOINT_INTERVAL_MS } from '../src/application/history/SessionRecorder'
 import {
@@ -124,6 +124,7 @@ function playbackDeps(): TelemetryDeps {
     createSolarScan: (handlers) => controller.createSolarScan(handlers),
     createSolarHistoryLink: (handlers) => controller.createSolarHistoryLink(handlers),
     bleEnvironment: controller.bleEnvironment,
+    pageActivity: controller.pageActivity,
     historyStore: () => archive,
     refreshRingLedger: async () => undefined,
     refreshSolarLedger: async () => undefined,
@@ -438,8 +439,11 @@ describe("the pack's link", () => {
         await page.telemetry.drain()
       },
       reaches: async (page) => {
-        // The same banner as a drop, and a different word in the archive.
+        // The same banner as a drop, and a different word in the archive — which the archive only
+        // gets to say once the resume window has run out, because until then the session is being
+        // held open for a pack the owner has not told this browser to stop going back to.
         expect(page.telemetry.bmsError.value).toMatch(/Lost the BMS/)
+        await page.play(REJOIN_RESUME_WINDOW_MS)
         const [listing] = await page.store.listSessions()
         expect(listing.record.endReason).toBe('stalled')
       },
@@ -508,6 +512,133 @@ describe("the pack's link", () => {
   ])
 })
 
+describe('going back to the pack on its own', () => {
+  /**
+   * jsdom never gives its window focus, and the fake page reports the browser's own answer alongside
+   * its levers so that a window genuinely moved behind another still stands both loops down. Without
+   * this the levers below would be pulled on a page that is already reported as put away.
+   */
+  const answeredFocus = document.hasFocus.bind(document)
+
+  beforeEach(() => {
+    document.hasFocus = () => true
+  })
+
+  afterEach(() => {
+    document.hasFocus = answeredFocus
+  })
+
+  /**
+   * A page that has met the pack before. The remembered pack is read from storage when telemetry is
+   * built, so seeding one takes a reload — after which the supervisor is started exactly where the
+   * shell starts it, on mount.
+   */
+  async function rememberThePack(page: FakePage): Promise<void> {
+    page.controller.seedLastDevice()
+    await page.reload()
+  }
+
+  eachControl([
+    {
+      control: 'Reconnect now',
+      press: async (page) => {
+        await rememberThePack(page)
+        await page.telemetry.connectBms()
+        // The one thing that disarms it. From here the supervisor keeps being asked and keeps
+        // answering that the owner said not to, until the button below says otherwise.
+        await page.telemetry.disconnectBms()
+        page.telemetry.startRejoin()
+        await page.play(FIRST_FRAMES_MS)
+        page.telemetry.rejoinNow()
+        await page.play(FIRST_FRAMES_MS)
+      },
+      reaches: (page) => {
+        expect(page.telemetry.rejoinArmed.value).toBe(true)
+        expect(page.telemetry.bmsState.value).toBe('live')
+      },
+    },
+    {
+      control: 'Disconnect — and stop looking',
+      press: async (page) => {
+        await rememberThePack(page)
+        await page.telemetry.connectBms()
+        await page.telemetry.disconnectBms()
+        page.telemetry.startRejoin()
+        await page.play(FIRST_FRAMES_MS)
+      },
+      reaches: (page) => {
+        expect(page.telemetry.rejoinArmed.value).toBe(false)
+        expect(page.telemetry.bmsState.value).toBe('idle')
+        expect(page.telemetry.rejoinSearching.value).toBe(false)
+      },
+    },
+    {
+      control: 'The pack is out of range',
+      press: async (page) => {
+        await rememberThePack(page)
+        page.controller.setPackInRange(false)
+        page.telemetry.startRejoin()
+        await page.play(FIRST_FRAMES_MS)
+      },
+      reaches: (page) => {
+        // Still looking, and saying nothing about it. A pack behind a bulkhead is not a fault.
+        expect(page.telemetry.rejoinSearching.value).toBe(true)
+        expect(page.telemetry.bmsState.value).toBe('connecting')
+        expect(page.telemetry.bmsError.value).toBeNull()
+      },
+    },
+    {
+      control: 'The pack is back in range',
+      press: async (page) => {
+        await rememberThePack(page)
+        page.controller.setPackInRange(false)
+        page.telemetry.startRejoin()
+        await page.play(FIRST_FRAMES_MS)
+        page.controller.setPackInRange(true)
+        await page.play(FIRST_FRAMES_MS)
+      },
+      reaches: (page) => {
+        expect(page.telemetry.bmsState.value).toBe('live')
+        expect(page.telemetry.rejoinSearching.value).toBe(false)
+      },
+    },
+    {
+      control: 'The tab is showing — unticked',
+      press: async (page) => {
+        await rememberThePack(page)
+        page.controller.setPackInRange(false)
+        page.telemetry.startRejoin()
+        await page.play(FIRST_FRAMES_MS)
+        page.controller.showPage(false)
+        await page.play(FIRST_FRAMES_MS)
+      },
+      reaches: (page) => {
+        // Chromium tears an advertisement watch down when the tab goes behind another and fires
+        // nothing, so the wait for a sighting is gone. The hunt is not: it drops to the straight
+        // attach, which needs no tab in front of anybody, and this pack is simply not there to
+        // answer one.
+        expect(page.telemetry.rejoinSearching.value).toBe(true)
+        expect(page.telemetry.bmsState.value).toBe('idle')
+      },
+    },
+    {
+      control: 'The window holds focus — unticked',
+      press: async (page) => {
+        await rememberThePack(page)
+        page.controller.setPackInRange(false)
+        page.telemetry.startRejoin()
+        await page.play(FIRST_FRAMES_MS)
+        page.controller.focusPage(false)
+        await page.play(FIRST_FRAMES_MS)
+      },
+      reaches: (page) => {
+        expect(page.telemetry.rejoinSearching.value).toBe(true)
+        expect(page.telemetry.bmsState.value).toBe('idle')
+      },
+    },
+  ])
+})
+
 describe("the controller's link", () => {
   eachControl([
     {
@@ -570,9 +701,32 @@ describe("the controller's link", () => {
       },
     },
     {
-      control: 'Another Victron device answers',
-      press: async (page) => page.controller.emitForeignDevice(),
-      reaches: (page) => expect(page.telemetry.foreignDeviceSeen.value).toBe(true),
+      control: 'A key the controller has reissued',
+      press: async (page) => page.controller.emitUnreadable('key-mismatch', 'this-controller'),
+      reaches: (page) => {
+        expect(page.telemetry.solarRejection.value).toBe('key-mismatch')
+        expect(page.telemetry.solarRejectionSource.value).toBe('this-controller')
+      },
+    },
+    {
+      control: 'Instant Readout switched off',
+      press: async (page) => page.controller.emitUnreadable('not-instant-readout', 'this-controller'),
+      reaches: (page) => expect(page.telemetry.solarRejection.value).toBe('not-instant-readout'),
+    },
+    {
+      control: 'Another kind of Victron product',
+      press: async (page) => page.controller.emitUnreadable('other-record', 'this-controller'),
+      reaches: (page) => expect(page.telemetry.solarRejection.value).toBe('other-record'),
+    },
+    {
+      control: 'The marina is what is being heard',
+      press: async (page) => page.controller.emitUnreadable('key-mismatch', 'anything-in-range'),
+      reaches: (page) => {
+        // The same three bytes, and a different sentence on the other side of it: a browser
+        // listening to every Victron on the pontoon may not be told its own key has gone stale.
+        expect(page.telemetry.solarRejection.value).toBe('key-mismatch')
+        expect(page.telemetry.solarRejectionSource.value).toBe('anything-in-range')
+      },
     },
     {
       control: 'The controller names its model',

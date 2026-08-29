@@ -54,7 +54,8 @@ Web Bluetooth is a Chromium-only API. This is not something the page can work ar
 |---|---|---|
 | Chrome / Edge, macOS | ✅ | ⚠️ flagged — pick the controller from the chooser, or [the bridge](bridge/README.md) for no tap |
 | Chrome, Android | ✅ | ⚠️ behind a flag |
-| Chrome / Edge, Windows · Linux · ChromeOS | ✅ | ⚠️ flagged, untested here — no scan, so the page offers the watch route |
+| Chrome / Edge, Windows · ChromeOS | ✅ | ⚠️ flagged, untested here — both routes exist; the page takes whichever this browser reports |
+| Chrome / Edge, Linux | ✅ | ❌ nothing is ever delivered — see below |
 | Firefox, any platform | ❌ | ❌ |
 | Safari, macOS & iOS | ❌ | ❌ |
 | Bluefy (iOS) | ✅ | ❌ neither route |
@@ -73,8 +74,19 @@ Web Bluetooth is a Chromium-only API. This is not something the page can work ar
 - **On macOS the scan is silent, so the page watches one device instead.** The flag is honoured and
   the permission dialog appears, but it sits on *Scanning…* with an empty device list forever. So on
   a Mac **Connect solar** raises the ordinary Bluetooth chooser: pick your controller and the page
-  reads its advertisements through the browser's own radio, one tap per page load. The battery is
-  unaffected either way; GATT works fine on macOS.
+  reads its advertisements through the browser's own radio. That tap is once per browser, not once
+  per page load — afterwards the page puts the listening back up by itself, as
+  [Staying connected](#staying-connected) describes. The battery is unaffected either way; GATT
+  works fine on macOS.
+- **Reconnecting on its own needs a second flag**,
+  `chrome://flags/#enable-web-bluetooth-new-permissions-backend`, and one more pairing after you
+  turn it on — see [Staying connected](#staying-connected). Without it the battery still works; it
+  just starts from the chooser every time.
+- **Linux never delivers an advertisement**, by either route, however many flags are on. BlueZ hands
+  advertisement data to Chromium through a raw-EIR callback the Web Bluetooth service does not
+  implement, so the observer never fires and both APIs sit there resolving into silence. The page
+  detects the platform and withholds the solar controls rather than offering something that cannot
+  work; the battery is a GATT connection and is unaffected.
 - **The bridge is the option with no chooser tap.** Run the native helper in
   [`bridge/`](bridge/README.md): it scans with CoreBluetooth (which does see the advertisements) and
   relays the raw payload to the page over `ws://localhost`, where the same code decodes it with your
@@ -97,14 +109,66 @@ The page feature-detects all of this and degrades honestly. With no solar it is 
 correct battery instrument — it withholds the house-load span rather than faking it to zero.
 
 A **What this page needs** checklist under *Connect* shows the live state of every precondition —
-Web Bluetooth, HTTPS, whether the radio is actually switched on, advertisement listening, Web Crypto —
-tagged by whether it gates the battery or only the solar half, with the remedy for each.
+Web Bluetooth, HTTPS, whether the radio is actually switched on, whether the devices you have
+allowed can be listed, advertisement listening, Web Crypto — tagged by whether it gates the battery
+or only the solar half, with the remedy for each.
 
 ## Before you connect
 
 **Close the JK app on your phone.** The BMS accepts one Bluetooth connection at a time; while the
 app holds it, nothing else can connect. This is the single most common failure, and the browser
 reports it as an unhelpful `NotFoundError` or `NetworkError` — the app translates both.
+
+## Staying connected
+
+Once you have connected a pack, the page goes back to it on its own. There is nothing to switch on:
+as long as the radio is on it keeps looking for the pack you used last, waiting a second after the
+first failure and doubling to half a minute. It never gives up — this is a boat. The Victron
+controller comes back the same way whenever the page is in front of you, so its chooser tap is one
+per browser rather than one per page load.
+
+**It keeps going while you work in another application.** Chromium tears down every advertisement
+watch when the tab goes behind another or the window loses focus, and fires no event to say so — so
+there the page stops listening for the pack and asks the radio straight out instead, about once a
+minute. That half needs no focus, and a link once made is not affected by focus at all, so the pack
+can come back while you are in another application and still be there when you look. Bring the page
+forward and it returns to the fast schedule at once. The controller cannot follow: advertisements
+are the only thing it has, so its watch waits for the page to come back.
+
+**While it is looking, it stays quiet.** A pack out of range is the ordinary case on a boat, so the
+Bus view says it is looking and the recording is held open across the gap: a link that comes back
+within two minutes continues the session it dropped out of rather than filing a fragment of one.
+Only the three things you could actually act on interrupt — the radio switched off, a permission
+that has lapsed, a browser that cannot rejoin at all.
+
+**Disconnect is the off switch, and it sticks.** It drops the link *and* stops the page going back
+to that pack — the controller with it, because that is one answer about the boat rather than about
+a radio — and it is stored in this browser, so a reload does not quietly undo it. Connecting again
+is the only thing that does, and any of the connect buttons will: the pack's on Connect, the one on
+the Bus view which arms it and tries immediately, or **Connect solar**, which brings the pack back
+as well. **Stop solar** ends the listening and forgets which controller it was, so the page has
+nothing to go back to until you press Connect solar again.
+
+### What the permissions flag buys, and what it does not
+
+Reconnecting without the chooser needs `navigator.bluetooth.getDevices()`, which sits behind
+`chrome://flags/#enable-web-bluetooth-new-permissions-backend`. With it, the page can reach a device
+you have already allowed across reloads and across browser restarts, with no prompt and no tap.
+
+Two things it does not do:
+
+- **It cannot see the permissions you already had.** Grants made before the flag was enabled are
+  invisible to it. After turning it on, pair each device once more from the chooser — until you do,
+  `getDevices()` returns an empty list and the page reports that it has no permission to rejoin.
+- **It is not a scan.** Chromium purges any device that is neither paired nor connected after 180 s
+  without an advertisement, and nothing in a connect starts a scan on the page's behalf, so a
+  remembered handle taken straight to `gatt.connect()` fails with *Bluetooth Device is no longer in
+  range* however good the permission is — but only once the pack has been quiet that long. So the
+  page tries the remembered handle first, which is both cheap and usually right in the minutes after
+  a drop, and falls back to watching for an advertisement: a sighting proves the pack is there and
+  re-seeds the adapter. Only that second half needs the page in front of you.
+
+With the flag off, **What this page needs** says so and every connection starts from the chooser.
 
 ## The Victron encryption key
 
@@ -126,7 +190,10 @@ wanted to.
 
 **Why the check byte matters.** Every Victron device on earth advertises under company id `0x02E1`.
 In a marina you will receive your neighbours' broadcasts too. The check byte is what separates your
-controller from theirs; foreign advertisements are silently dropped.
+controller from theirs, and nothing that fails it is ever rendered as a reading. What the page says
+about one depends on which radio heard it: watching the one controller you picked, a broadcast that
+will not open can only be this controller's own key gone stale, and the panel says so; scanning for
+the company id, the same broadcast is most likely a neighbour's, and the panel says that instead.
 
 ## The Log
 
@@ -134,8 +201,10 @@ Every session is recorded, browsable at `#/log`, and kept in this browser only.
 
 Recording starts on its own — no button — the moment either radio produces its first sample, and
 ends when both links go idle. A session is one continuous recording period bounded by the radios,
-not by the pack link: a BMS that drops and reconnects while the solar scan is still up stays one
-session with a gap drawn in it.
+not by the pack link: a BMS that drops and reconnects stays one session with a gap drawn in it,
+whether the solar scan carried on through the gap or the page simply spent it looking for the pack
+again. Past two minutes the session is closed with the reason the link gave, and the pack coming
+back opens a new one.
 
 **One tab records at a time.** A second tab rejoins the pack on its own, without being asked to, and
 two recorders on one archive would store the same watch twice — doubling every figure folded out of
@@ -268,16 +337,21 @@ The tunnel variant exists because the panel is worth driving from the phone, and
 tunnel host allowed — the same variable as the `npm run dev` note above.
 
 Across the top is a playback strip — the two scenarios, pause, single step, 0.5×/1×/4× — and under
-it nine groups of controls:
+it ten groups of controls:
 
-- **Capabilities** — the nine flags the page feature-detects, and the adapter as on, off or unknown.
+- **Capabilities** — the ten flags the page feature-detects, and the adapter as on, off or unknown.
   The flags take effect on reload; the adapter is live, as it is on real hardware. It also remembers
   or forgets a last pack, which is what gives the silent reconnect below anything to try.
 - **Pack link** — every way a connection or a silent reconnect can settle, including the one that
   raises no banner at all; a slow attempt; a link that connects and then says nothing; drops, stalls,
   a frame that will not decode, and a pack with no name to file it under.
-- **Solar link** — the three ways a scan can fail, advertisements going stale, a neighbour's Victron
-  answering, an identity announcement, a reading that will not decrypt, and the key present or gone.
+- **Going back on its own** — the intent armed and disarmed, the pack taken out of earshot and
+  brought back, and the page put behind another tab or left showing without focus. It prints what
+  both loops are doing, so a search that says nothing on screen is still visible here.
+- **Solar link** — the three ways a scan can fail, advertisements going stale, each of the three
+  reasons an advertisement reaches the decoder and does not come out a reading — a reissued key,
+  Instant Readout switched off, another kind of Victron product — heard as either route hears them,
+  an identity announcement, a reading that will not decrypt, and the key present or gone.
 - **Pack values** — cell spread, path resistance on one cell, MOSFET and cell temperature, both
   switches, state of charge.
 - **Solar values** — charger error, every charge stage, a load output, blanked measurements, a bus

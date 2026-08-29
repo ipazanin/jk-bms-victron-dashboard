@@ -27,12 +27,15 @@ import { deriveHouse, reconcile } from '../domain/dcBus'
 import { packDeviceKeyFor, solarDeviceKeyFor } from '../domain/history/identity'
 import type { DeviceKey, SessionEndReason, SessionRecord, WarningSnapshot } from '../domain/history/types'
 import { SNAPSHOT_SCHEMA_VERSION } from '../domain/schemaVersion'
+import type { SolarAdvertisementRejection } from '../domain/solar/SolarAdvertisementRejection'
+import type { SolarAdvertisementSource } from '../domain/solar/SolarAdvertisementSource'
 import type { SolarHistoryTransfer } from '../domain/solar/SolarHistoryTransfer'
 import type { SolarReading } from '../domain/solar/types'
 import { browserBleEnvironment } from '../infrastructure/ble/capabilities'
 import type { BleEnvironment } from '../infrastructure/ble/capabilities'
 import { JkBmsClient } from '../infrastructure/ble/JkBmsClient'
 import type { BmsLink, JkBmsHandlers } from '../infrastructure/ble/JkBmsClient'
+import type { ReconnectPatience } from '../infrastructure/ble/ReconnectPatience'
 import { VictronHistoryClient } from '../infrastructure/ble/VictronHistoryClient'
 import type { SolarHistoryHandlers, SolarHistoryLink } from '../infrastructure/ble/VictronHistoryClient'
 import { SolarLiveScan } from '../infrastructure/ble/SolarLiveScan'
@@ -59,10 +62,19 @@ import {
 import type { RememberedStatus } from './rememberedSession'
 import { MOSFET_CRITICAL, MOSFET_SERIOUS, MOSFET_WARNING, worstOf } from './severity'
 import type { Fault, FaultLevel } from './severity'
+import { forgetLastController, loadLastController, saveLastController } from './lastController'
+import type { LastController } from './lastController'
 import { loadLastDevice, saveLastDevice } from './lastDevice'
 import type { LastDevice } from './lastDevice'
 import { loadLogbook, saveLogbook } from './logbook'
 import type { StoredLogbook } from './logbook'
+import { browserPageActivity } from './pageActivity'
+import type { PageActivity } from './pageActivity'
+import { createRejoinSupervisor } from './rejoinSupervisor'
+import { loadRejoinIntent, saveRejoinIntent } from './rejoinIntent'
+import { browserSchedule } from './schedule'
+import type { CancelScheduled, Schedule } from './schedule'
+import { createSolarRejoinSupervisor } from './solarRejoinSupervisor'
 import { loadAdvertisementKey, saveAdvertisementKey } from './storage'
 
 export type LinkState = 'idle' | 'connecting' | 'listening' | 'live' | 'error'
@@ -134,6 +146,15 @@ export interface TelemetryDeps {
   readonly now: () => number
   readonly monotonic: () => number
   readonly newId: () => string
+  /**
+   * Whether the page is in front of the owner, which is what the rejoin supervisor's whole
+   * schedule keys off. Optional, and this browser's own answer when it is left out: a spec that
+   * never starts the supervisor has no use for one, and no spec can put a real window behind
+   * another to see what happens next.
+   */
+  readonly pageActivity?: PageActivity
+  /** The same seam for time: without it a spec proving a half-minute backoff would wait one out. */
+  readonly schedule?: Schedule
 }
 
 const HISTORY_SECONDS = 600
@@ -147,6 +168,44 @@ const LOW_STATE_OF_CHARGE = 20
 
 /** At most one write every fifteen samples; snapshots arrive roughly once a second. */
 const WRITE_THROTTLE_MS = 15_000
+
+/**
+ * How long a session is held open across a pack that went away with a rejoin coming for it.
+ *
+ * An afternoon on the boat is one recording. The pack slips behind a bulkhead, the owner walks up
+ * the pontoon, the link comes back a minute later — and none of that is a new watch, so a rejoin
+ * that lands inside this window continues the session it dropped out of rather than filing a
+ * fragment of one.
+ *
+ * It is measured from the drop, and it means the whole of that on every way a pack can go away.
+ * The recorder's own idle sweep is measured from the last row instead, and a pack that goes quiet
+ * rather than dropping spends three strike intervals dying before the drop is even reported — so
+ * the two would not agree about when this window ends, and the sweep would win a race it knows
+ * nothing about and call the gap 'stalled'. The session is taken out of that sweep for as long as
+ * the window runs, which is what lets the length below be a judgement about boats: long enough for
+ * the walk up the pontoon, and for half a dozen attempts even when every one of them spends its
+ * full deadline before failing, without holding a dead session open all afternoon.
+ */
+export const REJOIN_RESUME_WINDOW_MS = 120_000
+
+/**
+ * The same, for a page the owner has looked away from.
+ *
+ * Standing the controller's watch down is the app's own doing rather than the boat's: both radios
+ * are fine and the pack is where it was. A page put away and brought back is one watch of the boat,
+ * so the recording waits rather than being filed as two — and it waits longer than it does for a
+ * pack, because what it is waiting for is a person. An owner who alt-tabs to check the forecast or
+ * takes a call is back well inside five minutes; one who shuts the laptop for the night is gone for
+ * hours, and there is nothing in between worth splitting hairs over.
+ *
+ * Five minutes is also about as long as this page can promise anything. Chromium throttles a
+ * background tab's timers hard past roughly that point and may freeze them outright, so a longer
+ * wait would be one nothing is reliably left running to end. It keeps the hold well inside
+ * HEARTBEAT_STALE_MS too — the window runs from the first blur and is never put back up by a later
+ * one — so a session held for a page can never go stale enough for another tab to close it
+ * 'abandoned' underneath the one still holding it.
+ */
+export const PAGE_AWAY_WINDOW_MS = 300_000
 
 /**
  * What the drop handler paints when the link goes away, and the one banner a failing attempt leaves
@@ -167,6 +226,16 @@ const UNNAMEABLE_PACK_NOTE =
 const UNNAMEABLE_CONTROLLER_NOTE =
   'No advertisement key is stored, so this controller cannot be named and its history cannot be filed. Enter the key on the Connect page first.'
 
+/**
+ * A recording standing open across a gap, and who is expected back through it. There is only ever
+ * one, which is what makes the ending unambiguous when a second cause lands on the first.
+ */
+interface HeldOpenSession {
+  /** Whose return closes it, and therefore whose word ends it if nobody returns. */
+  readonly awaiting: 'pack' | 'page'
+  readonly cancel: CancelScheduled
+}
+
 export function createTelemetry(deps: TelemetryDeps) {
   const now = deps.now
   const capabilities = deps.bleEnvironment.capabilities
@@ -181,8 +250,28 @@ export function createTelemetry(deps: TelemetryDeps) {
   const bmsState = ref<LinkState>('idle')
   const solarState = ref<LinkState>('idle')
   const bmsError = ref<string | null>(null)
+  /**
+   * Whether the banner standing is the answer to something the owner pressed, rather than news the
+   * page produced on its own. It is the whole of the difference between a sentence worth showing
+   * over a running search and one that would be the page talking over itself.
+   */
+  const bmsErrorAnswersAPress = ref(false)
   const solarError = ref<string | null>(null)
-  const foreignDeviceSeen = ref(false)
+  /**
+   * Why the last advertisement did not become a reading, or null while none has failed. Held as
+   * the reason rather than as a flag: the three point at three different controls, and one sentence
+   * covering all of them is what cost an afternoon on the boat.
+   */
+  const solarRejection = ref<SolarAdvertisementRejection | null>(null)
+  /**
+   * Which radio heard that advertisement, kept beside the reason because the reason means nothing
+   * without it: a key that does not match is this controller's own on a watch that follows one
+   * handle, and the boat next door on a scan that hears the marina. Only the transport knows.
+   *
+   * Nothing clears it: it says which radio the standing reason came from, and there is no reason
+   * standing to read it against once that has been cleared.
+   */
+  const solarRejectionSource = ref<SolarAdvertisementSource>('this-controller')
 
   const device = shallowRef<DeviceInfo | null>(null)
   const settings = shallowRef<BmsSettings | null>(null)
@@ -202,6 +291,30 @@ export function createTelemetry(deps: TelemetryDeps) {
    * Loaded from localStorage at construction and refreshed on every successful connect.
    */
   const lastDevice = ref<LastDevice | null>(loadLastDevice())
+
+  /**
+   * Whether this browser may go back to that pack on its own. Loaded from storage rather than
+   * assumed, so a Disconnect the owner pressed yesterday still holds after the reload that would
+   * otherwise quietly undo it.
+   */
+  const rejoinArmed = ref(loadRejoinIntent())
+
+  /**
+   * The controller this browser last watched, so the next visit can put the watch back up without
+   * the chooser. It is the pack's `lastDevice` for the other radio, and it is forgotten when the
+   * owner presses Stop solar: that press is what says this browser should stop going back to it.
+   */
+  const lastController = ref<LastController | null>(loadLastController())
+
+  /** One scheduler for both supervisors and the resume window, so a spec drives them all by hand. */
+  const schedule = deps.schedule ?? browserSchedule
+
+  /**
+   * One answer about the page for both radios, and deliberately one object rather than two: what
+   * makes the pack's hunt and the controller's watch stand down together is that they are reading
+   * the same page and hearing about it in the same breath.
+   */
+  const pageActivity = deps.pageActivity ?? browserPageActivity()
 
   /** The device's own event history, fetched once per connection and kept for offline review. */
   const logbook = shallowRef<StoredLogbook | null>(loadLogbook())
@@ -257,6 +370,10 @@ export function createTelemetry(deps: TelemetryDeps) {
     store: deps.historyStore,
     clock: { now: deps.now, monotonic: deps.monotonic },
     newId: deps.newId,
+    // The same scheduler the waits below run on. Its heartbeat and the resume window are two
+    // timers over one session, and a spec that could only drive one of them could never show what
+    // happens when they land together.
+    schedule,
     onStateChange: (state) => (recording.value = state),
   })
   const recording = shallowRef<RecorderState>(recorder.state)
@@ -487,18 +604,37 @@ export function createTelemetry(deps: TelemetryDeps) {
     onDisconnect: (reason) => {
       bmsState.value = 'idle'
       bmsError.value = PACK_LOST_BANNER
-      // One word for both vocabularies: it ends the session when nothing else is up, and only the
-      // pack stream when the scan is.
+      // The drop is the page's own news, not an answer to anything the owner asked for, so it
+      // waits behind the search rather than talking over it.
+      bmsErrorAnswersAPress.value = false
+      // One word for both vocabularies: it ends the session when nothing else is up and nothing is
+      // coming back, and only the pack stream when the scan is still running or a rejoin is armed.
       const ended = reason === 'stalled' ? 'stalled' : 'link-lost'
-      settleAfterLive(ended)
+      settleAfterDrop(ended)
       if (solarState.value !== 'idle') clearBmsView(ended)
+      // The link going away is the trigger the whole feature exists for. It runs whatever the
+      // reason: a teardown the owner asked for has already disarmed the intent by the time it
+      // lands here, so this finds nothing to do.
+      rejoin.reconsider()
     },
-    onError: (error) => (bmsError.value = error.message),
+    onError: (error) => {
+      bmsError.value = error.message
+      // A frame the radio could not read is the page's own news, like the drop above it.
+      bmsErrorAnswersAPress.value = false
+    },
   })
 
   const solarScan = deps.createSolarScan({
     onReading: (reading, rssi) => {
       const at = now()
+      // A watch that came up on its own holds the remembered numbers on screen until the controller
+      // actually says something. An armed watch proves nothing about the controller being there, so
+      // blanking a page that has just loaded for it would spend a real reading on a maybe. A press
+      // has already claimed the instruments by the time it gets here, so this finds nothing to do.
+      if (source.value !== 'live') claimInstruments()
+      // A record that decoded settles every complaint the panel could be making about the key or
+      // the toggle, so the reason goes with it rather than standing over a live reading.
+      solarRejection.value = null
       solar.value = reading
       solarRssi.value = rssi
       solarState.value = 'live'
@@ -507,11 +643,17 @@ export function createTelemetry(deps: TelemetryDeps) {
       // trend, and the SAMPLE_INTERVAL_MS gate keeps it to one point a second across both radios.
       recordSample()
       if (source.value === 'live') {
+        // A row, and not a watch coming up, is what says the page is back: a watch armed over a
+        // controller that never speaks leaves the recording exactly as empty as the gap did.
+        releasePageHold()
         recorder.noteSolar(reading, rssi)
         noteWarnings(at)
       }
     },
-    onForeignDevice: () => (foreignDeviceSeen.value = true),
+    onUnreadable: (rejection, heardFrom) => {
+      solarRejection.value = rejection
+      solarRejectionSource.value = heardFrom
+    },
     onStale: () => {
       // Advertisements have stopped: the controller slept or drifted out of range. Drop the
       // frozen reading so the derived house load disappears rather than lying, and fall back
@@ -532,8 +674,58 @@ export function createTelemetry(deps: TelemetryDeps) {
       solarModelId = modelId
       if (solarDeviceKey !== null) recorder.identifySolar(solarDeviceKey, modelId)
     },
-    onError: (error) => (solarError.value = error.message),
+    onWatchedDevice: (deviceId, deviceName) => rememberWatchedController(deviceId, deviceName),
+    onError: (error) => {
+      solarError.value = error.message
+      // The one error that is not about an advertisement: a re-arm the radio refused takes the
+      // whole scan down with it, and this handler is all the transport has to say so. A scan that
+      // is still running has only failed to read something, and its staleness clock is still there
+      // to decide what that means.
+      if (!solarScan.scanning) noteSolarWatchTornDown()
+    },
   })
+
+  /**
+   * The watch went away without anybody asking it to, which is a radio this page no longer has.
+   *
+   * Said out loud, because nothing else will: the staleness clock that would have demoted the last
+   * reading died with the scan, so a page left claiming 'live' would hold a frozen charge current
+   * on the instruments — and go on deriving a house load from it — until the tab was reloaded. And
+   * the state is the only thing the supervisor reads to decide whether the radio is somebody
+   * else's, so a watch that has gone has to say so before one can be put back up.
+   *
+   * The recording is not ended. A watch this loop can restore is back inside a second, and that is
+   * one watch of the boat rather than two; one it cannot restore leaves a session with no radio
+   * feeding it, which the recorder's own sweep is there for.
+   */
+  function noteSolarWatchTornDown(): void {
+    // Only over a watch that was up. 'connecting' is a press or a resume holding the state while it
+    // waits on the radio, and both put it where it belongs when they settle.
+    if (solarState.value !== 'live' && solarState.value !== 'listening') return
+    persistRememberedNow(true)
+    stopSolarLink()
+    recorder.checkpoint()
+    if (source.value === 'live' && neitherRadioIsReporting()) settleView()
+    solarRejoin.reconsider()
+  }
+
+  /**
+   * Hands the instruments to the radios. Whatever they were showing — a remembered session or a
+   * browsed one — stops being what the numbers are the moment a live one arrives.
+   */
+  function claimInstruments(): void {
+    if (source.value === 'remembered') leaveRemembered()
+    else if (source.value === 'history') leaveHistory()
+    source.value = 'live'
+  }
+
+  /** Persist the watched controller's id and name so the next visit can skip the chooser. */
+  function rememberWatchedController(deviceId: string, deviceName: string | null): void {
+    const record: LastController = { id: deviceId, name: deviceName, at: now() }
+    saveLastController(record.id, record.name, record.at)
+    lastController.value = record
+    solarRejoin.reconsider()
+  }
 
   function resetReadings(): void {
     battery.value = null
@@ -576,28 +768,102 @@ export function createTelemetry(deps: TelemetryDeps) {
     recorder.endSolarStream()
     solar.value = null
     solarState.value = 'idle'
-    foreignDeviceSeen.value = false
+    solarRejection.value = null
     solarDeviceKey = null
     solarModelId = null
   }
 
   /**
-   * Closes out a live session. Force-flushes the freshest state, then — only if both links
-   * have gone idle and a battery was seen — settles into 'remembered' so disconnecting leaves
-   * the last numbers on screen instead of blanking. A session that saw no battery (solar-only,
-   * or a BMS that dropped before its first cell frame) sets 'none' and then falls back to any
-   * valid on-disk session, rather than stranding the user on the blank landing while a
-   * remembered view sits ready. If the other link is still live, its source is left untouched.
+   * Closes out a live session for good. Force-flushes the freshest state, then — only if both links
+   * have gone idle — finishes the recording and settles the instruments. If the other link is still
+   * live, its source is left untouched and the session is still being written.
    */
   function settleAfterLive(reason: SessionEndReason): void {
+    /** What was standing over this recording when the press landed, if anything was. */
+    const held = heldOpen
+    // A press about one radio is not an answer about the other. While the pack is still being gone
+    // after, the window standing over this session is what will end it and with what the pack
+    // actually did — so stopping the controller in the meantime ends a stream and not a watch. The
+    // instruments settle either way: what is on screen and what the archive is holding open are
+    // different questions, and no radio is up.
+    //
+    // Which is the question `neitherRadioIsReporting` asks and `bothRadiosIdle` does not. A hunt
+    // for the pack is 'connecting' for most of its life while feeding the instruments nothing at
+    // all, so a press landing mid-attempt would otherwise leave a live badge over a dashboard with
+    // no numbers on it, and nothing afterwards ever looks again.
+    if (held?.awaiting === 'pack' && rejoinIsExpected()) {
+      persistRememberedNow(true)
+      recorder.checkpoint()
+      if (source.value === 'live' && neitherRadioIsReporting()) settleView()
+      return
+    }
+    releaseHold()
     persistRememberedNow(true)
     recorder.checkpoint()
-    if (source.value !== 'live') return
-    if (bmsState.value !== 'idle' || solarState.value !== 'idle') return
+    if (!bothRadiosIdle()) return
+    // A held session outlived the live view that opened it — the instruments settled when the radio
+    // went away — so the ordinary guard would walk straight past a recording still standing open.
+    // A deliberate stop is not a gap, whatever the instruments have fallen back to.
+    if (source.value !== 'live' && held === null) return
 
     // While device.value and battery.value are still populated: the closing row carries them.
     recorder.finish(reason)
+    if (source.value === 'live') settleView()
+  }
 
+  /**
+   * The pack link went away on its own, which is an ending only when nothing is coming back for it.
+   *
+   * With a rejoin expected the session is left open behind the resume window instead, and only its
+   * pack stream is closed — so the gap reads as a gap and the snapshot that follows a successful
+   * rejoin lands in the session it dropped out of. A flaky afternoon belongs in the Log as the one
+   * afternoon it was, not as a dozen fragments of it.
+   *
+   * The view settles on the same terms as an ending, armed or not. What the instruments are showing
+   * and what the archive is still holding open are different questions, and the honest answer to the
+   * first is that no radio is up: the numbers fall back to the remembered snapshot as they always
+   * did, while the recording waits for the pack.
+   */
+  function settleAfterDrop(reason: 'link-lost' | 'stalled'): void {
+    if (!rejoinIsExpected()) {
+      settleAfterLive(reason)
+      return
+    }
+    persistRememberedNow(true)
+    // Told before the view is settled, so the session keeps the last state it saw and its coverage
+    // across the gap reads pack-less rather than pack-frozen.
+    recorder.endPackStream(battery.value, reason)
+    recorder.checkpoint()
+    holdSessionOpen('pack', reason, REJOIN_RESUME_WINDOW_MS)
+    if (source.value === 'live' && bothRadiosIdle()) settleView()
+  }
+
+  function bothRadiosIdle(): boolean {
+    return bmsState.value === 'idle' && solarState.value === 'idle'
+  }
+
+  /**
+   * Whether anything is still putting numbers on the instruments and rows in the recording.
+   *
+   * Asked apart from `bothRadiosIdle` because a pack in the middle of an attempt answers that one
+   * as busy while it is feeding nothing at all. Behind another window there is now usually such an
+   * attempt in flight — the straight attach is the half of a rejoin that survives the page going
+   * away, so the hunt carries on there — and a session left uncounted for because the hunt happened
+   * to be mid-probe would be closed by whichever older window was still standing over it. A link
+   * that does come up out of one settles the view and releases the hold on its own way past.
+   */
+  function neitherRadioIsReporting(): boolean {
+    return bmsState.value !== 'live' && solarState.value !== 'live' && solarState.value !== 'listening'
+  }
+
+  /**
+   * Puts the instruments where they belong once the radios have gone: into 'remembered' so a
+   * disconnect leaves the last numbers on screen instead of blanking. A session that saw no battery
+   * (solar-only, or a BMS that dropped before its first cell frame) sets 'none' and then falls back
+   * to any valid on-disk session, rather than stranding the user on the blank landing while a
+   * remembered view sits ready.
+   */
+  function settleView(): void {
     if (battery.value) {
       rememberedAt.value = lastSnapshotAt || now()
       rememberedStatus.value = currentStatus()
@@ -609,6 +875,110 @@ export function createTelemetry(deps: TelemetryDeps) {
       source.value = 'none'
       restoreRemembered()
     }
+  }
+
+  /** Whether a rejoin is actually coming, which is what makes a drop a gap rather than an end. */
+  function rejoinIsExpected(): boolean {
+    return rejoinArmed.value && capabilities.canReconnect && lastDevice.value !== null
+  }
+
+  /** What is standing over the recording, if anything is. Null whenever nothing is being waited for. */
+  let heldOpen: HeldOpenSession | null = null
+
+  /**
+   * Stands the session open across a gap, under the word that ends it if the wait runs out.
+   *
+   * One hold and one window, because the recorder's exemption is a single flag and a recording has
+   * a single ending: two holds would be undone by whichever caller gave up soonest, and two windows
+   * would race to close one session with two different words. So whatever was standing is replaced
+   * rather than joined, and the newest cause owns the ending — it is the one that stopped the last
+   * stream still feeding this session, and a pack that dropped a minute ago says nothing about rows
+   * the controller went on writing until the owner looked away.
+   *
+   * A cause arriving again while its own window is still running is not a new cause and does not
+   * get a new window. The owner who clicks into another window and back every half minute is one
+   * page away from the boat the whole time, not a fresh one each time the watch comes down, and a
+   * window restarted from zero on every blur is one nothing ever ends: no row reaches the archive
+   * while it runs, so the session's stamp on disk stands still and another tab closes it
+   * 'abandoned' underneath the tab that is still holding it. The deadline is the cause's, measured
+   * from when it first arose.
+   */
+  function holdSessionOpen(
+    awaiting: HeldOpenSession['awaiting'],
+    reason: SessionEndReason,
+    windowMs: number,
+  ): void {
+    if (heldOpen?.awaiting !== awaiting) {
+      releaseHold()
+      heldOpen = {
+        awaiting,
+        cancel: schedule(() => {
+          heldOpen = null
+          recorder.releaseRejoinHold()
+          finishAfterHold(reason)
+        }, windowMs),
+      }
+    }
+    // The recorder is told the session has somebody counting for it, so its own guard stands aside
+    // and the window above is the only thing that decides when this gap becomes an ending. Told on
+    // both routes, because the hold belongs to whatever session is open now and the one a standing
+    // window was first taken over may have ended for a reason of its own since.
+    recorder.holdOpenForRejoin()
+  }
+
+  /** Called wherever a session ends for a reason of its own, so a stale window cannot end the next. */
+  function releaseHold(): void {
+    if (heldOpen === null) return
+    heldOpen.cancel()
+    heldOpen = null
+    // The hold lasts exactly as long as the window: a session nobody is counting for is the
+    // recorder's own to close again.
+    recorder.releaseRejoinHold()
+  }
+
+  /**
+   * The page is back and a controller is being heard through it, so the session it was put away in
+   * the middle of is being written into again and needs nothing holding it.
+   *
+   * A hold taken for the pack is left exactly as it is: the pack is still gone, the window standing
+   * over this session is still the only thing that knows what happened to it, and a controller
+   * speaking says nothing about either.
+   */
+  function releasePageHold(): void {
+    if (heldOpen?.awaiting !== 'page') return
+    releaseHold()
+  }
+
+  /**
+   * What the chooser handed back decides what becomes of a session standing open for a pack that
+   * went away. The same pack is the gap that window exists for, so the recording goes on and the
+   * next snapshot reopens its pack stream.
+   *
+   * A different one is a different outing, and it ends the session here rather than further in. The
+   * device-info frame that contradicts the session's key would end it too, but the pack sends its
+   * frames in whatever order it likes and that one is routinely not first: by the time it lands,
+   * the new bank's snapshot is already this session's closing figure and its rows are already in
+   * this session's account, sealed under the old bank's name. A session is one pack's outing, and
+   * that has to be true of the rows and not only of the row it is written on.
+   */
+  function settleHeldSessionForChosenPack(packTheSessionIsWaitingFor: string | null): void {
+    const waitingForThePack = heldOpen?.awaiting === 'pack'
+    releaseHold()
+    if (!waitingForThePack) return
+    if (bmsLink.deviceId === packTheSessionIsWaitingFor) return
+    recorder.finish('device-changed')
+  }
+
+  /**
+   * Nothing came back inside the window, so the session is closed here with what actually ended it
+   * — rather than left for the recorder's idle sweep, which would call every gap 'stalled'.
+   */
+  function finishAfterHold(reason: SessionEndReason): void {
+    // A radio that came back in the meantime is feeding this session again, so there is no gap left
+    // to close. An attempt merely in flight does not count: the window has already run out, and a
+    // link that lands after it opens the next session, which is what a long gap is supposed to do.
+    if (bmsState.value === 'live' || solarState.value !== 'idle') return
+    recorder.finish(reason)
   }
 
   /**
@@ -691,6 +1061,16 @@ export function createTelemetry(deps: TelemetryDeps) {
   }
 
   /**
+   * The pack banner as a page should print it. A search that is still running is the page saying it
+   * has the problem in hand, and the drop that started it would only be arguing with that — but an
+   * answer to a press is owed to the owner whatever else is going on, or a connect they asked for
+   * fails with nothing on screen at all.
+   */
+  const bmsBanner = computed(() =>
+    rejoin.searching.value && !bmsErrorAnswersAPress.value ? null : bmsError.value,
+  )
+
+  /**
    * Explains a failed connect or reconnect, unless the drop handler has already reported the pack
    * going away inside the attempt. That names the real event, where the rejection this carries is
    * only its symptom: a request that was in flight fails with text blaming whatever refuses a
@@ -698,6 +1078,9 @@ export function createTelemetry(deps: TelemetryDeps) {
    * that would not decode, say — says nothing about why the attempt failed and is replaced.
    */
   function explainFailedAttempt(error: Error): void {
+    // Whatever it ends up saying — the drop's own words or this rejection's — it is the answer to a
+    // press, and a press is always answered on screen.
+    bmsErrorAnswersAPress.value = true
     if (bmsError.value === PACK_LOST_BANNER) return
     bmsError.value = describeConnectError(error)
   }
@@ -710,12 +1093,17 @@ export function createTelemetry(deps: TelemetryDeps) {
     if (source.value === 'remembered') leaveRemembered()
     else if (source.value === 'history') leaveHistory()
     bmsState.value = 'connecting'
+    // Read before the chooser, because a successful connect is what replaces it: whatever is
+    // remembered now is the pack any session standing open is waiting for.
+    const packTheSessionIsWaitingFor = lastDevice.value?.id ?? null
     try {
       await bmsLink.connect(showAllDevices)
+      settleHeldSessionForChosenPack(packTheSessionIsWaitingFor)
       bmsState.value = 'live'
       source.value = 'live'
       ringAutoReadConsidered = false
       rememberConnectedDevice()
+      armRejoin()
     } catch (error) {
       bmsState.value = 'idle'
       explainFailedAttempt(error as Error)
@@ -726,23 +1114,36 @@ export function createTelemetry(deps: TelemetryDeps) {
   }
 
   /**
-   * Reconnect to the last pack without the chooser. Needs no user gesture, so it also runs once on
-   * load — silently, so a pack that is simply out of range says nothing rather than painting an
-   * error over a page the owner did not ask to connect.
+   * One attempt at the remembered pack, as both the button and the supervisor need it: the link
+   * comes up, or the caller is handed the reason it did not. Nothing here writes a banner, because
+   * only one of the two callers is allowed to.
    *
    * The remembered view is held up through the attempt, banner and all, and only torn down once the
    * link is genuinely live: a reconnect that times out ten seconds later must leave the last numbers
    * on screen, not a blank. No frame can arrive between `reconnect` resolving and `source` flipping,
    * because a notification handler cannot run until this synchronous tail yields.
+   *
+   * The signal is not optional. The link waits for the pack to be heard from for exactly as long as
+   * it is allowed to and has no deadline of its own, so an attempt started without one is an
+   * attempt nothing can ever end — and the state it leaves behind hides every control that would.
+   * Nor is the patience: only the caller knows whether the page can hold a watch, and the link is
+   * not in the business of guessing.
    */
-  async function reconnectBms(silent = false): Promise<void> {
-    if (bmsState.value === 'live' || bmsState.value === 'connecting') return
-    const remembered = lastDevice.value
-    if (remembered === null || !capabilities.canReconnect) return
-    bmsError.value = null
+  async function attachToRememberedPack(
+    deviceId: string,
+    signal: AbortSignal,
+    patience: ReconnectPatience,
+  ): Promise<void> {
     bmsState.value = 'connecting'
     try {
-      await bmsLink.reconnect(remembered.id)
+      await bmsLink.reconnect(deviceId, signal, patience)
+      // The gap is closed: this is the same pack the session was recording, so the session carries
+      // on and the first snapshot back reopens its pack stream.
+      releaseHold()
+      // The pack that was lost is back, so the banner saying it was lost has stopped being true.
+      // An attempt nobody asked for writes no banner of its own, but it is still the thing that
+      // answers the one the drop left standing.
+      bmsError.value = null
       if (source.value === 'remembered') leaveRemembered()
       else if (source.value === 'history') leaveHistory()
       bmsState.value = 'live'
@@ -751,8 +1152,37 @@ export function createTelemetry(deps: TelemetryDeps) {
       rememberConnectedDevice()
     } catch (error) {
       bmsState.value = 'idle'
-      if (!silent) explainFailedAttempt(error as Error)
       if (source.value === 'none' && !battery.value) restoreRemembered()
+      throw error
+    }
+  }
+
+  /**
+   * Reconnect to the last pack without the chooser, because the owner asked for it. Every failure
+   * here is therefore worth a banner: an attempt nobody asked for is the supervisor's, and it goes
+   * through `tryNow` without ever reaching this.
+   *
+   * The press asks the supervisor for an attempt rather than making one of its own, which is what
+   * keeps it bounded: the deadline, the abort and the price of a failure are the supervisor's, and
+   * a press landing on an attempt already running joins it instead of racing it for the one link
+   * the pack allows.
+   *
+   * Arming comes first for the same reason. The supervisor reads the intent at every decision and
+   * lets go of a link it was not armed for, so an attempt made under a disarmed intent would be
+   * dropped the instant it came up. There is no switch to find and never was: every press that
+   * asks for a radio back — this one, Connect, Connect solar — is the undo for Disconnect, because
+   * an owner who wants the boat back asks for the boat.
+   */
+  async function reconnectBms(): Promise<void> {
+    if (bmsState.value === 'live' || bmsState.value === 'connecting') return
+    const remembered = lastDevice.value
+    if (remembered === null || !capabilities.canReconnect) return
+    bmsError.value = null
+    armRejoin()
+    try {
+      await rejoin.tryNow()
+    } catch (error) {
+      explainFailedAttempt(error as Error)
     }
   }
 
@@ -766,10 +1196,88 @@ export function createTelemetry(deps: TelemetryDeps) {
   }
 
   async function disconnectBms(): Promise<void> {
+    // Disarmed before the link is let go, and not after: the supervisor reads the intent at every
+    // decision, and the drop this is about to cause is one of the things that makes it look again.
+    // Between those two facts, a Disconnect that disarmed second could be rejoined over the top of.
+    disarmRejoin()
     await bmsLink.disconnect()
     bmsState.value = 'idle'
     settleAfterLive('user-disconnect')
     if (solarState.value !== 'idle') clearBmsView('user')
+  }
+
+  /**
+   * The supervisor is handed functions rather than refs so that every condition is read fresh at
+   * the moment it decides, and so that the whole of it can be driven by a spec with no browser: a
+   * clock, a scheduler and an answer about the page are all it takes.
+   */
+  const rejoin = createRejoinSupervisor({
+    rejoinArmed: () => rejoinArmed.value,
+    canRejoinWithoutChooser: capabilities.canReconnect,
+    adapterOn: () => adapterOn.value,
+    rememberedPack: () => lastDevice.value,
+    linkBusy: () => bmsState.value === 'live' || bmsState.value === 'connecting',
+    rejoinPack: (deviceId, signal, patience) => attachToRememberedPack(deviceId, signal, patience),
+    releaseLink: () => disconnectBms(),
+    pageActivity,
+    schedule,
+    now: deps.now,
+  })
+
+  /**
+   * The controller's side of the same schedule. It reads the one intent the owner sets, because
+   * "stop reconnecting to this boat" is an answer about the boat rather than about a radio — Stop
+   * solar narrows it to the controller by forgetting which controller it was.
+   */
+  const solarRejoin = createSolarRejoinSupervisor({
+    rejoinArmed: () => rejoinArmed.value,
+    adapterOn: () => adapterOn.value,
+    rememberedController: () => lastController.value,
+    // A question and not the key itself: thirty-two characters the owner had to dig out of
+    // VictronConnect have no business travelling any further than the radio that needs them.
+    advertisementKeyStored: () => loadAdvertisementKey() !== '',
+    canResume: (deviceId) => solarScan.canResume(deviceId),
+    solarBusy: () => solarState.value !== 'idle',
+    resumeSolar,
+    standDownSolar,
+    pageActivity,
+    schedule,
+    now: deps.now,
+  })
+
+  function armRejoin(): void {
+    if (!rejoinArmed.value) {
+      rejoinArmed.value = true
+      saveRejoinIntent(true)
+    }
+    rejoin.reconsider()
+    solarRejoin.reconsider()
+  }
+
+  function disarmRejoin(): void {
+    if (rejoinArmed.value) {
+      rejoinArmed.value = false
+      saveRejoinIntent(false)
+    }
+    rejoin.reconsider()
+    solarRejoin.reconsider()
+  }
+
+  /** The radio coming on is the one adapter change worth a fresh look; going off stands it down. */
+  const stopAdapterWatch = watch(adapterOn, () => {
+    rejoin.reconsider()
+    solarRejoin.reconsider()
+  })
+
+  /** Both radios go back to the boat together, or neither does. */
+  function startRejoin(): void {
+    rejoin.start()
+    solarRejoin.start()
+  }
+
+  function stopRejoin(): void {
+    rejoin.stop()
+    solarRejoin.stop()
   }
 
   /**
@@ -971,7 +1479,7 @@ export function createTelemetry(deps: TelemetryDeps) {
 
   async function startSolar(key: string): Promise<void> {
     solarError.value = null
-    foreignDeviceSeen.value = false
+    solarRejection.value = null
     if (source.value === 'remembered') leaveRemembered()
     else if (source.value === 'history') leaveHistory()
     solarState.value = 'connecting'
@@ -989,6 +1497,12 @@ export function createTelemetry(deps: TelemetryDeps) {
       // out of range or the key is wrong, so the user keeps a way to stop it.
       solarState.value = 'listening'
       source.value = 'live'
+      // One intent covers both radios, because "stop going back to this boat" is an answer about
+      // the boat rather than about a radio — Stop solar is what narrows it to the controller, by
+      // forgetting which controller it was. So this press is the undo for Disconnect exactly as
+      // Connect and Reconnect are, and without it the watch it has just put up is one nothing
+      // stands back up after the next blur.
+      armRejoin()
       // The transient activation is already spent, so hashing the key costs nothing here. The key
       // itself never reaches the archive; only a digest of it does. Awaited rather than left to
       // settle on its own, so that a scan which has started is a scan whose controller the archive
@@ -1003,9 +1517,75 @@ export function createTelemetry(deps: TelemetryDeps) {
     }
   }
 
+  /**
+   * The same watch as `startSolar`, brought up with no chooser and no press behind it.
+   *
+   * Nothing here writes a banner. A controller that has gone to sleep at sunset or drifted behind
+   * the coachroof is the ordinary case and is answered by listening, and the two answers the owner
+   * would actually have to act on reach them as the supervisor's blocker instead. The key comes
+   * from storage and goes straight to the radio; it is never held, echoed or logged.
+   *
+   * The instruments are left exactly as they are — a remembered session stays on screen until the
+   * controller speaks — which is what makes an automatic attempt free to fail.
+   */
+  async function resumeSolar(deviceId: string | null): Promise<void> {
+    const key = loadAdvertisementKey()
+    if (key === '') throw new Error('No advertisement key is stored, so there is no watch to resume.')
+    solarRejection.value = null
+    // The banner the last watch left behind asked the owner to press a button, and this is the page
+    // doing that for them. Leaving it standing under the search would tell them to fix something
+    // that is already being fixed.
+    solarError.value = null
+    solarState.value = 'connecting'
+    try {
+      await solarScan.resume(key, deviceId)
+      // A Stop solar that landed while the radio was coming up has already put the state back, and
+      // the transport has already unwound the watch under it. Nothing here may claim one is up.
+      if (solarState.value !== 'connecting') return
+      solarState.value = 'listening'
+      solarDeviceKey = await nameableSolarDevice(key)
+      if (solarDeviceKey !== null) recorder.identifySolar(solarDeviceKey, solarModelId)
+    } catch (error) {
+      if (solarState.value === 'connecting') solarState.value = 'idle'
+      // The caller decides what a failure costs. Down here it is only ever reported, never explained.
+      throw error
+    }
+  }
+
+  /**
+   * Hands the radio back when the page goes behind something else, on a watch this browser will put
+   * up again by itself the moment it returns.
+   *
+   * The recording is deliberately not finished. A page put away and brought back is one watch of
+   * the boat, so the session stands open exactly as it does across a pack that dropped with a
+   * rejoin coming, and the window it is put behind is what ends it if the owner never comes back.
+   * Leaving that to the recorder's own idle sweep is what filed one afternoon as two and blamed a
+   * controller for a radio the app itself took away.
+   *
+   * The hold is taken only when this leaves nothing reporting. A pack still sending frames is
+   * writing rows into this session, and a session being written into needs no holding and must not
+   * be taken out of the guard that watches it.
+   */
+  function standDownSolar(): void {
+    persistRememberedNow(true)
+    stopSolarLink()
+    recorder.checkpoint()
+    if (neitherRadioIsReporting()) holdSessionOpen('page', 'page-away', PAGE_AWAY_WINDOW_MS)
+    if (source.value === 'live' && neitherRadioIsReporting()) settleView()
+  }
+
+  /**
+   * Stop solar, pressed. It is the controller's Disconnect, so it also forgets which controller
+   * this was: leaving the record standing would have the supervisor put the watch straight back up,
+   * making the button one that undoes itself. Pressing Connect solar again is the undo, exactly as
+   * a press of Connect is for the pack.
+   */
   function stopSolar(): void {
+    forgetLastController()
+    lastController.value = null
     stopSolarLink()
     settleAfterLive('user-disconnect')
+    solarRejoin.reconsider()
   }
 
   /**
@@ -1060,6 +1640,9 @@ export function createTelemetry(deps: TelemetryDeps) {
    */
   function dispose(): void {
     stopStatusWatch()
+    releaseHold()
+    stopRejoin()
+    stopAdapterWatch()
     stopWatchingAdapter?.()
     stopWatchingAdapter = null
     if (typeof window !== 'undefined') window.removeEventListener('pagehide', onPageHide)
@@ -1076,7 +1659,8 @@ export function createTelemetry(deps: TelemetryDeps) {
     solarState: readonly(solarState),
     bmsError: readonly(bmsError),
     solarError: readonly(solarError),
-    foreignDeviceSeen: readonly(foreignDeviceSeen),
+    solarRejection: readonly(solarRejection),
+    solarRejectionSource: readonly(solarRejectionSource),
     solarRssi: readonly(solarRssi),
     device,
     settings,
@@ -1090,6 +1674,18 @@ export function createTelemetry(deps: TelemetryDeps) {
     rememberedAt: readonly(rememberedAt),
     rememberedStatus: readonly(rememberedStatus),
     lastDevice: readonly(lastDevice),
+    bmsBanner,
+    /** Whether this browser goes back to the pack on its own, and what it is doing about it. */
+    rejoinArmed: readonly(rejoinArmed),
+    rejoinSearching: rejoin.searching,
+    rejoinBlocker: rejoin.blocker,
+    /** What to call the pack it would rejoin, for a control that has to name what it is offering. */
+    rejoinPackName: computed(() => lastDevice.value?.name ?? null),
+    /** The controller's side of all four: what is remembered, and what is being done about it. */
+    lastController: readonly(lastController),
+    solarRejoinSearching: solarRejoin.searching,
+    solarRejoinBlocker: solarRejoin.blocker,
+    rejoinControllerName: computed(() => lastController.value?.name ?? null),
     logbook,
     detailLog,
     detailLogReading: readonly(detailLogReading),
@@ -1110,6 +1706,15 @@ export function createTelemetry(deps: TelemetryDeps) {
     connectBms,
     reconnectBms,
     disconnectBms,
+    /**
+     * The tap that says "go back to the boat": it arms the intent and puts the question again at
+     * once, so the supervisor tries now rather than at the end of whatever wait it was serving.
+     * Quiet by construction — a pack that does not answer is retried rather than reported, which is
+     * the whole point of a control the owner can press while the pack is still out of range.
+     */
+    rejoinNow: armRejoin,
+    startRejoin,
+    stopRejoin,
     readDetailLog,
     readSolarHistory,
     startSolar,

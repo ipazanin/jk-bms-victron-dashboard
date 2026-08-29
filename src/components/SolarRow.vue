@@ -15,6 +15,8 @@ const props = defineProps<{
   packVoltage: number | null
   rssi: number
   canListenSolar: boolean
+  /** False only on Linux, where no flag can help and the remedy below would be an errand. */
+  platformDeliversAdvertisements: boolean
 }>()
 
 const errorLevel = computed(() => (props.solar && props.solar.chargerError !== 0 ? 'critical' : 'good'))
@@ -78,10 +80,14 @@ const paragraph = computed(() => {
 
     <template v-else>
       <p class="empty" :class="{ pending: isPending(solarPhase) }">{{ paragraph }}</p>
-      <p v-if="!canListenSolar" class="hint">
+      <p v-if="!canListenSolar && platformDeliversAdvertisements" class="hint">
         This browser cannot read Bluetooth advertisements. Enable
         <code>chrome://flags/#enable-experimental-web-platform-features</code> in Chrome, then
         reload.
+      </p>
+      <p v-else-if="!canListenSolar" class="hint">
+        Chromium on Linux never delivers a Bluetooth advertisement to a page, so the controller
+        cannot be read here by any route. It works in Chrome on Android or macOS.
       </p>
     </template>
   </section>

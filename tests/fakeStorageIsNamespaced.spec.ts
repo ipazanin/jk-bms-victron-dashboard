@@ -14,8 +14,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import {
+  forgetLastController,
+  loadLastController,
+  saveLastController,
+} from '../src/application/lastController'
 import { forgetLastDevice, loadLastDevice, saveLastDevice } from '../src/application/lastDevice'
 import { forgetLogbook, loadLogbook, saveLogbook } from '../src/application/logbook'
+import { loadRejoinIntent, saveRejoinIntent } from '../src/application/rejoinIntent'
 import {
   forgetRememberedSession,
   loadRememberedSession,
@@ -96,6 +102,20 @@ const namespacedEntries = [
     forget: (): void => forgetLastDevice(),
   },
   {
+    what: 'the last controller watched',
+    key: 'shunt.lastSolarController',
+    write: (): void => saveLastController('fake-controller', 'SmartSolar HQ', SAMPLE_EPOCH),
+    read: (): void => void loadLastController(),
+    forget: (): void => forgetLastController(),
+  },
+  {
+    what: 'the standing answer about rejoining',
+    key: 'shunt.rejoinArmed',
+    write: (): void => saveRejoinIntent(false),
+    read: (): void => void loadRejoinIntent(),
+    forget: null,
+  },
+  {
     what: "the pack's logbook",
     key: 'shunt.logbook',
     write: (): void =>
@@ -148,6 +168,8 @@ describe('persistence under fake radios', () => {
       'the Victron encryption key': ['victron.advertisementKey.fake'],
       'the proven solar transport': ['victron.liveTransport.fake'],
       'the last pack connected to': ['shunt.lastBmsDevice.fake'],
+      'the last controller watched': ['shunt.lastSolarController.fake'],
+      'the standing answer about rejoining': ['shunt.rejoinArmed.fake'],
       "the pack's logbook": ['shunt.logbook.fake'],
       'the remembered session': ['shunt.rememberedSession.fake'],
     })
@@ -167,6 +189,8 @@ describe('persistence under fake radios', () => {
       'the Victron encryption key': ['victron.advertisementKey.fake'],
       'the proven solar transport': ['victron.liveTransport.fake'],
       'the last pack connected to': ['shunt.lastBmsDevice.fake'],
+      'the last controller watched': ['shunt.lastSolarController.fake'],
+      'the standing answer about rejoining': ['shunt.rejoinArmed.fake'],
       "the pack's logbook": ['shunt.logbook.fake'],
       'the remembered session': ['shunt.rememberedSession.fake'],
     })
@@ -200,6 +224,8 @@ describe('persistence under real radios', () => {
       'the Victron encryption key': ['victron.advertisementKey'],
       'the proven solar transport': ['victron.liveTransport'],
       'the last pack connected to': ['shunt.lastBmsDevice'],
+      'the last controller watched': ['shunt.lastSolarController'],
+      'the standing answer about rejoining': ['shunt.rejoinArmed'],
       "the pack's logbook": ['shunt.logbook'],
       'the remembered session': ['shunt.rememberedSession'],
     })

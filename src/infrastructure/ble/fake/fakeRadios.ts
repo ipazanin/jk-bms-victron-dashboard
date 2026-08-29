@@ -15,14 +15,20 @@
 
 import type { LogbookEvent } from '../../../domain/bms/logbook'
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../../domain/bms/types'
+import type { SolarAdvertisementRejection } from '../../../domain/solar/SolarAdvertisementRejection'
+import type { SolarAdvertisementSource } from '../../../domain/solar/SolarAdvertisementSource'
 import type { SolarHistoryTransfer } from '../../../domain/solar/SolarHistoryTransfer'
 import type { SolarReading } from '../../../domain/solar/types'
 import type { BmsLink, DisconnectReason, JkBmsHandlers } from '../JkBmsClient'
+import type { ReconnectPatience } from '../ReconnectPatience'
 import type { SolarHistoryHandlers, SolarHistoryLink } from '../VictronHistoryClient'
 import type { SolarScan, VictronHandlers } from '../solarScan'
 
 /** The name the history tunnel reports for the controller it last talked to. */
 const DEMO_CONTROLLER_NAME = 'SmartSolar demo'
+
+/** What the chooser would have handed back, so a playback session has a controller to go back to. */
+const DEMO_CONTROLLER_ID = 'fake-solar-controller'
 
 /**
  * A wait a caller can see on screen. Every dwell here is a real timer rather than a resolved
@@ -32,6 +38,12 @@ const DEMO_CONTROLLER_NAME = 'SmartSolar demo'
 function dwell(dwellMs: number): Promise<void> {
   if (dwellMs <= 0) return Promise.resolve()
   return new Promise((settle) => setTimeout(settle, dwellMs))
+}
+
+/** A rejoin parked until the pack is heard from, with the two ways that wait can end. */
+interface ParkedRejoin {
+  readonly proceed: () => void
+  readonly standDown: () => void
 }
 
 export interface FakeBmsRadio {
@@ -49,8 +61,18 @@ export interface FakeBmsRadio {
   holdStoredLogFor(dwellMs: number): void
   /** What `connect` does from now on. Null lets it succeed. */
   failConnectWith(rejection: Error | null): void
-  /** What `reconnect` does from now on — an out-of-range pack, or a permission that has lapsed. */
+  /** What `reconnect` does from now on — a pack that refuses, or a permission that has lapsed. */
   failReconnectWith(rejection: Error | null): void
+  /**
+   * Whether the pack is close enough to be heard at all.
+   *
+   * Out of range, `reconnect` parks waiting for a sighting exactly as the real client does, rather
+   * than failing: its straight attach has nothing to attach to, so the caller's signal is the only
+   * thing that ends the wait short. Bringing it back into range settles every parked attempt,
+   * which is how a rejoin that has been retrying quietly is seen to land. A caller that said it
+   * could not hold a watch parks on nothing and is simply told the pack is not there.
+   */
+  setInRange(inRange: boolean): void
   /**
    * Runs inside the next attempt, before it settles. A real pack that goes away mid-handshake
    * reports the drop through the handlers and the attempt rejects afterwards; both landing in the
@@ -85,9 +107,32 @@ export function fakeBmsRadio(onLinkChange: () => void): FakeBmsRadio {
   let storedLogDwellMs = 0
   let connectRejection: Error | null = null
   let reconnectRejection: Error | null = null
+  let packInRange = true
+  const parkedRejoins: ParkedRejoin[] = []
   let reportDuringAttempt: (() => void) | null = null
   let answerStoredLog: BmsLink['readDetailLog'] = () =>
     Promise.reject(new Error('The fake pack has no stored-log answer armed.'))
+
+  /** What the real client rejects with when its caller stands the attempt down. */
+  const stoodDown = (): DOMException => new DOMException('Reconnect stood down', 'AbortError')
+
+  const waitForSighting = (signal: AbortSignal | undefined): Promise<void> => {
+    return new Promise<void>((proceed, refuse) => {
+      const parked: ParkedRejoin = {
+        proceed: () => {
+          signal?.removeEventListener('abort', parked.standDown)
+          proceed()
+        },
+        standDown: () => {
+          parkedRejoins.splice(parkedRejoins.indexOf(parked), 1)
+          signal?.removeEventListener('abort', parked.standDown)
+          refuse(stoodDown())
+        },
+      }
+      parkedRejoins.push(parked)
+      signal?.addEventListener('abort', parked.standDown)
+    })
+  }
 
   const settleAttempt = async (rejection: Error | null): Promise<void> => {
     await dwell(attemptDwellMs)
@@ -112,8 +157,19 @@ export function fakeBmsRadio(onLinkChange: () => void): FakeBmsRadio {
     async connect() {
       await settleAttempt(connectRejection)
     },
-    async reconnect(id: string) {
+    async reconnect(id: string, signal?: AbortSignal, patience: ReconnectPatience = 'wait-for-a-sighting') {
       deviceId = id
+      if (signal?.aborted === true) throw stoodDown()
+      // In range, the real client attaches straight away and this resolves the same way. Out of
+      // range, its straight attach fails and it parks on a sighting, which is the whole of what a
+      // caller can see of the difference — unless the caller has no window to hold a watch in, and
+      // there is no second half to park on.
+      if (!packInRange) {
+        if (patience === 'straight-in-only') {
+          throw new Error('Reconnect timed out. The pack may be out of range or asleep. Use Connect BMS.')
+        }
+        await waitForSighting(signal)
+      }
       await settleAttempt(reconnectRejection)
     },
     async readDetailLog(packClock) {
@@ -150,6 +206,11 @@ export function fakeBmsRadio(onLinkChange: () => void): FakeBmsRadio {
     failReconnectWith: (rejection) => {
       reconnectRejection = rejection
     },
+    setInRange: (inRange) => {
+      packInRange = inRange
+      if (!inRange) return
+      for (const parked of parkedRejoins.splice(0, parkedRejoins.length)) parked.proceed()
+    },
     reportDuringNextAttempt: (report) => {
       reportDuringAttempt = report
     },
@@ -179,7 +240,7 @@ export interface FakeSolarRadio {
   failStartWith(rejection: Error | null): void
   emitReading(reading: SolarReading, rssi: number): void
   emitStale(): void
-  emitForeignDevice(): void
+  emitUnreadable(rejection: SolarAdvertisementRejection, heardFrom: SolarAdvertisementSource): void
   emitIdentity(modelId: number): void
   emitError(error: Error): void
 }
@@ -199,6 +260,18 @@ export function fakeSolarRadio(onScanChange: () => void): FakeSolarRadio {
       await dwell(startDwellMs)
       if (startRejection !== null) throw startRejection
       scanning = true
+      handlers.onWatchedDevice?.(DEMO_CONTROLLER_ID, DEMO_CONTROLLER_NAME)
+      onScanChange()
+    },
+    // The recording plays back through the route that needs no gesture, so a fake session rejoins
+    // the controller by itself exactly as the boat does — which is the only way the dev panel can
+    // drive the behaviour at all.
+    canResume: (rememberedDeviceId) => rememberedDeviceId === DEMO_CONTROLLER_ID,
+    async resume() {
+      await dwell(startDwellMs)
+      if (startRejection !== null) throw startRejection
+      scanning = true
+      handlers.onWatchedDevice?.(DEMO_CONTROLLER_ID, DEMO_CONTROLLER_NAME)
       onScanChange()
     },
     stop() {
@@ -223,7 +296,7 @@ export function fakeSolarRadio(onScanChange: () => void): FakeSolarRadio {
     },
     emitReading: (reading, rssi) => handlers.onReading?.(reading, rssi),
     emitStale: () => handlers.onStale?.(),
-    emitForeignDevice: () => handlers.onForeignDevice?.(),
+    emitUnreadable: (rejection, heardFrom) => handlers.onUnreadable?.(rejection, heardFrom),
     emitIdentity: (modelId) => handlers.onIdentity?.(modelId),
     emitError: (error) => handlers.onError?.(error),
   }

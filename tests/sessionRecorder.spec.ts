@@ -890,6 +890,63 @@ describe('the zombie guard', () => {
     expect(listing.record.endReason).toBe('stalled')
   })
 
+  it('stands aside for a session somebody is still accounting for', async () => {
+    // The guard answers for a session nobody owns. One held open behind a rejoin has an owner
+    // counting down to its real ending, and that ending knows what the pack actually did — so the
+    // guard beating it to the close would stamp 'stalled' on a gap with a truer word available.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    harness = harnessFor()
+    drivePack(MIN_SESSION_SAMPLES + 2)
+    const id = harness.sessionId()
+    harness.recorder.holdOpenForRejoin()
+
+    harness.advance(SESSION_IDLE_TIMEOUT_MS * 2)
+    vi.advanceTimersByTime(CHECKPOINT_INTERVAL_MS)
+    vi.useRealTimers()
+    await harness.recorder.drain()
+
+    expect(harness.recorder.state.sessionId).toBe(id)
+  })
+
+  it('closes a session the moment the rejoin it was held for is given up on', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    harness = harnessFor()
+    drivePack(MIN_SESSION_SAMPLES + 2)
+    harness.recorder.holdOpenForRejoin()
+    harness.advance(SESSION_IDLE_TIMEOUT_MS * 2)
+
+    harness.recorder.releaseRejoinHold()
+    vi.advanceTimersByTime(CHECKPOINT_INTERVAL_MS)
+    vi.useRealTimers()
+    await harness.recorder.drain()
+
+    expect(harness.recorder.state.sessionId).toBeNull()
+    const [listing] = await harness.store.listSessions()
+    expect(listing.record.endReason).toBe('stalled')
+  })
+
+  it('holds once however often it is asked, so one release is the whole of it', async () => {
+    // The exemption is a flag and not a count, which is what makes a held session something one
+    // caller owns. A second hold buys nothing and the first release hands the session straight back
+    // to the guard, so two callers holding one session would leave whichever released last holding
+    // an ending nobody was counting down to.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    harness = harnessFor()
+    drivePack(MIN_SESSION_SAMPLES + 2)
+    harness.recorder.holdOpenForRejoin()
+    harness.recorder.holdOpenForRejoin()
+
+    harness.advance(SESSION_IDLE_TIMEOUT_MS * 2)
+    harness.recorder.releaseRejoinHold()
+    vi.advanceTimersByTime(CHECKPOINT_INTERVAL_MS)
+    vi.useRealTimers()
+    await harness.recorder.drain()
+
+    expect(harness.recorder.state.sessionId).toBeNull()
+    const [listing] = await harness.store.listSessions()
+    expect(listing.record.endReason).toBe('stalled')
+  })
+
   it('leaves a session alone while frames are still arriving', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
     harness = harnessFor()

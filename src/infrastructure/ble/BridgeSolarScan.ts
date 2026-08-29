@@ -45,7 +45,9 @@ export class BridgeSolarScan implements SolarScan {
   constructor(url: string, handlers: VictronHandlers = {}) {
     this.url = url
     this.handlers = handlers
-    this.processor = new SolarAdvertisementProcessor(handlers)
+    // The helper scans with CoreBluetooth and relays whatever it hears, so this end is listening
+    // to the whole marina exactly as the browser's own scan is.
+    this.processor = new SolarAdvertisementProcessor(handlers, 'anything-in-range')
   }
 
   get scanning(): boolean {
@@ -58,6 +60,23 @@ export class BridgeSolarScan implements SolarScan {
     parseAdvertisementKey(keyHex)
     await this.openSocket()
     await this.processor.begin(keyHex)
+  }
+
+  /**
+   * Always, and whatever this browser remembers. A WebSocket needs no gesture and no permission,
+   * and the helper on the other end picks the radio's targets itself — so there is no device id in
+   * this route for a remembered one to have to match.
+   *
+   * That is the whole of what this answers. This route names no controller, so it has no way to
+   * tell a page that has never listened from one the owner has just told to stop, and it must not
+   * pretend to: holding the difference is the supervisor's job.
+   */
+  canResume(): boolean {
+    return true
+  }
+
+  resume(keyHex: string): Promise<void> {
+    return this.start(keyHex)
   }
 
   stop(): void {

@@ -12,10 +12,17 @@ const {
   source,
   bmsState,
   solarState,
-  bmsError,
+  bmsBanner,
   solarError,
-  foreignDeviceSeen,
+  solarRejection,
+  solarRejectionSource,
   lastDevice,
+  rejoinArmed,
+  rejoinSearching,
+  rejoinBlocker,
+  solarRejoinSearching,
+  solarRejoinBlocker,
+  rejoinControllerName,
 } = telemetry
 
 const initialKey = loadAdvertisementKey()
@@ -42,12 +49,19 @@ const reconnectName = computed(() => lastDevice.value?.name ?? null)
         :source="source"
         :bms-state="bmsState"
         :solar-state="solarState"
-        :bms-error="bmsError"
+        :bms-banner="bmsBanner"
         :solar-error="solarError"
-        :foreign-device-seen="foreignDeviceSeen"
+        :solar-rejection="solarRejection"
+        :solar-rejection-source="solarRejectionSource"
         :initial-key="initialKey"
         :can-reconnect="canReconnect"
         :reconnect-name="reconnectName"
+        :rejoin-armed="rejoinArmed"
+        :rejoin-searching="rejoinSearching"
+        :rejoin-blocker="rejoinBlocker"
+        :solar-rejoin-searching="solarRejoinSearching"
+        :solar-rejoin-blocker="solarRejoinBlocker"
+        :controller-name="rejoinControllerName"
         @connect-bms="telemetry.connectBms"
         @reconnect-bms="telemetry.reconnectBms"
         @disconnect-bms="telemetry.disconnectBms"

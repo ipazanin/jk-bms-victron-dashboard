@@ -127,9 +127,7 @@ const onKeydown = (event: KeyboardEvent): void => {
 }
 
 let stopRouting: (() => void) | null = null
-let stopReconnectWatch: (() => void) | null = null
 let stopArchiveLevers: (() => void) | null = null
-let reconnectTried = false
 
 /**
  * One store, handed to both halves: the recorder writes through telemetry, the views read through
@@ -154,21 +152,12 @@ onMounted(() => {
   // promise, and first paint can never be made to wait on one.
   telemetry.restoreRemembered()
 
-  // Then try, once and silently, to rejoin the last pack without the chooser — but only once the
-  // radio is confirmed on. Firing before that would leave the Connect tab stuck on 'connecting' for
-  // the whole reconnect timeout when Bluetooth is simply off. It holds the remembered view up and
-  // only replaces it if the link comes live; a pack merely out of range leaves the remembered
-  // numbers on screen and the reconnect button in the Connect tab. getDevices()/gatt.connect() need
-  // no user gesture, so this is safe off a watcher rather than a click.
-  stopReconnectWatch = watch(
-    telemetry.adapterOn,
-    (on) => {
-      if (on !== true || reconnectTried) return
-      reconnectTried = true
-      void telemetry.reconnectBms(true)
-    },
-    { immediate: true },
-  )
+  // Then hand the pack to the supervisor, which goes back to it whenever this page is in a state
+  // where that can work — the owner has not disarmed it and the radio is on — and keeps trying,
+  // quietly, for as long as that holds. Being behind another window slows it and narrows it to the
+  // half that survives one; it does not stop it. None of it needs a gesture, so the page is free to
+  // do it while the owner watches the instruments, or something else entirely.
+  telemetry.startRejoin()
 
   stopRouting = startRouting()
 
@@ -196,8 +185,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stopRouting?.()
   stopRouting = null
-  stopReconnectWatch?.()
-  stopReconnectWatch = null
+  telemetry.stopRejoin()
   stopArchiveLevers?.()
   stopArchiveLevers = null
   window.removeEventListener('keydown', onKeydown)

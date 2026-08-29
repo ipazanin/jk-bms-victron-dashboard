@@ -18,6 +18,8 @@ import {
   parseAdvertisementKey,
   readAdvertisementModelId,
 } from '../../domain/solar/advertisement'
+import type { SolarAdvertisementRejection } from '../../domain/solar/SolarAdvertisementRejection'
+import type { SolarAdvertisementSource } from '../../domain/solar/SolarAdvertisementSource'
 import type { SolarReading } from '../../domain/solar/types'
 
 const SOLAR_STALE_CHECK_MS = 3_000
@@ -31,7 +33,20 @@ const SOLAR_STALE_TIMEOUT_MS = 15_000
 
 export interface VictronHandlers {
   onReading?: (reading: SolarReading, rssi: number) => void
-  onForeignDevice?: () => void
+  /**
+   * An advertisement that reached the decoder and did not come out of it as a reading, with the
+   * reason it did not and whose it could have been. Reported every time rather than once, so a
+   * reason that changes — a key pasted afresh, Instant Readout switched back on — is the one the
+   * page is showing.
+   *
+   * The source travels with it because only the transport knows it, and the same rejection means
+   * the owner's own key on a radio that hears one controller and the boat next door on one that
+   * hears the marina.
+   */
+  onUnreadable?: (
+    rejection: SolarAdvertisementRejection,
+    heardFrom: SolarAdvertisementSource,
+  ) => void
   onStale?: () => void
   /**
    * The model id of the controller this scan is decoding, once per scan. We never connect, so
@@ -39,6 +54,17 @@ export interface VictronHandlers {
    * says about itself, and the only thing a recording can name it by.
    */
   onIdentity?: (modelId: number) => void
+  /**
+   * The handle this scan is watching, reported as soon as it is in hand — what the chooser
+   * answered on a press, and the same device found again on a resume. Only the watch route has one
+   * to report: the browser's own scan listens to the whole marina without ever naming a device,
+   * and the bridge listens to whatever the helper heard.
+   *
+   * It is what makes the next page load gesture-free, so it is reported once the watch is up and
+   * long before a single advertisement has decoded: the id is a fact about permission, and waiting
+   * for the controller to speak would be waiting for the wrong thing.
+   */
+  onWatchedDevice?: (deviceId: string, deviceName: string | null) => void
   onError?: (error: Error) => void
 }
 
@@ -49,7 +75,26 @@ export interface VictronHandlers {
  */
 export interface SolarScan {
   readonly scanning: boolean
+  /** Call from a user gesture: every browser route raises a native prompt of some kind. */
   start(keyHex: string): Promise<void>
+  /**
+   * Whether this transport could come up again on its own, given whatever controller this browser
+   * remembers. Asked rather than assumed, because the three routes answer it differently and only
+   * the transport knows which one it is: the watch needs a remembered id and gets in without a
+   * gesture, the browser's own scan needs its permission prompt however much it remembers, and the
+   * bridge is a WebSocket that needs neither.
+   *
+   * It is a question about the route and nothing else. Whether there is a controller worth going
+   * back to — and whether the owner has just said stop — is the caller's, and a route that needs
+   * no handle must never be read as one with something to return to.
+   */
+  canResume(rememberedDeviceId: string | null): boolean
+  /**
+   * Start again with no chooser and no user gesture, on a controller this origin is already
+   * permitted to talk to. Only worth calling where `canResume` says so; elsewhere it rejects
+   * saying which of the two — the transport or the permission — is in the way.
+   */
+  resume(keyHex: string, rememberedDeviceId: string | null): Promise<void>
   stop(): void
 }
 
@@ -69,6 +114,8 @@ export type SolarLiveTransport = 'scan' | 'watch'
  */
 export class SolarAdvertisementProcessor {
   private readonly handlers: VictronHandlers
+  /** Whose advertisements this transport can hear, which every rejection is reported against. */
+  private readonly source: SolarAdvertisementSource
   private key: Uint8Array | null = null
   private cryptoKey: CryptoKey | null = null
   private generation = 0
@@ -78,8 +125,9 @@ export class SolarAdvertisementProcessor {
   private running = false
   private staleTimer: ReturnType<typeof setInterval> | null = null
 
-  constructor(handlers: VictronHandlers) {
+  constructor(handlers: VictronHandlers, source: SolarAdvertisementSource) {
     this.handlers = handlers
+    this.source = source
   }
 
   /**
@@ -107,13 +155,13 @@ export class SolarAdvertisementProcessor {
     const modelId = readAdvertisementModelId(payload)
 
     void decodeSolarAdvertisement(payload, this.key, this.cryptoKey)
-      .then((reading) => {
+      .then((outcome) => {
         // The decrypt is genuinely async. If end() (or a fresh begin) ran while it was in flight,
         // this decode belongs to a scan that no longer exists — drop it rather than report a
-        // reading or a foreign device against the current session.
+        // reading or a rejection against the current session.
         if (generation !== this.generation) return
-        if (!reading) {
-          this.handlers.onForeignDevice?.()
+        if (!outcome.decoded) {
+          this.handlers.onUnreadable?.(outcome.rejection, this.source)
           return
         }
         this.lastReadingAt = Date.now()
@@ -125,7 +173,7 @@ export class SolarAdvertisementProcessor {
           this.identityReported = true
           this.handlers.onIdentity?.(modelId)
         }
-        this.handlers.onReading?.(reading, rssi)
+        this.handlers.onReading?.(outcome.reading, rssi)
       })
       .catch((error: Error) => this.handlers.onError?.(error))
   }
