@@ -71,12 +71,9 @@ const CAPABILITY_ROWS: readonly CapabilityRow[] = [
   { name: 'canConnect', label: 'canConnect' },
   { name: 'canReconnect', label: 'canReconnect' },
   { name: 'canScan', label: 'canScan', inert: 'playback bypasses the transport choice' },
-  {
-    name: 'canWatchAdvertisements',
-    label: 'canWatchAdvertisements',
-    inert: 'playback bypasses the transport choice',
-  },
-  { name: 'scanKnownSilent', label: 'scanKnownSilent', inert: 'nothing on the fake path reads it' },
+  // Not inert: with canReconnect, this is what the fake controller answers "can this page put the
+  // watch back by itself" with, so dropping either raises the cannot-come-back banner.
+  { name: 'canWatchAdvertisements', label: 'canWatchAdvertisements' },
   {
     name: 'platformDeliversAdvertisements',
     label: 'platformDeliversAdvertisements',

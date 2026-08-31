@@ -11,11 +11,11 @@
  * mismatch here is most likely the boat next door, where on the watch route it could only be
  * this controller's own key.
  *
- * This is the scan route `SolarLiveScan` picks; it never wires itself. `requestLEScan` is
- * unreliable on some desktop platforms — on macOS Chrome it opens its prompt and then never
- * delivers an advertisement — which is what `SolarWatchScanner` answers in the browser, and a
- * silence here flips the remembered verdict to 'watch' so the next press goes that way.
- * `BridgeSolarScan` stays the fallback for a browser that has neither radio.
+ * This is the scan route `SolarLiveScan` picks; it never wires itself. It is picked only where the
+ * browser has no `watchAdvertisements`, because `requestLEScan` is unreliable on some desktop
+ * platforms — on macOS Chrome it opens its prompt and then never delivers an advertisement — and
+ * needs its prompt answered afresh on every start. `BridgeSolarScan` stays the fallback for a
+ * browser that has neither radio.
  */
 
 import { parseAdvertisementKey } from '../../domain/solar/advertisement'
@@ -67,6 +67,11 @@ export class VictronScanner implements SolarScan {
    * list for a scan to be found on, because a scan is not about a device at all.
    */
   canResume(): boolean {
+    return false
+  }
+
+  /** Never, and for the reason above: no controller this browser could be shown changes it. */
+  canEverResume(): boolean {
     return false
   }
 

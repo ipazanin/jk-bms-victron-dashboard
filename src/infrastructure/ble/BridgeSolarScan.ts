@@ -75,6 +75,11 @@ export class BridgeSolarScan implements SolarScan {
     return true
   }
 
+  /** Always, and with nothing remembered: there is no handle in this route to be waiting for. */
+  canEverResume(): boolean {
+    return true
+  }
+
   resume(keyHex: string): Promise<void> {
     return this.start(keyHex)
   }

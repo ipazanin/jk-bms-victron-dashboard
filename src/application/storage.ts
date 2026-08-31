@@ -1,17 +1,18 @@
 /**
  * The Victron encryption key lives in this browser's localStorage and nowhere else.
  * It is never sent anywhere: the page has no backend, and the whole site is static.
- *
- * Alongside it sits the route this browser reads the controller by, because a scan that finds
- * nothing only reveals itself fifteen seconds after the press, long past the activation that could
- * have raised a chooser. Remembering the verdict is what lets the next press take the other route.
  */
 
-import type { SolarLiveTransport } from '../infrastructure/ble/solarScan'
 import { storageKey } from './storageKey'
 
 const KEY_STORAGE = 'victron.advertisementKey'
-const TRANSPORT_STORAGE = 'victron.liveTransport'
+
+/**
+ * The name a browser once recorded which radio route it read the controller by under. The route is
+ * decided from what the browser can do now, so anything left here is read by nothing — but it was
+ * shipped, so a browser that has run this page before is still holding one.
+ */
+const SUPERSEDED_TRANSPORT_STORAGE = 'victron.liveTransport'
 
 export function loadAdvertisementKey(): string {
   try {
@@ -37,20 +38,14 @@ export function forgetAdvertisementKey(): void {
   }
 }
 
-/** The remembered verdict, or null when this browser has not proven a transport yet. */
-export function loadSolarLiveTransport(): SolarLiveTransport | null {
+/**
+ * Drops the entry no code reads any more. Called once as the page comes up rather than from
+ * anything that runs per reading, so the removal costs one call however long the page is left open.
+ */
+export function forgetSupersededSolarLiveTransport(): void {
   try {
-    const stored = localStorage.getItem(storageKey(TRANSPORT_STORAGE))
-    return stored === 'watch' || stored === 'scan' ? stored : null
+    localStorage.removeItem(storageKey(SUPERSEDED_TRANSPORT_STORAGE))
   } catch {
-    return null
-  }
-}
-
-export function saveSolarLiveTransport(transport: SolarLiveTransport): void {
-  try {
-    localStorage.setItem(storageKey(TRANSPORT_STORAGE), transport)
-  } catch {
-    // Private browsing denies storage; the verdict simply will not persist.
+    // Private browsing denies storage; there was nothing there to clear either.
   }
 }

@@ -1,68 +1,31 @@
 /**
  * Picks the route this browser reads live solar by, and re-picks it on every press.
  *
- * Feature detection alone cannot choose a route: macOS Chrome exposes `requestLEScan`, resolves
- * it, and then delivers nothing forever. On macOS the silence is a known platform fact, so a
- * browser with both routes and no remembered verdict starts on the watch — one press, one
- * chooser, no scanning-permission prompt. Elsewhere the test is behavioural: the silence takes
- * fifteen seconds to show itself and by then the click's transient activation is long spent, so
- * no chooser can be raised inside the failing press; the verdict is remembered and applied to the
- * next one, and the user reads a sentence in the solar banner telling them to press again.
+ * A browser that offers both routes takes the watch, always. Only the watch survives a reload: it
+ * holds a chooser-granted device that `getDevices` hands back, so the page can come up listening
+ * again without a press. `requestLEScan` can do neither — it needs a fresh user gesture for every
+ * start, and it cannot filter on manufacturer data, so it hears every beacon in the marina and
+ * sorts them in the page. It stays as the route for browsers that expose scanning but not
+ * `watchAdvertisements`, and for nothing else.
  *
- * The flag is self-correcting in the other direction too: any advertisement at all that lands on
- * the scan path clears it — one that would not decode included, because hearing a neighbour still
- * proves the scan delivers — so an Android user whose controller merely happened to be asleep is
- * not pushed onto the chooser for good.
- *
- * A resume goes through the same choice. Only the watch can come up without a gesture, but a
- * browser that has proven its own scan works keeps it: the route is decided by the evidence and
- * then asked whether it can resume, never the other way round.
+ * A resume goes through the same choice, which is what makes the answer to "can this page come
+ * back on its own" a question about the route rather than about the last time it was pressed.
  */
 
-import { loadSolarLiveTransport, saveSolarLiveTransport } from '../../application/storage'
 import { detectCapabilities } from './capabilities'
 import { SolarWatchScanner } from './SolarWatchScanner'
 import { VictronScanner } from './VictronScanner'
 import type { BleCapabilities } from './capabilities'
 import type { SolarLiveTransport, SolarScan, VictronHandlers } from './solarScan'
 
-/**
- * Names the button that is actually on screen. The scan is still up when this is raised, so the
- * panel reads "Stop solar" — telling the user to press Connect solar would point at a control that
- * is not rendered until they have stopped.
- */
-const SILENT_SCAN_NOTICE =
-  'The browser’s scan found nothing. Press Stop solar, then Connect solar, and pick the controller from the list.'
-
 export class SolarLiveScan implements SolarScan {
   private readonly handlers: VictronHandlers
   private readonly capabilities: BleCapabilities
-  private readonly relay: VictronHandlers
   private active: SolarScan | null = null
-  private activeTransport: SolarLiveTransport = 'scan'
-  private heardAnything = false
 
   constructor(handlers: VictronHandlers = {}) {
     this.handlers = handlers
     this.capabilities = detectCapabilities()
-    this.relay = {
-      onReading: (reading, rssi) => {
-        this.noteRadioHeard()
-        this.handlers.onReading?.(reading, rssi)
-      },
-      onUnreadable: (rejection, heardFrom) => {
-        this.noteRadioHeard()
-        this.handlers.onUnreadable?.(rejection, heardFrom)
-      },
-      onStale: () => {
-        this.noteSilence()
-        this.handlers.onStale?.()
-      },
-      onIdentity: (modelId) => this.handlers.onIdentity?.(modelId),
-      onWatchedDevice: (deviceId, deviceName) =>
-        this.handlers.onWatchedDevice?.(deviceId, deviceName),
-      onError: (error) => this.handlers.onError?.(error),
-    }
   }
 
   get scanning(): boolean {
@@ -74,16 +37,18 @@ export class SolarLiveScan implements SolarScan {
     return this.reachForRadio().start(keyHex)
   }
 
-  /**
-   * Whether the route this browser would take can come up on its own.
-   *
-   * The verdict outranks the ability to resume, which is why this asks the same question `start`
-   * does rather than looking for any route that could. A browser whose own scan has been proven to
-   * work is not moved onto the chooser's transport by the back door — the price of a gesture-free
-   * link is not worth paying in a route this browser has evidence against.
-   */
+  /** Whether the route this browser would take can come up on its own, given what is remembered. */
   canResume(rememberedDeviceId: string | null): boolean {
     return this.transportFor(this.chooseTransport()).canResume(rememberedDeviceId)
+  }
+
+  /**
+   * The same route, asked whether it has a way back at all. A browser with nothing but the scan
+   * answers no however long it is left alone, which is the whole of what a page holding no
+   * remembered controller has to go on.
+   */
+  canEverResume(): boolean {
+    return this.transportFor(this.chooseTransport()).canEverResume()
   }
 
   resume(keyHex: string, rememberedDeviceId: string | null): Promise<void> {
@@ -102,9 +67,7 @@ export class SolarLiveScan implements SolarScan {
    */
   private reachForRadio(): SolarScan {
     this.stop()
-    this.heardAnything = false
-    this.activeTransport = this.chooseTransport()
-    this.active = this.transportFor(this.activeTransport)
+    this.active = this.transportFor(this.chooseTransport())
     return this.active
   }
 
@@ -113,38 +76,17 @@ export class SolarLiveScan implements SolarScan {
    * nothing: a scanner touches no radio until it is told to.
    */
   private transportFor(transport: SolarLiveTransport): SolarScan {
-    return transport === 'watch' ? new SolarWatchScanner(this.relay) : new VictronScanner(this.relay)
+    return transport === 'watch'
+      ? new SolarWatchScanner(this.handlers)
+      : new VictronScanner(this.handlers)
   }
 
+  /**
+   * The watch wherever this browser has one, because it is the only route that comes back up
+   * without a press. The scan is what a browser exposing scanning alone is left with, and it is
+   * also where a browser with neither route goes, so the flag-hint error stays in one place.
+   */
   private chooseTransport(): SolarLiveTransport {
-    const { canScan, canWatchAdvertisements, scanKnownSilent } = this.capabilities
-    if (canScan && !canWatchAdvertisements) return 'scan'
-    if (!canScan && canWatchAdvertisements) return 'watch'
-    if (canScan && canWatchAdvertisements) {
-      // A remembered verdict is this browser's own evidence and outranks the platform default;
-      // absent one, a platform whose scan is known silent goes straight to the chooser instead of
-      // spending the user's first press proving it.
-      return loadSolarLiveTransport() ?? (scanKnownSilent ? 'watch' : 'scan')
-    }
-    // Neither route exists: hand it to the scanner so the flag-hint error stays in one place.
-    return 'scan'
-  }
-
-  private noteRadioHeard(): void {
-    // Once per attempt, not once per advertisement: this runs on every payload the radio hears,
-    // and the verdict below is a synchronous localStorage write.
-    if (this.heardAnything) return
-    this.heardAnything = true
-    // A scan that hears anything at all is working, whatever the last verdict said.
-    if (this.activeTransport === 'scan') saveSolarLiveTransport('scan')
-  }
-
-  private noteSilence(): void {
-    if (this.activeTransport !== 'scan' || this.heardAnything) return
-    if (!this.capabilities.canWatchAdvertisements) return
-    saveSolarLiveTransport('watch')
-    this.handlers.onError?.(new Error(SILENT_SCAN_NOTICE))
-    // The scan is left running on purpose: if the controller was merely out of range, a later
-    // advertisement still lands and clears the verdict again.
+    return this.capabilities.canWatchAdvertisements ? 'watch' : 'scan'
   }
 }

@@ -209,9 +209,17 @@ export class SolarWatchScanner implements SolarScan {
   }
 
   canResume(rememberedDeviceId: string | null): boolean {
-    return (
-      rememberedDeviceId !== null && watchAdvertisementsSupported() && permittedDevicesListable()
-    )
+    return rememberedDeviceId !== null && this.canEverResume()
+  }
+
+  /**
+   * Whenever the browser can hand a permitted device back and watch it. A controller has still to
+   * be picked once before that is worth anything, but the chooser tap is owed once and not once a
+   * page load — so a browser that has never been shown one is a route with a way back, not one
+   * without.
+   */
+  canEverResume(): boolean {
+    return watchAdvertisementsSupported() && permittedDevicesListable()
   }
 
   /**

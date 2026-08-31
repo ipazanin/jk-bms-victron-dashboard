@@ -19,6 +19,7 @@ import type { SolarAdvertisementRejection } from '../../../domain/solar/SolarAdv
 import type { SolarAdvertisementSource } from '../../../domain/solar/SolarAdvertisementSource'
 import type { SolarHistoryTransfer } from '../../../domain/solar/SolarHistoryTransfer'
 import type { SolarReading } from '../../../domain/solar/types'
+import type { BleCapabilities } from '../capabilities'
 import type { BmsLink, DisconnectReason, JkBmsHandlers } from '../JkBmsClient'
 import type { ReconnectPatience } from '../ReconnectPatience'
 import type { SolarHistoryHandlers, SolarHistoryLink } from '../VictronHistoryClient'
@@ -245,8 +246,23 @@ export interface FakeSolarRadio {
   emitError(error: Error): void
 }
 
-/** `onScanChange` fires whenever the scan starts or stops, on the same terms as the pack's link. */
-export function fakeSolarRadio(onScanChange: () => void): FakeSolarRadio {
+/**
+ * `onScanChange` fires whenever the scan starts or stops, on the same terms as the pack's link.
+ *
+ * The capabilities are the ones the app is running under — the dev panel's overrides included — and
+ * they are read for one question only: whether this browser has a route back to the controller
+ * without a press. Playback answers every other part of the transport choice by itself, but that
+ * one is the whole of a banner the owner sees, so it has to be reachable off the boat.
+ */
+export function fakeSolarRadio(
+  capabilities: BleCapabilities,
+  onScanChange: () => void,
+): FakeSolarRadio {
+  // What `SolarLiveScan` works out from the same flags: only the watch has a way back, and only
+  // where the browser will hand a permitted device back to be watched.
+  const canEverResume = (): boolean =>
+    capabilities.canWatchAdvertisements && capabilities.canReconnect
+
   let handlers: VictronHandlers = {}
   let scanning = false
   let startDwellMs = 0
@@ -266,7 +282,8 @@ export function fakeSolarRadio(onScanChange: () => void): FakeSolarRadio {
     // The recording plays back through the route that needs no gesture, so a fake session rejoins
     // the controller by itself exactly as the boat does — which is the only way the dev panel can
     // drive the behaviour at all.
-    canResume: (rememberedDeviceId) => rememberedDeviceId === DEMO_CONTROLLER_ID,
+    canResume: (rememberedDeviceId) => rememberedDeviceId === DEMO_CONTROLLER_ID && canEverResume(),
+    canEverResume,
     async resume() {
       await dwell(startDwellMs)
       if (startRejection !== null) throw startRejection

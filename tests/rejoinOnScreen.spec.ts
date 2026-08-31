@@ -32,7 +32,6 @@ const EVERYTHING_WORKS: BleCapabilities = {
   canReconnect: true,
   canScan: false,
   canWatchAdvertisements: true,
-  scanKnownSilent: false,
   platformDeliversAdvertisements: true,
   canListenSolar: true,
   hasSubtleCrypto: true,

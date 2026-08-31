@@ -145,7 +145,6 @@ describe('what the platform says about listening for a controller', () => {
 
       expect(capabilities.platformDeliversAdvertisements).toBe(true)
       expect(capabilities.canListenSolar).toBe(true)
-      expect(capabilities.scanKnownSilent).toBe(true)
     })
   })
 
@@ -159,7 +158,6 @@ describe('what the platform says about listening for a controller', () => {
 
       expect(capabilities.platformDeliversAdvertisements).toBe(true)
       expect(capabilities.canListenSolar).toBe(true)
-      expect(capabilities.scanKnownSilent).toBe(false)
     })
   })
 

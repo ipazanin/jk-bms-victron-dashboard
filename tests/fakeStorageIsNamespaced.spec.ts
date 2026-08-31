@@ -29,10 +29,9 @@ import {
 } from '../src/application/rememberedSession'
 import {
   forgetAdvertisementKey,
+  forgetSupersededSolarLiveTransport,
   loadAdvertisementKey,
-  loadSolarLiveTransport,
   saveAdvertisementKey,
-  saveSolarLiveTransport,
 } from '../src/application/storage'
 import { storageKey } from '../src/application/storageKey'
 import { SAMPLE_EPOCH, rememberedSession } from './support/samples'
@@ -40,6 +39,7 @@ import { SAMPLE_EPOCH, rememberedSession } from './support/samples'
 class RecordingStorage {
   private readonly entries = new Map<string, string>()
   private readonly reads: string[] = []
+  private readonly removals: string[] = []
 
   getItem(key: string): string | null {
     this.reads.push(key)
@@ -51,6 +51,7 @@ class RecordingStorage {
   }
 
   removeItem(key: string): void {
+    this.removals.push(key)
     this.entries.delete(key)
   }
 
@@ -70,9 +71,18 @@ class RecordingStorage {
     return [...this.reads]
   }
 
+  /**
+   * Recorded rather than inferred from what is left: a removal aimed at the real page's key clears
+   * an entry a fake session never wrote, so the map alone shows nothing at all.
+   */
+  keysRemoved(): readonly string[] {
+    return [...this.removals]
+  }
+
   forget(): void {
     this.entries.clear()
     this.reads.length = 0
+    this.removals.length = 0
   }
 }
 
@@ -86,13 +96,6 @@ const namespacedEntries = [
     write: (): void => saveAdvertisementKey('0123456789abcdef0123456789abcdef'),
     read: (): void => void loadAdvertisementKey(),
     forget: (): void => forgetAdvertisementKey(),
-  },
-  {
-    what: 'the proven solar transport',
-    key: 'victron.liveTransport',
-    write: (): void => saveSolarLiveTransport('watch'),
-    read: (): void => void loadSolarLiveTransport(),
-    forget: null,
   },
   {
     what: 'the last pack connected to',
@@ -166,7 +169,6 @@ describe('persistence under fake radios', () => {
 
     expect(written).toEqual({
       'the Victron encryption key': ['victron.advertisementKey.fake'],
-      'the proven solar transport': ['victron.liveTransport.fake'],
       'the last pack connected to': ['shunt.lastBmsDevice.fake'],
       'the last controller watched': ['shunt.lastSolarController.fake'],
       'the standing answer about rejoining': ['shunt.rejoinArmed.fake'],
@@ -187,7 +189,6 @@ describe('persistence under fake radios', () => {
 
     expect(consulted).toEqual({
       'the Victron encryption key': ['victron.advertisementKey.fake'],
-      'the proven solar transport': ['victron.liveTransport.fake'],
       'the last pack connected to': ['shunt.lastBmsDevice.fake'],
       'the last controller watched': ['shunt.lastSolarController.fake'],
       'the standing answer about rejoining': ['shunt.rejoinArmed.fake'],
@@ -222,7 +223,6 @@ describe('persistence under real radios', () => {
 
     expect(written).toEqual({
       'the Victron encryption key': ['victron.advertisementKey'],
-      'the proven solar transport': ['victron.liveTransport'],
       'the last pack connected to': ['shunt.lastBmsDevice'],
       'the last controller watched': ['shunt.lastSolarController'],
       'the standing answer about rejoining': ['shunt.rejoinArmed'],
@@ -240,5 +240,30 @@ describe('persistence under real radios', () => {
       clear()
       expect(storage.keysTouched(), entry.what).toEqual([])
     }
+  })
+})
+
+/**
+ * The one write a playback session makes that nothing else on the page would notice: a removal
+ * aimed at the wrong name would silently take the boat's entry with it.
+ */
+describe('clearing the transport a browser no longer records', () => {
+  it('removes the suffixed entry under playback, and leaves the real one alone', () => {
+    vi.stubEnv('VITE_FAKE_BLE', 'true')
+    storage.seed('victron.liveTransport', 'watch')
+
+    forgetSupersededSolarLiveTransport()
+
+    expect(storage.keysRemoved()).toEqual(['victron.liveTransport.fake'])
+    expect(storage.valueAt('victron.liveTransport')).toBe('watch')
+  })
+
+  it('removes the plain entry under real radios', () => {
+    storage.seed('victron.liveTransport', 'watch')
+
+    forgetSupersededSolarLiveTransport()
+
+    expect(storage.keysRemoved()).toEqual(['victron.liveTransport'])
+    expect(storage.valueAt('victron.liveTransport')).toBeNull()
   })
 })

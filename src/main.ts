@@ -9,11 +9,16 @@ import './styles/tokens.css'
 
 import { createApp } from 'vue'
 import App from './App.vue'
+import { forgetSupersededSolarLiveTransport } from './application/storage'
 import { applyInitialTheme } from './application/theme'
 
 // Before the mount, not inside it: the stylesheet's :root is the dark plane, so resolving this
 // from a component would paint dark and correct itself a frame later for anyone who chose light.
 applyInitialTheme()
+
+// Once a load, and nowhere near a radio: the entry it clears is dead weight in a browser that has
+// run an older build, and nothing on the page would ever notice it going.
+forgetSupersededSolarLiveTransport()
 
 createApp(App).mount('#app')
 

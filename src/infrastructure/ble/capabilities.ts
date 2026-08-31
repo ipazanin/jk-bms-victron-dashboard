@@ -26,12 +26,6 @@ export interface BleCapabilities {
   /** A chooser-picked device can be watched for advertisements — the route that works on macOS. */
   readonly canWatchAdvertisements: boolean
   /**
-   * The scan API exists here but is known never to deliver an advertisement, so a browser with
-   * both routes should start on the watch. True on macOS, where Chrome resolves `requestLEScan`
-   * and then stays silent forever.
-   */
-  readonly scanKnownSilent: boolean
-  /**
    * Whether this platform's browser ever hands an advertisement to a page at all.
    *
    * False on Linux and nowhere else. BlueZ reports advertisement data through a four-argument
@@ -69,9 +63,9 @@ export function watchAdvertisementsSupported(): boolean {
 /**
  * Which host this is, to the extent the answer changes what solar can do here.
  *
- * Only two platforms are named because only two behave differently: macOS resolves `requestLEScan`
- * and then delivers nothing forever, and Linux delivers nothing by either route ever. Windows,
- * ChromeOS and Android are one answer — implemented — and nothing here claims more than that.
+ * One platform is named because only one behaves differently: Linux delivers nothing by either
+ * route, ever. Every other host — Windows, macOS, ChromeOS, Android — is one answer, implemented,
+ * and nothing here claims more than that.
  *
  * `userAgentData` is Chromium-only and absent from lib.dom, but Web Bluetooth only exists in
  * Chromium, so it is the honest probe; the deprecated `navigator.platform` is the fallback for
@@ -79,17 +73,13 @@ export function watchAdvertisementsSupported(): boolean {
  * "Linux armv8l" on Android and "Linux x86_64" on ChromeOS, where advertisements do arrive — so the
  * word Linux is only believed once the user agent has ruled both of those out.
  */
-type HostPlatform = 'macos' | 'linux' | 'elsewhere'
+type HostPlatform = 'linux' | 'elsewhere'
 
 function hostPlatform(): HostPlatform {
   if (typeof navigator === 'undefined') return 'elsewhere'
   const reported = (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform
-  if (reported !== undefined) {
-    if (reported === 'macOS') return 'macos'
-    return reported === 'Linux' ? 'linux' : 'elsewhere'
-  }
+  if (reported !== undefined) return reported === 'Linux' ? 'linux' : 'elsewhere'
   const platform = navigator.platform ?? ''
-  if (platform.startsWith('Mac')) return 'macos'
   if (platform.startsWith('Linux') && !/Android|CrOS/.test(navigator.userAgent ?? '')) return 'linux'
   return 'elsewhere'
 }
@@ -101,8 +91,7 @@ export function detectCapabilities(): BleCapabilities {
   const canScan = hasBluetooth && typeof bluetooth!.requestLEScan === 'function'
   const canWatchAdvertisements =
     hasBluetooth && typeof bluetooth!.requestDevice === 'function' && watchAdvertisementsSupported()
-  const platform = hostPlatform()
-  const platformDeliversAdvertisements = platform !== 'linux'
+  const platformDeliversAdvertisements = hostPlatform() !== 'linux'
 
   return {
     hasBluetooth,
@@ -111,7 +100,6 @@ export function detectCapabilities(): BleCapabilities {
     canReconnect: hasBluetooth && typeof bluetooth!.getDevices === 'function',
     canScan,
     canWatchAdvertisements,
-    scanKnownSilent: canScan && platform === 'macos',
     platformDeliversAdvertisements,
     canListenSolar: platformDeliversAdvertisements && (canScan || canWatchAdvertisements),
     hasSubtleCrypto: typeof globalThis.crypto?.subtle?.decrypt === 'function',

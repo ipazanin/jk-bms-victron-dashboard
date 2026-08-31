@@ -327,7 +327,7 @@ export class FakeRadioController {
     this.bleEnvironment = new FakeBleEnvironment()
     this.pageActivity = new FakePageActivity()
     this.pack = fakeBmsRadio(() => this.packLinkChanged())
-    this.solar = fakeSolarRadio(() => this.syncPlayback())
+    this.solar = fakeSolarRadio(this.bleEnvironment.capabilities, () => this.syncPlayback())
     this.solarHistory = fakeSolarHistoryRadio()
     this.clock = new PlaybackClock({
       onPack: this.deliverPack,

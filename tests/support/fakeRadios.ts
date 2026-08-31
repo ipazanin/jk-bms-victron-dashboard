@@ -319,9 +319,12 @@ export function fakeSolarScan(): FakeSolarScan {
     },
     // Shaped like the watch by default, which is the route this matters on: a browser that could
     // resume still cannot resume to a controller it has never been shown. `resumesWithNoHandle`
-    // swaps in the bridge's answer, which is about the route alone.
-    canResume: (rememberedDeviceId) =>
-      resumeAllowed && (!handleNeeded || rememberedDeviceId !== null),
+    // swaps in the bridge's answers, which are about the route alone — yes to both, whatever is
+    // remembered and whatever `allowResume` says, exactly as `BridgeSolarScan` answers.
+    canResume: (rememberedDeviceId) => !handleNeeded || (resumeAllowed && rememberedDeviceId !== null),
+    // The route on its own, which is what `allowResume` has always meant: whether a controller has
+    // been shown to it yet is the other question.
+    canEverResume: () => !handleNeeded || resumeAllowed,
     async resume(_keyHex, rememberedDeviceId) {
       resumeCalls.push(rememberedDeviceId)
       const parked = parkedResume

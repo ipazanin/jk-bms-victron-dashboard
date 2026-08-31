@@ -25,18 +25,13 @@ import type { BleCapabilities, BleEnvironment } from '../capabilities'
 /** Only a build serving playback radios ever reads this, so the key carries no shared name. */
 const OVERRIDE_STORAGE = 'shunt.fakeBleCapabilities'
 
-/**
- * What a browser reports when every route to a Bluetooth device works. `scanKnownSilent` is false
- * among them deliberately: it says the scan resolves and then delivers nothing, which is a
- * statement about a platform and not a capability to hold on.
- */
+/** What a browser reports when every route to a Bluetooth device works. */
 const EVERY_ROUTE_WORKS: Partial<BleCapabilities> = {
   hasBluetooth: true,
   canConnect: true,
   canReconnect: true,
   canScan: true,
   canWatchAdvertisements: true,
-  scanKnownSilent: false,
   platformDeliversAdvertisements: true,
   canListenSolar: true,
 }
@@ -48,7 +43,6 @@ const CAPABILITY_NAMES: readonly (keyof BleCapabilities)[] = [
   'canReconnect',
   'canScan',
   'canWatchAdvertisements',
-  'scanKnownSilent',
   'platformDeliversAdvertisements',
   'canListenSolar',
   'hasSubtleCrypto',

@@ -90,6 +90,16 @@ export interface SolarScan {
    */
   canResume(rememberedDeviceId: string | null): boolean
   /**
+   * Whether this transport has any gesture-free start in it at all, controller aside.
+   *
+   * `canResume` cannot be read for this. Asked about nothing remembered it answers no on the watch
+   * as well as on the browser's own scan, and the two are nothing alike: one is a route waiting to
+   * be shown a controller, the other a route that will need its prompt answered however many
+   * controllers it is shown. Only the second is worth telling the owner about, and only this
+   * question separates them.
+   */
+  canEverResume(): boolean
+  /**
    * Start again with no chooser and no user gesture, on a controller this origin is already
    * permitted to talk to. Only worth calling where `canResume` says so; elsewhere it rejects
    * saying which of the two — the transport or the permission — is in the way.
@@ -100,9 +110,8 @@ export interface SolarScan {
 
 /**
  * Which route this browser reads live solar by. 'scan' is the browser's own `requestLEScan`;
- * 'watch' is one chooser-picked device watched for advertisements, which is what macOS needs.
- * Remembered between presses because the scan's failure — silence — only shows itself long after
- * the click that could have raised a chooser.
+ * 'watch' is one chooser-picked device watched for advertisements, which is what macOS needs and
+ * the only one of the two that ever comes back without a press.
  */
 export type SolarLiveTransport = 'scan' | 'watch'
 
