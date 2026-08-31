@@ -23,7 +23,9 @@
  * permission prompt however many times it has been answered — is left running and left alone.
  *
  * Nothing in here writes a banner either, for the reason the pack's supervisor does not: a
- * controller asleep at sunset is the ordinary case, not a fault.
+ * controller asleep at sunset is the ordinary case, not a fault. The one thing it does say is that
+ * this browser has no way back at all — and it says it whatever the adapter is doing, because a
+ * browser that will not report an adapter is exactly where the bridge is used.
  */
 
 import { readonly, ref } from 'vue'
@@ -43,7 +45,10 @@ import type { CancelScheduled, Schedule } from './schedule'
 export interface SolarRejoinSupervisorDeps {
   /** The owner's standing answer about going back to the boat, read at every decision. */
   readonly rejoinArmed: () => boolean
-  /** Whether the radio is on. Null is the browser refusing to say, which is not a reason to try. */
+  /**
+   * Whether the radio is on. Only a plain no holds an attempt back: null is the browser declining
+   * to say, and the bridge — which uses no browser radio at all — never gets any other answer.
+   */
   readonly adapterOn: () => boolean | null
   readonly rememberedController: () => LastController | null
   /**
@@ -53,6 +58,8 @@ export interface SolarRejoinSupervisorDeps {
   readonly advertisementKeyStored: () => boolean
   /** Whether the route this browser would take could come up with no gesture at all. */
   readonly canResume: (rememberedDeviceId: string | null) => boolean
+  /** Whether that route has any gesture-free start in it at all, as `SolarScan` defines it. */
+  readonly canEverResume: () => boolean
   /** Whether a scan is already up, or a press is already starting one. */
   readonly solarBusy: () => boolean
   /**
@@ -172,7 +179,10 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
   function whatItTakesToResume(): boolean {
     return (
       deps.rejoinArmed() &&
-      deps.adapterOn() === true &&
+      // Not `=== true`: a browser with no `navigator.bluetooth` never reports an adapter at all, and
+      // the bridge runs there on purpose. An attempt that cannot work fails and backs off; one that
+      // is never made leaves the page waiting on an answer nothing is going to give it.
+      deps.adapterOn() !== false &&
       deps.advertisementKeyStored() &&
       rememberedId() !== null &&
       deps.canResume(rememberedId())
@@ -185,15 +195,15 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
 
   /**
    * What the owner would have to do about it, when there is anything to be done. A browser holding
-   * no key and one that has never been shown a controller are both silent: neither is a fault, and
-   * a page that has never watched anything must not open with a complaint about permissions.
+   * no key is silent: that is not a fault, and a page that has been given nothing to decode with
+   * must not open with a complaint about permissions.
    *
    * `permission-gone` is the one answer only an attempt can give, so whatever the last one said
    * stands until an attempt — or a watch that is up, which settles the question by existing — says
    * otherwise.
    */
   function reportBlocker(): void {
-    if (!deps.rejoinArmed() || !deps.advertisementKeyStored() || rememberedId() === null) {
+    if (!deps.rejoinArmed() || !deps.advertisementKeyStored()) {
       blocker.value = null
       return
     }
@@ -201,6 +211,22 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
     // one of them. Connect solar is how a lapsed permission is answered and it runs no attempt
     // through here, so without this nothing would ever take the claim back.
     if (deps.solarBusy()) {
+      blocker.value = null
+      return
+    }
+    // Before the remembered controller and not after it, which is the whole reason the route is a
+    // question of its own. A route that can never come back has nothing to remember a controller
+    // for and never remembers one, so a gate on the id first left the browser's own scan standing
+    // down in total silence — the one case where silence is a lie, because no amount of waiting
+    // will put the controller back.
+    if (!deps.canEverResume()) {
+      blocker.value = 'browser-cannot-rejoin'
+      return
+    }
+    // Nothing to go back to, and nothing to say about it: on a route that could resume, this is a
+    // browser that has never watched a controller, or one whose owner has just pressed Stop solar.
+    // Both are standing down on purpose.
+    if (rememberedId() === null) {
       blocker.value = null
       return
     }

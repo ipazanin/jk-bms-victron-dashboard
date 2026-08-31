@@ -183,8 +183,9 @@ describe('what the Connect panel promises about reconnecting', () => {
       }),
     )
 
-    expect(text).toContain('cannot list the devices you have already allowed')
-    expect(text).toContain('every connection starts from the chooser')
+    // The same words the blocker uses, so one browser condition is not described twice over.
+    expect(text).toContain('has no way back to the pack without being asked')
+    expect(text).toContain('picked from the chooser every time')
     expect(text).not.toContain('keeps looking for')
   })
 })

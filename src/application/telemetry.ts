@@ -1237,6 +1237,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     // VictronConnect have no business travelling any further than the radio that needs them.
     advertisementKeyStored: () => loadAdvertisementKey() !== '',
     canResume: (deviceId) => solarScan.canResume(deviceId),
+    canEverResume: () => solarScan.canEverResume(),
     solarBusy: () => solarState.value !== 'idle',
     resumeSolar,
     standDownSolar,

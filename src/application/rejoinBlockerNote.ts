@@ -8,6 +8,12 @@
  *
  * The subject never opens a sentence, so a device with no advertised name can stand in as a plain
  * noun without the copy reading as a sentence that starts mid-thought.
+ *
+ * `browser-cannot-rejoin` names no mechanism, because two of them reach it: a browser that cannot
+ * list the devices it has already been allowed, and a radio route whose own prompt has to be
+ * answered afresh on every start. What the owner does about either is the same press, so the
+ * sentence names that press and not the mechanism — and the Connect page says it in these words
+ * too, for a browser that has never been shown a device and so has no blocker to report yet.
  */
 
 import type { RejoinBlocker } from './RejoinBlocker'
@@ -21,8 +27,8 @@ export function rejoinBlockerNote(blocker: RejoinBlocker, subject: string): stri
       )
     case 'browser-cannot-rejoin':
       return (
-        'This browser cannot list the devices you have already allowed, so ' +
-        `${subject} has to be picked from the chooser every time. Nothing here happens on its own.`
+        `This browser has no way back to ${subject} without being asked, so it has to be picked ` +
+        'from the chooser every time. Nothing here happens on its own.'
       )
     case 'radio-off':
       return (

@@ -75,6 +75,13 @@ const controllerSubject = computed(() => props.controllerName ?? 'the controller
 const packBlockerNote = computed(() =>
   props.rejoinBlocker === null ? null : rejoinBlockerNote(props.rejoinBlocker, packSubject.value),
 )
+/**
+ * The same sentence, for the browser that has nothing to report a blocker about yet: no permitted
+ * device list means no automatic anything, whether or not a pack has ever been connected here.
+ */
+const packCannotRejoinNote = computed(() =>
+  rejoinBlockerNote('browser-cannot-rejoin', packSubject.value),
+)
 const solarBlockerNote = computed(() =>
   props.solarRejoinBlocker === null
     ? null
@@ -175,10 +182,10 @@ const solarRejectionIsTheirs = computed(() => props.solarRejectionSource === 'th
 
     <p v-if="packBlockerNote" class="hint acting">{{ packBlockerNote }}</p>
     <!-- A browser with no list of allowed devices is never promised anything automatic, whether or
-         not a pack has ever been connected on it. -->
+         not a pack has ever been connected on it — and it is the same condition the blocker above
+         reports once one has been, so it is said in the same words. -->
     <p v-else-if="capabilities.canConnect && !capabilities.canReconnect" class="hint acting">
-      This browser cannot list the devices you have already allowed, so every connection starts from
-      the chooser and nothing here happens on its own.
+      {{ packCannotRejoinNote }}
     </p>
 
     <label v-if="capabilities.canConnect && bmsState !== 'live'" class="checkbox">

@@ -176,6 +176,17 @@ describe('when automatic rejoin may try at all', () => {
     expect(boat.latest.patience).toBe('straight-in-only')
   })
 
+  it('tries anyway on a browser that will not say whether the radio is on', () => {
+    const boat = supervise({ adapterOn: null })
+
+    boat.supervisor.start()
+
+    // Only a plain no is a reason to wait. An answer that is never coming would otherwise hold the
+    // loop still forever, and with nothing on screen to say what it is waiting for.
+    expect(boat.attempts).toHaveLength(1)
+    expect(boat.supervisor.blocker.value).toBeNull()
+  })
+
   it('has nothing to do for a browser that has never connected to a pack', () => {
     const boat = supervise({ pack: null })
 

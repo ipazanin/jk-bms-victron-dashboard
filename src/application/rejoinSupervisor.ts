@@ -13,7 +13,9 @@
  * There is exactly one place where an attempt is born and exactly one where its failure is priced.
  *
  * Four conditions gate every attempt this loop makes of its own accord, and the page being in front
- * is not one of them. What the page decides is how an attempt is made and how often, never whether.
+ * is not one of them. The radio is one of the four, and only a radio reported off holds an attempt
+ * back: a browser that will not say is asked anyway, because waiting on an answer that is never
+ * coming is a loop that never tries and never says why. What the page decides is how an attempt is made and how often, never whether.
  * Chromium kills an advertisement watch the moment the tab is hidden or the window loses focus,
  * silently, so behind another window the loop asks for the half that survives — the straight attach,
  * which needs no focus and is answered in seconds — and it asks for it on a slower cadence, because
@@ -108,7 +110,10 @@ export interface RejoinSupervisorDeps {
   readonly rejoinArmed: () => boolean
   /** Whether this browser can rejoin a permitted pack without the chooser at all. */
   readonly canRejoinWithoutChooser: boolean
-  /** Whether the radio is on. Null is the browser refusing to say, which is not a reason to try. */
+  /**
+   * Whether the radio is on. Only a plain no holds an attempt back: null is the browser declining
+   * to say, and a browser that never answers would otherwise never be tried at all.
+   */
   readonly adapterOn: () => boolean | null
   readonly rememberedPack: () => LastDevice | null
   /** Whether a link is already up, or a press is already making one. */
@@ -242,7 +247,9 @@ export function createRejoinSupervisor(deps: RejoinSupervisorDeps) {
   function mayTry(): boolean {
     return (
       deps.rejoinArmed() &&
-      deps.adapterOn() === true &&
+      // Not `=== true`: an unknown adapter is a browser that will not answer, and it must not veto
+      // an attempt. A route that cannot really work fails its attempt and backs off from there.
+      deps.adapterOn() !== false &&
       deps.canRejoinWithoutChooser &&
       deps.rememberedPack() !== null
     )

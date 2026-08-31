@@ -56,7 +56,7 @@ function rememberController(): void {
   saveLastController('victron-1', 'SmartSolar HQ22487VZHZ', 1_700_000_000_000)
 }
 
-function spawn(): void {
+function spawn(options: { adapterNeverReports?: boolean } = {}): void {
   timers = manualSchedule(Date.now())
   page = scriptedPage()
   session = 0
@@ -64,11 +64,16 @@ function spawn(): void {
   solar.allowResume(true)
   solar.reportsDevice('victron-1', 'SmartSolar HQ22487VZHZ')
   store = new MemoryHistoryStore({ now: () => timers.now() })
+  const browser = browserThatCanRejoin()
   telemetry = createTelemetry({
     createBmsLink: fakeBmsLink({ deviceId: 'jk-abc', deviceName: 'JK_B2A8S20P' }).create,
     createSolarScan: solar.create,
     createSolarHistoryLink: fakeSolarHistoryLink().create,
-    bleEnvironment: browserThatCanRejoin(),
+    // A browser with no `navigator.bluetooth` never reports an adapter at all, which is where the
+    // bridge is used — so the tri-state stays unknown rather than turning into a no.
+    bleEnvironment: options.adapterNeverReports
+      ? { capabilities: browser.capabilities, watchAdapter: () => () => undefined }
+      : browser,
     historyStore: () => store,
     refreshRingLedger: async () => undefined,
     refreshSolarLedger: async () => undefined,
@@ -138,6 +143,67 @@ describe('putting the controller back on the air without a tap', () => {
     expect(solar.resumeCalls).toEqual([])
     expect(telemetry.solarRejoinBlocker.value).toBe('browser-cannot-rejoin')
     expect(telemetry.solarState.value).toBe('idle')
+  })
+
+  it('says so on a browser whose scan can never come back, before it has watched anything', async () => {
+    saveAdvertisementKey(ADVERTISEMENT_KEY)
+    spawn()
+    // The browser's own scan needs its prompt answered on every start and names no device, so this
+    // browser will never remember a controller and will never put one back by itself.
+    solar.allowResume(false)
+    solar.reportsDevice(null)
+
+    telemetry.startRejoin()
+    await flush()
+
+    // Gated on the remembered controller first, this browser stood down without a word — leaving
+    // the owner with a page that looks like it is waiting for a controller it can never reach.
+    expect(solar.resumeCalls).toEqual([])
+    expect(telemetry.solarRejoinBlocker.value).toBe('browser-cannot-rejoin')
+  })
+
+  it('says nothing on a browser that could come back once it has been shown a controller', async () => {
+    saveAdvertisementKey(ADVERTISEMENT_KEY)
+    spawn()
+
+    telemetry.startRejoin()
+    await flush()
+
+    // Nothing remembered on a route that can resume is a page that has never listened, or an owner
+    // who has just pressed Stop solar. Both are standing down on purpose and neither is a fault.
+    expect(solar.resumeCalls).toEqual([])
+    expect(telemetry.solarRejoinBlocker.value).toBeNull()
+  })
+
+  it('says nothing on a route that needs no controller at all, however little is remembered', async () => {
+    saveAdvertisementKey(ADVERTISEMENT_KEY)
+    spawn()
+    // The bridge is a WebSocket: it names no device and needs no permission, so it answers yes to
+    // a way back where a browser route would want a controller shown to it first. Nothing here is
+    // remembered and no device is reported, which on any other route is the banner's own case.
+    solar.allowResume(false)
+    solar.resumesWithNoHandle()
+    solar.reportsDevice(null)
+
+    telemetry.startRejoin()
+    await flush()
+
+    expect(telemetry.solarRejoinBlocker.value).toBeNull()
+  })
+
+  it('puts the watch back up on a browser that never says whether the radio is on', async () => {
+    rememberController()
+    spawn({ adapterNeverReports: true })
+
+    telemetry.startRejoin()
+    await flush()
+
+    // Only a plain no is a reason to wait. The bridge runs on a browser that reports no adapter at
+    // all, and a gate on a definite yes would leave it silent forever with nothing on screen to say
+    // what it was waiting for.
+    expect(telemetry.adapterOn.value).toBeNull()
+    expect(solar.resumeCalls).toEqual(['victron-1'])
+    expect(telemetry.solarState.value).toBe('listening')
   })
 
   it('stays put with no key stored, and complains about nothing', async () => {
