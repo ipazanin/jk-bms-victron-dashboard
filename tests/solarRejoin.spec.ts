@@ -18,7 +18,7 @@ import { MemoryHistoryStore } from './support/MemoryHistoryStore'
 import { scriptedPage } from './support/scriptedPage'
 import type { ScriptedPage } from './support/scriptedPage'
 import { fakeBmsLink, fakeSolarHistoryLink, fakeSolarScan } from './support/fakeRadios'
-import type { FakeSolarScan } from './support/fakeRadios'
+import type { FakeSolarHistoryLink, FakeSolarScan } from './support/fakeRadios'
 
 // The controller's half of automatic rejoin, at the level where the policy actually lives. The
 // radio is faked at the port, so what is under test is the schedule — when a watch is put up, when
@@ -33,6 +33,7 @@ let timers: ManualSchedule
 let page: ScriptedPage
 let telemetry: Telemetry
 let solar: FakeSolarScan
+let tunnel: FakeSolarHistoryLink
 let store: MemoryHistoryStore
 let session = 0
 
@@ -64,11 +65,12 @@ function spawn(options: { adapterNeverReports?: boolean } = {}): void {
   solar.allowResume(true)
   solar.reportsDevice('victron-1', 'SmartSolar HQ22487VZHZ')
   store = new MemoryHistoryStore({ now: () => timers.now() })
+  tunnel = fakeSolarHistoryLink()
   const browser = browserThatCanRejoin()
   telemetry = createTelemetry({
     createBmsLink: fakeBmsLink({ deviceId: 'jk-abc', deviceName: 'JK_B2A8S20P' }).create,
     createSolarScan: solar.create,
-    createSolarHistoryLink: fakeSolarHistoryLink().create,
+    createSolarHistoryLink: tunnel.create,
     // A browser with no `navigator.bluetooth` never reports an adapter at all, which is where the
     // bridge is used — so the tri-state stays unknown rather than turning into a no.
     bleEnvironment: options.adapterNeverReports
@@ -466,7 +468,17 @@ describe('what a watch that tore itself down leaves behind', () => {
     spawn()
     telemetry.startRejoin()
     await flush()
+    // The first reading of a watch also spends that watch's one history sweep, which takes the
+    // radio for as long as the tunnel is open. It is let come and go here, so what the complaint
+    // below lands on is a watch that is genuinely up.
     solar.emitReading(solarReading())
+    await flush()
+    await flush()
+    timers.advance(1_000)
+    await flush()
+    solar.emitReading(solarReading())
+    expect(telemetry.solarState.value).toBe('live')
+    expect(solar.resumeCalls).toHaveLength(2)
 
     solar.emitError(new Error('an advertisement would not decode'))
     await flush()
@@ -476,6 +488,42 @@ describe('what a watch that tore itself down leaves behind', () => {
     expect(telemetry.solarState.value).toBe('live')
     expect(telemetry.solar.value).not.toBeNull()
     expect(telemetry.solarError.value).toBe('an advertisement would not decode')
+  })
+})
+
+describe('who has the radio while the history is being swept', () => {
+  it('stands still while the tunnel holds it, and puts the watch back when it lets go', async () => {
+    rememberController()
+    spawn()
+    const settleSweep = tunnel.parkNextSweep()
+
+    telemetry.startRejoin()
+    await flush()
+    // The first reading of a watch is what spends its one automatic sweep, and the sweep is what
+    // takes the watch down: the controller stops broadcasting while a client is connected.
+    solar.emitReading(solarReading())
+    await flush()
+    await flush()
+    expect(telemetry.solarState.value).toBe('idle')
+
+    // The owner clicks into another window and back while the tunnel is open, which is the loop's
+    // loudest cue to put a watch up — and the one moment it must not. A watch over an open tunnel
+    // is a watch hearing nothing at best, and the sweep it interrupts is a minute of radio wasted.
+    page.blur()
+    page.focus()
+    timers.advance(60_000)
+    await flush()
+    expect(solar.resumeCalls).toEqual(['victron-1'])
+    expect(telemetry.solarRejoinSearching.value).toBe(false)
+
+    settleSweep()
+    await flush()
+    await flush()
+
+    // Nothing else would tell the loop the radio is free, so the sweep asks it to look afresh on
+    // its way out — and the wait it has just served is long past the floor between attempts.
+    expect(solar.resumeCalls).toEqual(['victron-1', 'victron-1'])
+    expect(telemetry.solarState.value).toBe('listening')
   })
 })
 

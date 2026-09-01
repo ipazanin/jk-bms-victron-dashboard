@@ -390,6 +390,30 @@ export function fakeSolarScan(): FakeSolarScan {
 export interface FakeSolarHistoryLink {
   /** Hand this to `createTelemetry` as `createSolarHistoryLink`. */
   create(handlers: SolarHistoryHandlers): SolarHistoryLink
+  /**
+   * What a sweep comes back with from here on, by either route. Silence, until a spec says
+   * otherwise — which is what every spec that never mentions the tunnel is relying on.
+   */
+  answerNextSweepWith(transfer: SolarHistoryTransfer): void
+  /**
+   * How a tunnel that would not open reaches the app: the sweep rejects, once. One-shot by design,
+   * so a spec about a single refused sweep cannot poison the read that follows it — which is the
+   * shape a spec about the app trying again needs.
+   */
+  failNextSweepWith(error: Error): void
+  /**
+   * Holds the next sweep outstanding and hands back what settles it, so a spec can land a second
+   * read, a stand-down or a live watch in the middle of one — which on a real tunnel is the better
+   * part of a minute, and the whole window the two radios are contending for.
+   */
+  parkNextSweep(): () => void
+  /** How many sweeps went through the chooser, which is how many gestures a spec has spent. */
+  readonly chooserSweepCount: number
+  /**
+   * Every controller id the chooser-free route was asked for, in order, so a spec can read off both
+   * how often history gathered itself and which controller it went back to.
+   */
+  readonly rememberedSweepCalls: readonly string[]
 }
 
 const NO_TUNNEL_ANSWER: SolarHistoryTransfer = {
@@ -406,28 +430,71 @@ const NO_TUNNEL_ANSWER: SolarHistoryTransfer = {
 }
 
 export function fakeSolarHistoryLink(): FakeSolarHistoryLink {
-  let reading = false
+  let nextSweep: SolarHistoryTransfer = NO_TUNNEL_ANSWER
+  let nextSweepError: Error | null = null
+  let parkedSweep: Promise<void> | null = null
+  /** Held so a second read joins the running sweep instead of opening a rival tunnel. */
+  let session: Promise<SolarHistoryTransfer> | null = null
+  let chooserSweepCount = 0
+  const rememberedSweepCalls: string[] = []
+
+  const sweep = (): Promise<SolarHistoryTransfer> => {
+    if (session !== null) return session
+    const parked = parkedSweep
+    parkedSweep = null
+    const running = (parked ?? Promise.resolve())
+      .then(() => {
+        const failure = nextSweepError
+        nextSweepError = null
+        if (failure !== null) throw failure
+        return nextSweep
+      })
+      .finally(() => {
+        session = null
+      })
+    session = running
+    return running
+  }
 
   const link: SolarHistoryLink = {
     get reading() {
-      return reading
+      return session !== null
     },
     get deviceName() {
       return 'SmartSolar HQ2'
     },
-    async readStoredHistory() {
-      reading = true
-      try {
-        return NO_TUNNEL_ANSWER
-      } finally {
-        reading = false
-      }
+    readStoredHistory() {
+      chooserSweepCount += 1
+      return sweep()
+    },
+    readRememberedHistory(deviceId: string) {
+      rememberedSweepCalls.push(deviceId)
+      return sweep()
     },
   }
 
   return {
     create() {
       return link
+    },
+    answerNextSweepWith: (transfer) => {
+      nextSweep = transfer
+    },
+    failNextSweepWith: (error) => {
+      nextSweepError = error
+    },
+    parkNextSweep() {
+      let settle = (): void => undefined
+      parkedSweep = new Promise<void>((resolve) => {
+        settle = () => resolve()
+      })
+      return settle
+    },
+    get chooserSweepCount() {
+      return chooserSweepCount
+    },
+    get rememberedSweepCalls() {
+      return [...rememberedSweepCalls]
     },
   }
 }

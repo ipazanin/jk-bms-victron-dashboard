@@ -79,9 +79,11 @@ const {
   detailLogError,
   detailLogReading,
   device,
+  lastController,
   logbook,
   readDetailLog,
   readSolarHistory,
+  rejoinArmed,
   ringFilingNote,
   ringIngest,
   solarHistory,
@@ -596,17 +598,19 @@ const staleness = computed(() => {
 // ── the controller's read receipt ────────────────────────────────────────────
 
 /**
- * Reading the controller's history is a manual act and stays one.
+ * Reading the controller's history costs the live feed, so it is rationed rather than withheld.
  *
  * A sweep opens a GATT connection, and the SmartSolar accepts exactly one BLE client at a time and
  * changes its advertising while connected — so for as long as the tunnel is open, VictronConnect
  * cannot reach the charger and the Instant Readout advertisements the dashboard's live solar figures
- * come from stop arriving. There is no automatic counterpart to the pack's stale-log check for that
- * reason, and the button says what it costs.
+ * come from stop arriving. The dashboard spends that hole on its own only when the stored copy is a
+ * day behind and this browser still holds a grant for the controller; the button is the same sweep
+ * asked for by name, and the copy either side of it says what it costs.
  */
 // `canConnect` only says the API exists. A desktop with its radio switched off passes that and
 // fails at the chooser, so the adapter is asked too — `null` is a browser that will not say, and a
-// button withheld on a maybe would be worse than one that tries.
+// button withheld on a maybe would be worse than one that tries. The background sweep rejoins a
+// remembered controller instead of raising a chooser, so this test is the button's alone.
 const canReadSolar = computed(
   () => capabilities.canConnect && adapterOn.value !== false && !solarHistoryReading.value,
 )
@@ -618,8 +622,10 @@ const solarDisabledReason = computed(() => {
   if (adapterOn.value === false) {
     return 'No Bluetooth radio is available, so the controller cannot be reached. Switch Bluetooth on and try again.'
   }
+  // A sweep this reader never asked for holds the same radio and disables the same button, so the
+  // sentence names both origins rather than implying a press that may not have happened.
   if (solarHistoryReading.value) {
-    return 'Sweeping the controller. It has up to forty-five seconds, and ends early once the replies go quiet.'
+    return 'Sweeping the controller, whether you asked for it or the page did. It has up to forty-five seconds, and ends early once the replies go quiet.'
   }
   return null
 })
@@ -743,11 +749,24 @@ const solarFilingFailure = computed(() => {
 })
 
 /**
- * How current this browser's copy is, and what another sweep would buy.
+ * Whether a sweep can happen without the reader, which is what makes the due sentence honest.
  *
- * The staleness test is the one the pack's auto-read uses, asked here for a sentence rather than for
- * a decision: this side never fetches by itself, so the only thing the answer can do is tell the
- * owner whether pressing the button is worth the interruption.
+ * The three conditions the background sweep can lose and this page can see: a browser that will
+ * list its permitted devices, a controller this one has already been shown, and an owner who has
+ * not told the page to stop going back to it — a disarmed loop restores no watch, so the sweep
+ * never takes one. Everything else the sweep asks — a reading actually arriving — is about a radio
+ * that is reporting, and without one there is no sweep to promise either way.
+ */
+const pageSweepsOnItsOwn = computed(
+  () => capabilities.canReconnect && lastController.value !== null && rejoinArmed.value,
+)
+
+/**
+ * How current this browser's copy is, and what happens next about it.
+ *
+ * The staleness test is the one the background sweep decides on, asked here for a sentence. Where
+ * the page can take that sweep itself the line says so; where it cannot — no grant for a controller,
+ * or a browser that will not hand back a remembered device — a due read is the reader's to ask for.
  */
 const solarStaleness = computed(() => {
   const held = solarLedger.value
@@ -759,7 +778,11 @@ const solarStaleness = computed(() => {
     behind === 0
       ? ' This browser is level with what the controller holds.'
       : ` ${behind} day${behind === 1 ? '' : 's'} of its backlog ${behind === 1 ? 'is' : 'are'} not here yet.`
-  const due = solarHistoryReadIsDue(held, now.value) ? ' Worth another sweep.' : ''
+  const due = !solarHistoryReadIsDue(held, now.value)
+    ? ''
+    : pageSweepsOnItsOwn.value
+      ? ' Due for another sweep, which the page takes itself the next time the controller reports in.'
+      : ' Worth another sweep.'
   return `Last swept ${relativeAge(answered.observedAt, now.value)}.${missing}${due}`
 })
 
@@ -932,7 +955,9 @@ function utcLabel(offsetMinutes: number): string {
         <p class="copy state">
           The solar controller keeps a month of daily totals of its own — yield, peak power, and how
           long it spent in each charge stage — and serves them over its own tunnel. Reading them
-          takes a moment and interrupts the live solar feed, so it happens only when you ask.
+          takes a moment and interrupts the live solar feed, so the dashboard fetches them by itself
+          only once the copy here is a day behind, and only while this browser still remembers the
+          controller. Ask for a sweep now if you would rather not wait for that.
         </p>
         <div class="actions">
           <button
@@ -1232,9 +1257,11 @@ function utcLabel(offsetMinutes: number): string {
         <header class="card-head">
           <h3 class="plate">The controller's stored history</h3>
           <p class="muted">
-            About a month of daily totals, kept on the charger and served over its own tunnel. Read
-            on your word and never by itself: a sweep holds the controller's one BLE connection, so
-            for those few seconds VictronConnect cannot reach it and the live solar readings stop.
+            About a month of daily totals, kept on the charger and served over its own tunnel. The
+            dashboard sweeps for them by itself once the copy here is a day behind and this browser
+            still remembers the controller; the button asks for one now. Either way the sweep holds
+            the controller's one BLE connection, so for those few seconds VictronConnect cannot reach
+            it and the live solar readings stop.
           </p>
         </header>
 

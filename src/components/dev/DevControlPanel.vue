@@ -33,6 +33,7 @@ import type { SolarAdvertisementSource } from '../../domain/solar/SolarAdvertise
 import type { ChargeState } from '../../domain/solar/types'
 import type { BleCapabilities } from '../../infrastructure/ble/capabilities'
 import { fakeRadioController } from '../../infrastructure/ble/fake/fakeDeps'
+import type { SolarSweepRoute } from '../../infrastructure/ble/fake/fakeRadios'
 
 /** One position of a lever. Null is the lever off, with the recording's own figure showing. */
 interface LeverStep {
@@ -474,6 +475,40 @@ watch(sweepAnswer, (answer) => answer.arm())
 
 const sweepDwellMs = ref(0)
 watch(sweepDwellMs, (dwellMs) => controller.holdSolarHistorySweep(dwellMs))
+
+/**
+ * The grant this origin holds for the remembered controller, thrown away without the chooser being
+ * touched — which is what Chromium does to a device it has not seen for a while.
+ *
+ * Only the sweep nobody asked for is refused by it, because the chooser mints a grant of its own.
+ * That asymmetry is the whole of the state worth reaching: history quietly stops gathering itself
+ * while the button beside it goes on working, so nothing on screen looks broken.
+ */
+const solarPermissionForgotten = ref(false)
+watch(solarPermissionForgotten, (forgotten) =>
+  controller.forgetSolarControllerPermission(forgotten),
+)
+
+/**
+ * Which route the last sweep took, read off the controller when the app stops reading rather than
+ * from an announcement: the controller announces a lever moving and deliberately not a sweep
+ * running, and a sweep is the one thing here that starts without anybody touching a control.
+ *
+ * It names the last sweep that reached the controller. An unattended attempt the browser refused
+ * never opened a tunnel, so it leaves this line where it was — what happened to that one is the
+ * receipt's business, and the receipt says so.
+ */
+const lastSweepRoute = ref<SolarSweepRoute | null>(null)
+watch(telemetry.solarHistoryReading, (reading) => {
+  if (!reading) lastSweepRoute.value = controller.lastSolarSweepRoute
+})
+
+const lastSweepLine = computed(() => {
+  if (lastSweepRoute.value === null) return 'nothing has swept the controller yet'
+  return lastSweepRoute.value === 'remembered'
+    ? 'last sweep — the remembered controller, no chooser raised'
+    : 'last sweep — the chooser'
+})
 
 // ── source, clock and archive ────────────────────────────────────────────────
 
@@ -989,7 +1024,7 @@ function wipeArchive(): void {
 
         <DevControlGroup
           title="Stored solar history"
-          note="Filing is a comparison, so what a sweep does depends on what is already filed: sweep the whole history once, then arm another answer and sweep again. Further along is what revises today. The whole history again, after the clock below has moved a day, redates every day held."
+          note="Filing is a comparison, so what a sweep does depends on what is already filed: sweep the whole history once, then arm another answer and sweep again. Further along is what revises today. The whole history again, after the clock below has moved a day, redates every day held. A sweep also happens on its own — once a watch, and only when what is filed has gone a day stale — so a controller heard again the next day sweeps itself with nobody pressing anything."
         >
           <label class="row">
             <span class="label">The controller answers with</span>
@@ -1008,6 +1043,16 @@ function wipeArchive(): void {
               </option>
             </select>
           </label>
+
+          <label class="toggle">
+            <input v-model="solarPermissionForgotten" type="checkbox" />
+            <span>
+              This browser has forgotten the controller — the sweep it does on its own is refused,
+              the button below still works
+            </span>
+          </label>
+
+          <p class="readout state">{{ lastSweepLine }}</p>
 
           <div class="actions">
             <button type="button" @click="telemetry.readSolarHistory()">Sweep the history</button>

@@ -30,8 +30,11 @@
 import { browserPageActivity } from '../../application/pageActivity'
 import type { PageActivity } from '../../application/pageActivity'
 import { parseAdvertisementKey } from '../../domain/solar/advertisement'
+import { SOLAR_TUNNEL_SERVICE } from '../../domain/solar/tunnel/session'
 import { VICTRON_COMPANY_ID } from '../../domain/solar/types'
 import { watchAdvertisementsSupported } from './capabilities'
+import { permittedDevice } from './permittedDevice'
+import type { PermittedDeviceRefusals } from './permittedDevice'
 import { ReconnectRefusedError } from './ReconnectRefusedError'
 import { SolarAdvertisementProcessor } from './solarScan'
 import type { SolarScan, VictronHandlers } from './solarScan'
@@ -95,13 +98,21 @@ function permittedDevicesListable(): boolean {
   return bluetooth !== undefined && typeof bluetooth.getDevices === 'function'
 }
 
+/** What the shared lookup says when a resume cannot be had, in this route's own words. */
+const WATCH_REFUSALS: PermittedDeviceRefusals = {
+  cannotListPermitted: 'This browser cannot start the watch without the chooser. Press Connect solar.',
+  wouldNotListPermitted: 'This browser would not list its permitted devices. Press Connect solar.',
+  permissionGone:
+    'This browser no longer has permission for the last controller. Press Connect solar to pick it again.',
+}
+
 /**
  * The remembered controller's handle, or a refusal naming which permission answer stopped us.
  *
- * These are the two questions the pack's own reconnect asks, in the controller's words, and the
- * distinction matters here for the same reason it does there: a device missing from `getDevices()`
- * says nothing whatever about range. The list is what this origin is permitted to talk to, so an
- * absence is permission gone and one chooser tap fixes it, where no amount of patience would.
+ * A browser that has never been shown a controller is refused ahead of the lookup, because there is
+ * no id to look anything up by. It counts as permission gone for the same reason an absent device
+ * does — a chooser tap is what fixes it, and waiting never will — but the sentence has to say that
+ * nothing has been picked yet rather than that something was and has lapsed.
  */
 async function permittedController(deviceId: string | null): Promise<BluetoothDevice> {
   if (deviceId === null) {
@@ -110,42 +121,22 @@ async function permittedController(deviceId: string | null): Promise<BluetoothDe
       'This browser has not been shown the controller yet. Press Connect solar and pick it from the list.',
     )
   }
-  const bluetooth = typeof navigator !== 'undefined' ? navigator.bluetooth : undefined
-  if (!bluetooth || typeof bluetooth.getDevices !== 'function') {
-    throw new ReconnectRefusedError(
-      'browser-cannot-rejoin',
-      'This browser cannot start the watch without the chooser. Press Connect solar.',
-    )
-  }
-  let permitted: readonly BluetoothDevice[]
-  try {
-    permitted = await bluetooth.getDevices()
-  } catch {
-    throw new ReconnectRefusedError(
-      'browser-cannot-rejoin',
-      'This browser would not list its permitted devices. Press Connect solar.',
-    )
-  }
-  const device = permitted.find((candidate) => candidate.id === deviceId)
-  if (!device) {
-    throw new ReconnectRefusedError(
-      'permission-gone',
-      'This browser no longer has permission for the last controller. Press Connect solar to pick it again.',
-    )
-  }
-  return device
+  return permittedDevice(deviceId, WATCH_REFUSALS)
 }
 
 /**
  * The company-id filter is what finds this controller among a marina full of Victron hardware;
- * `optionalManufacturerData` is what makes its payload survive into the event. No optional
- * services: this path never connects, so asking for the tunnel would be asking for permission we
- * must never use.
+ * `optionalManufacturerData` is what makes its payload survive into the event. The tunnel service
+ * rides along even though this path never connects: the grant this chooser mints is the very one
+ * the background history sweep later turns back into a handle through `getDevices()`, and a grant
+ * without the service lets that sweep connect and then be refused at the service door — over and
+ * over, since no retry widens a grant. Only a chooser can, so it does it here, once.
  */
 function watchChooserOptions(): RequestDeviceOptions {
   return {
     filters: [{ manufacturerData: [{ companyIdentifier: VICTRON_COMPANY_ID }] }],
     optionalManufacturerData: [VICTRON_COMPANY_ID],
+    optionalServices: [SOLAR_TUNNEL_SERVICE],
   }
 }
 

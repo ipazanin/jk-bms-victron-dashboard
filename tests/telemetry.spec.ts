@@ -6,6 +6,9 @@ import { browserStandardUtcOffsetMinutes } from '../src/application/browserZone'
 import { unavailableHistoryStore } from '../src/application/history/port'
 import type { HistoryStore } from '../src/application/history/port'
 import { RING_STALE_AFTER_MS } from '../src/application/history/ringIngest'
+import { SOLAR_HISTORY_STALE_AFTER_MS } from '../src/application/history/solarHistoryIngest'
+import { saveLastController } from '../src/application/lastController'
+import { saveAdvertisementKey } from '../src/application/storage'
 import { createTelemetry } from '../src/application/telemetry'
 import type { Telemetry, TelemetryDeps } from '../src/application/telemetry'
 import { saveRememberedSession } from '../src/application/rememberedSession'
@@ -15,11 +18,20 @@ import type { DetailLogTransfer } from '../src/domain/bms/DetailLogTransfer'
 import type { BatterySnapshot } from '../src/domain/bms/types'
 import type { RingRecordBytes } from '../src/domain/history/RingRecordBytes'
 import type { DeviceKey } from '../src/domain/history/types'
+import type { SolarHistoryTransfer } from '../src/domain/solar/SolarHistoryTransfer'
 import { SNAPSHOT_SCHEMA_VERSION } from '../src/domain/schemaVersion'
 import { browserBleEnvironment } from '../src/infrastructure/ble/capabilities'
+import type { BleEnvironment } from '../src/infrastructure/ble/capabilities'
 import { JkBmsClient } from '../src/infrastructure/ble/JkBmsClient'
+import { ReconnectRefusedError } from '../src/infrastructure/ble/ReconnectRefusedError'
 import { VictronScanner } from '../src/infrastructure/ble/VictronScanner'
+import { browserThatCanRejoin } from './support/browserThatCanRejoin'
+import { manualSchedule } from './support/manualSchedule'
+import type { ManualSchedule } from './support/manualSchedule'
 import { MemoryHistoryStore } from './support/MemoryHistoryStore'
+import { scriptedPage } from './support/scriptedPage'
+import type { ScriptedPage } from './support/scriptedPage'
+import { capturedDayReadings, capturedTotals } from './support/solarHistoryFixture'
 import {
   PACK_DEVICE_KEY,
   battery,
@@ -30,7 +42,7 @@ import {
   solarReading,
 } from './support/samples'
 import { fakeBmsLink, fakeSolarHistoryLink, fakeSolarScan } from './support/fakeRadios'
-import type { FakeBmsLink, FakeSolarScan } from './support/fakeRadios'
+import type { FakeBmsLink, FakeSolarHistoryLink, FakeSolarScan } from './support/fakeRadios'
 
 // Each case builds its own telemetry and throws it away, so nothing leaks between them: the
 // windows, the fault latch and the recorder are all per-instance. The failure-path cases run
@@ -730,6 +742,392 @@ describe('fetching a stale stored log without being asked', () => {
     await settle()
 
     expect(await store.readRingLedger(PACK_DEVICE_KEY)).toBeNull()
+  })
+})
+
+describe('gathering the controller’s stored history without being asked', () => {
+  // The other radio's half of the same policy, and a great deal more contended: the tunnel and the
+  // live watch cannot both have the controller, so every case here is as much about what happens to
+  // the watch as about what reaches the archive. Time and the page are the spec's, because the
+  // watch coming back is the supervisor's own schedule doing it.
+
+  /** A watch the loop can put up on its own: a key to decode with and a controller to go back to. */
+  const REMEMBERED_CONTROLLER = 'victron-1'
+  /** The floor the supervisor paces its attempts by, which a restored watch waits out. */
+  const ATTEMPT_GAP_MS = 1_000
+
+  let timers: ManualSchedule
+  let page: ScriptedPage
+  let solar: FakeSolarScan
+  let tunnel: FakeSolarHistoryLink
+  let store: MemoryHistoryStore
+  /** What `historyStore` answers, so a case can play an archive that has not landed yet. */
+  let archive: HistoryStore | null
+
+  /**
+   * Drains the chain a sweep runs on. It is longer than the pack's: naming the controller for the
+   * archive digests the stored key, which is a real crypto call rather than one of these fakes, and
+   * a sweep does it twice — once to ask the ledger and once to file what came back.
+   */
+  async function settle(): Promise<void> {
+    for (let turn = 0; turn < 4; turn += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+  }
+
+  /** The captured backlog, which is a sweep that leaves the ledger with nothing left to fetch. */
+  function daysRead(): SolarHistoryTransfer {
+    return {
+      outcome: 'days-read',
+      totals: capturedTotals,
+      days: capturedDayReadings(),
+      refusedRegisters: [],
+      notificationBytes: 1_984,
+      notificationCount: 62,
+      controlNotificationCount: 9,
+      pduCount: 32,
+      unreadableReplyCount: 0,
+      elapsedMs: 6_400,
+    }
+  }
+
+  function spawn(environment: BleEnvironment = browserThatCanRejoin()): void {
+    solar = fakeSolarScan()
+    solar.allowResume(true)
+    tunnel = fakeSolarHistoryLink()
+    telemetry = createTelemetry({
+      createBmsLink: fakeBmsLink().create,
+      createSolarScan: solar.create,
+      createSolarHistoryLink: tunnel.create,
+      bleEnvironment: environment,
+      historyStore: () => archive,
+      refreshRingLedger: async () => undefined,
+      refreshSolarLedger: async () => undefined,
+      now: () => timers.now(),
+      monotonic: () => timers.now(),
+      newId: () => 'session',
+      pageActivity: page.activity,
+      schedule: timers.schedule,
+    })
+  }
+
+  /** A watch the loop put up on its own, with the controller heard on it — which is the trigger. */
+  async function watchedAndHeard(): Promise<void> {
+    telemetry.startRejoin()
+    await settle()
+    solar.emitReading(solarReading())
+    await settle()
+    // Whatever the sweep did, the loop has a watch to put back once the tunnel lets go. It is left
+    // standing before a case goes on, because a watch the sweep itself took down and the loop
+    // restored is the same watch and carries the same spent chance.
+    timers.advance(ATTEMPT_GAP_MS)
+    await settle()
+  }
+
+  /**
+   * The owner looks away and comes back. Chromium killed the watch on the way out and the loop puts
+   * a fresh one up on the way in, which is the controller's answer to the pack's next connection.
+   */
+  async function watchGoesAwayAndComesBack(): Promise<void> {
+    page.hide()
+    page.show()
+    timers.advance(ATTEMPT_GAP_MS)
+    await settle()
+    solar.emitReading(solarReading())
+    await settle()
+  }
+
+  beforeEach(() => {
+    localStorage.clear()
+    timers = manualSchedule(Date.UTC(2026, 7, 1, 11, 14))
+    page = scriptedPage()
+    store = new MemoryHistoryStore({ now: () => timers.now() })
+    archive = store
+    saveAdvertisementKey(VALID_ADVERTISEMENT_KEY)
+    saveLastController(REMEMBERED_CONTROLLER, 'SmartSolar HQ22487VZHZ', timers.now())
+    spawn()
+  })
+
+  afterEach(() => {
+    store.close()
+  })
+
+  it('sweeps the controller by itself when this browser holds none of its backlog', async () => {
+    tunnel.answerNextSweepWith(daysRead())
+
+    await watchedAndHeard()
+
+    // Through the remembered route and not the chooser: a dialog nobody asked for is worse than no
+    // history at all, and the whole feature rests on there being a way in that raises none.
+    expect(tunnel.rememberedSweepCalls).toEqual([REMEMBERED_CONTROLLER])
+    expect(tunnel.chooserSweepCount).toBe(0)
+    expect(telemetry.solarHistory.value?.outcome).toBe('days-read')
+    expect(telemetry.solarHistoryIngest.value?.totalDays).toBe(capturedDayReadings().length)
+    expect(telemetry.solarHistoryError.value).toBeNull()
+  })
+
+  it('sweeps once in a watch, whatever the controller advertises after it', async () => {
+    tunnel.answerNextSweepWith(daysRead())
+    await watchedAndHeard()
+
+    solar.emitReading(solarReading())
+    solar.emitReading(solarReading())
+    await settle()
+
+    expect(tunnel.rememberedSweepCalls).toHaveLength(1)
+  })
+
+  it('leaves the controller alone on a watch that came up inside the day', async () => {
+    tunnel.answerNextSweepWith(daysRead())
+    await watchedAndHeard()
+
+    timers.advance(SOLAR_HISTORY_STALE_AFTER_MS - 60_000)
+    await watchGoesAwayAndComesBack()
+
+    expect(tunnel.rememberedSweepCalls).toHaveLength(1)
+  })
+
+  it('sweeps again on the first watch after the backlog has gone a day unswept', async () => {
+    tunnel.answerNextSweepWith(daysRead())
+    await watchedAndHeard()
+
+    timers.advance(SOLAR_HISTORY_STALE_AFTER_MS + 60_000)
+    await watchGoesAwayAndComesBack()
+
+    expect(tunnel.rememberedSweepCalls).toHaveLength(2)
+  })
+
+  /**
+   * A sweep the controller ignored still journals, and that row must not stand in for a backlog
+   * this browser has never held. Counting it as an answer would let one silent sweep lock the
+   * controller out of the archive for a day, over a backlog that rolls a day off the end each night.
+   */
+  it('tries again on the next watch when the controller answered nothing', async () => {
+    await watchedAndHeard()
+    expect(telemetry.solarHistory.value?.outcome).toBe('no-answer')
+
+    tunnel.answerNextSweepWith(daysRead())
+    await watchGoesAwayAndComesBack()
+
+    expect(tunnel.rememberedSweepCalls).toHaveLength(2)
+    expect(telemetry.solarHistory.value?.outcome).toBe('days-read')
+  })
+
+  it('does not try again inside the watch a sweep failed in', async () => {
+    tunnel.failNextSweepWith(new Error('the controller refused the connection'))
+
+    await watchedAndHeard()
+    expect(telemetry.solarHistoryError.value).toBe('the controller refused the connection')
+
+    solar.emitReading(solarReading())
+    await settle()
+
+    expect(tunnel.rememberedSweepCalls).toHaveLength(1)
+  })
+
+  it('takes the watch back from a sweep that failed, exactly as from one that worked', async () => {
+    // The radio is handed over before the tunnel is asked for anything, so every way out of a sweep
+    // owes the watch back — and a failure is the way out nobody is watching the screen for.
+    tunnel.failNextSweepWith(new Error('the controller refused the connection'))
+
+    await watchedAndHeard()
+
+    expect(telemetry.solarHistoryError.value).toBe('the controller refused the connection')
+    expect(telemetry.solarState.value).toBe('listening')
+    expect(solar.resumeCalls).toEqual([REMEMBERED_CONTROLLER, REMEMBERED_CONTROLLER])
+  })
+
+  it('clears the last failure off the receipt the moment the next sweep starts', async () => {
+    tunnel.failNextSweepWith(new Error('the controller refused the connection'))
+    await watchedAndHeard()
+    expect(telemetry.solarHistoryError.value).toBe('the controller refused the connection')
+
+    tunnel.answerNextSweepWith(daysRead())
+    await watchGoesAwayAndComesBack()
+
+    // A sentence about yesterday's tunnel standing over today's days would be the receipt arguing
+    // with itself, and the reader has no way to tell which half is current.
+    expect(telemetry.solarHistoryError.value).toBeNull()
+    expect(telemetry.solarHistory.value?.outcome).toBe('days-read')
+  })
+
+  /**
+   * A grant this browser has let lapse, and a grant minted without the tunnel service, are the two
+   * answers no retry moves. Every attempt at one costs a live watch and buys the same refusal back,
+   * so the automatic sweep gives up for the life of the page rather than spending the afternoon
+   * proving it. Only a chooser can widen a grant, and only the owner can raise one.
+   */
+  it('gives the automatic sweep up for the page once the browser refuses the controller', async () => {
+    tunnel.failNextSweepWith(
+      new ReconnectRefusedError(
+        'permission-gone',
+        'This browser no longer has permission for the last controller. Press Read solar history to pick it again.',
+      ),
+    )
+
+    await watchedAndHeard()
+    expect(tunnel.rememberedSweepCalls).toHaveLength(1)
+
+    await watchGoesAwayAndComesBack()
+    await watchGoesAwayAndComesBack()
+
+    expect(tunnel.rememberedSweepCalls).toHaveLength(1)
+    expect(telemetry.solarState.value).toBe('live')
+  })
+
+  it('asks again after a press, because a chooser is what mints a grant wide enough to answer', async () => {
+    tunnel.failNextSweepWith(
+      new ReconnectRefusedError(
+        'permission-gone',
+        'This browser no longer has permission for the last controller. Press Read solar history to pick it again.',
+      ),
+    )
+    await watchedAndHeard()
+
+    tunnel.answerNextSweepWith(daysRead())
+    await telemetry.readSolarHistory()
+    expect(tunnel.chooserSweepCount).toBe(1)
+
+    // And once the backlog has gone stale again, the watch that comes up next is free to gather it
+    // on its own: the press put the question back on the table.
+    timers.advance(SOLAR_HISTORY_STALE_AFTER_MS + 60_000)
+    await watchGoesAwayAndComesBack()
+
+    expect(tunnel.rememberedSweepCalls).toHaveLength(2)
+  })
+
+  it('leaves it to the button on a browser that cannot reach a device without the chooser', async () => {
+    telemetry.dispose()
+    const environment = browserThatCanRejoin()
+    // `getDevices` is the whole of the chooser-free route. Without it the remembered id is a string
+    // this browser can do nothing with, and the sweep is the owner's to ask for.
+    spawn({ ...environment, capabilities: { ...environment.capabilities, canReconnect: false } })
+
+    await watchedAndHeard()
+
+    expect(tunnel.rememberedSweepCalls).toEqual([])
+    expect(telemetry.solarState.value).toBe('live')
+  })
+
+  it('leaves it to the button when this browser has never been shown a controller', async () => {
+    telemetry.dispose()
+    localStorage.clear()
+    saveAdvertisementKey(VALID_ADVERTISEMENT_KEY)
+    spawn()
+    // The bridge names no controller: it is a WebSocket with no device handle anywhere in it, so
+    // there is no id for the remembered route to be given.
+    solar.resumesWithNoHandle()
+    solar.reportsDevice(null)
+
+    telemetry.startRejoin()
+    await telemetry.startSolar(VALID_ADVERTISEMENT_KEY)
+    solar.emitReading(solarReading())
+    await settle()
+
+    expect(telemetry.lastController.value).toBeNull()
+    expect(tunnel.rememberedSweepCalls).toEqual([])
+  })
+
+  /**
+   * The archive is probed after first paint, so a watch can be up and reporting before it answers.
+   * The latch must not be spent on a store that has yet to arrive, or the whole visit goes unswept.
+   */
+  it('still gets its chance when the archive lands after the controller has been heard', async () => {
+    archive = null
+    tunnel.answerNextSweepWith(daysRead())
+
+    await watchedAndHeard()
+    expect(tunnel.rememberedSweepCalls).toEqual([])
+
+    archive = store
+    solar.emitReading(solarReading())
+    await settle()
+
+    expect(tunnel.rememberedSweepCalls).toEqual([REMEMBERED_CONTROLLER])
+  })
+
+  it('hands the watch to the tunnel for the sweep and takes it back afterwards', async () => {
+    tunnel.answerNextSweepWith(daysRead())
+    const settleSweep = tunnel.parkNextSweep()
+
+    await watchedAndHeard()
+
+    // The controller accepts one client and stops broadcasting while it has one, so the watch comes
+    // down for the sweep rather than sitting there hearing nothing.
+    expect(telemetry.solarHistoryReading.value).toBe(true)
+    expect(telemetry.solarState.value).toBe('idle')
+    // And the loop does not race the tunnel for the radio it was just handed.
+    timers.advance(60_000)
+    await settle()
+    expect(solar.resumeCalls).toHaveLength(1)
+
+    settleSweep()
+    await settle()
+    timers.advance(ATTEMPT_GAP_MS)
+    await settle()
+
+    expect(telemetry.solarState.value).toBe('listening')
+    expect(solar.resumeCalls).toEqual([REMEMBERED_CONTROLLER, REMEMBERED_CONTROLLER])
+  })
+
+  /**
+   * The page going away takes the watch with it, and it is the page — not the sweep — that the
+   * watch coming back afterwards belongs to. So the chance a sweep spends dies with the watch it
+   * was spent on: a fresh watch owes nothing to the errand that borrowed the last one.
+   */
+  it('does not charge the next watch for a sweep the page was put away in the middle of', async () => {
+    const settleSweep = tunnel.parkNextSweep()
+    await watchedAndHeard()
+    expect(telemetry.solarHistoryReading.value).toBe(true)
+
+    page.hide()
+    settleSweep()
+    await settle()
+    page.show()
+    timers.advance(ATTEMPT_GAP_MS)
+    await settle()
+    solar.emitReading(solarReading())
+    await settle()
+
+    // The first sweep answered nothing, so the backlog is still this browser's to gather and the
+    // watch it came back on is a new one. Both halves have to hold for a second sweep to happen.
+    expect(tunnel.rememberedSweepCalls).toHaveLength(2)
+  })
+
+  it('still sweeps from the button, on the same terms', async () => {
+    tunnel.answerNextSweepWith(daysRead())
+    telemetry.startRejoin()
+    await settle()
+    expect(telemetry.solarState.value).toBe('listening')
+
+    await telemetry.readSolarHistory()
+
+    expect(tunnel.chooserSweepCount).toBe(1)
+    expect(tunnel.rememberedSweepCalls).toEqual([])
+    expect(telemetry.solarHistory.value?.outcome).toBe('days-read')
+
+    timers.advance(ATTEMPT_GAP_MS)
+    await settle()
+
+    expect(telemetry.solarState.value).toBe('listening')
+  })
+
+  /**
+   * The press is offered from the remembered view too, where there is no watch to hand over and
+   * nothing to hand it to. Standing down at nothing would clear the instruments and leave them
+   * cleared, because no watch is coming back to fill them in again.
+   */
+  it('leaves the remembered numbers on screen when the press comes from a page with no radio up', async () => {
+    const saved = session({ solar: solarReading() })
+    saveRememberedSession(saved)
+    telemetry.restoreRemembered()
+    tunnel.answerNextSweepWith(daysRead())
+
+    await telemetry.readSolarHistory()
+
+    expect(telemetry.solar.value).toEqual(saved.solar)
+    expect(telemetry.source.value).toBe('remembered')
+    expect(telemetry.solarHistory.value?.outcome).toBe('days-read')
   })
 })
 

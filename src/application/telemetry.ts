@@ -36,6 +36,7 @@ import type { BleEnvironment } from '../infrastructure/ble/capabilities'
 import { JkBmsClient } from '../infrastructure/ble/JkBmsClient'
 import type { BmsLink, JkBmsHandlers } from '../infrastructure/ble/JkBmsClient'
 import type { ReconnectPatience } from '../infrastructure/ble/ReconnectPatience'
+import { ReconnectRefusedError } from '../infrastructure/ble/ReconnectRefusedError'
 import { VictronHistoryClient } from '../infrastructure/ble/VictronHistoryClient'
 import type { SolarHistoryHandlers, SolarHistoryLink } from '../infrastructure/ble/VictronHistoryClient'
 import { SolarLiveScan } from '../infrastructure/ble/SolarLiveScan'
@@ -49,7 +50,11 @@ import { amps } from './format'
 import { useHistoryBrowser } from './history/historyBrowser'
 import type { HistoryStore, RingIngestOutcome, SolarHistoryIngestOutcome } from './history/port'
 import { ringReadIsDue, ringSnapshotOf } from './history/ringIngest'
-import { readOnDateFor, solarHistorySnapshotOf } from './history/solarHistoryIngest'
+import {
+  readOnDateFor,
+  solarHistoryReadIsDue,
+  solarHistorySnapshotOf,
+} from './history/solarHistoryIngest'
 import { SessionRecorder } from './history/SessionRecorder'
 import type { PackStreamEndReason, RecorderState } from './history/SessionRecorder'
 import { createObservations } from './observations'
@@ -329,6 +334,21 @@ export function createTelemetry(deps: TelemetryDeps) {
 
   /** Set for the life of one connection once the stale-log check has had its single chance. */
   let ringAutoReadConsidered = false
+  /**
+   * The controller's counterpart, spent on the first reading that proves this watch has a
+   * controller to sweep. One watch, one chance: the tunnel costs the live feed while it is open.
+   */
+  let solarAutoSweepConsidered = false
+  /**
+   * Set when a sweep failed in a way no retry can fix — the browser refused the remembered handle,
+   * or let the connection up and then refused the tunnel service, because the watch's grant was
+   * minted before the chooser asked for it. The latch above expires with the watch; this stands for
+   * the life of the page, because every automatic retry would cost a live watch and win nothing.
+   * Only the button clears it: a chooser mints a grant wide enough to change the answer.
+   */
+  let solarAutoSweepRefused = false
+  /** Whether the watch that comes up next is the one a sweep took the radio away from. */
+  let watchStoodDownForSweep = false
 
   const observations = createObservations()
   const faults = shallowRef<Fault[]>([])
@@ -648,6 +668,7 @@ export function createTelemetry(deps: TelemetryDeps) {
         releasePageHold()
         recorder.noteSolar(reading, rssi)
         noteWarnings(at)
+        considerAutoSolarHistorySweep()
       }
     },
     onUnreadable: (rejection, heardFrom) => {
@@ -771,6 +792,10 @@ export function createTelemetry(deps: TelemetryDeps) {
     solarRejection.value = null
     solarDeviceKey = null
     solarModelId = null
+    // A watch torn down by anything but the sweep's own claim voids the sweep's bookkeeping: the
+    // next watch to come up is a new watch, and it gets its own chance at the stored history.
+    // `handTheRadioToTheTunnel` is the one exception, and it re-marks the flag right after this.
+    watchStoodDownForSweep = false
   }
 
   /**
@@ -1239,6 +1264,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     canResume: (deviceId) => solarScan.canResume(deviceId),
     canEverResume: () => solarScan.canEverResume(),
     solarBusy: () => solarState.value !== 'idle',
+    historySweepHoldsRadio: () => solarHistoryReading.value,
     resumeSolar,
     standDownSolar,
     pageActivity,
@@ -1402,29 +1428,174 @@ export function createTelemetry(deps: TelemetryDeps) {
   })
 
   /**
-   * Sweeps the controller's stored history, on the user's word and never on the app's.
+   * Sweeps the controller's stored history from the chooser, which is the owner asking for one.
    *
-   * There is deliberately no counterpart to `considerAutoDetailLogRead` here. Reading this history
-   * means opening a GATT connection, and the controller accepts exactly one BLE client at a time and
-   * changes its advertising while connected: an automatic sweep would lock VictronConnect out and
-   * silently stop the Instant Readout advertisements every live solar reading on the dashboard comes
-   * from. So the cost of a sweep is a thing the owner chooses to pay, at a moment they pick.
-   *
-   * Called from a click for a second reason: `requestDevice` needs the transient activation, and
-   * nothing on this path may await before it.
+   * Nothing here may await before `readStoredHistory`: `requestDevice` needs the click's transient
+   * activation, and the two calls in front of it are synchronous for that reason alone — the guard
+   * and the receipt refs are plain writes, and `handTheRadioToTheTunnel` is the same stand-down the
+   * page already does when a watch goes away. `sweepStoredHistory` calls what it is given before
+   * its own first await, so the chooser still opens on the gesture that asked for it.
    */
   async function readSolarHistory(showAllDevices = false): Promise<void> {
-    if (solarHistoryReading.value) return
+    if (!claimRadioForSweep()) return
+    // The chooser this press is about to raise mints a fresh grant, tunnel service included, so a
+    // question the background sweep had given up on is worth asking again.
+    solarAutoSweepRefused = false
+    await sweepStoredHistory(() => solarHistoryLink.readStoredHistory(showAllDevices))
+  }
+
+  /**
+   * Sweeps the controller's stored history once a watch, and only when this browser's copy of the
+   * backlog has fallen a day behind the controller's. It is `considerAutoDetailLogRead` for the
+   * other radio.
+   *
+   * The route is what makes it possible at all. `readRememberedHistory` turns an id this origin
+   * already holds a grant for back into a handle, so a sweep costs no chooser and no gesture; the
+   * button's own route needs a click to spend, and a dialog nobody asked for would be worse than no
+   * history.
+   *
+   * It waits for a decoded reading rather than firing on a watch coming up, for the reason the
+   * pack's waits for a cell frame: an armed watch says nothing about the controller being in range,
+   * and a sweep aimed at a controller that is asleep is a minute of radio spent on a maybe. A
+   * reading is the controller saying it is there.
+   *
+   * One chance a watch, and a day between sweeps, because the tunnel is not free: the controller
+   * accepts a single BLE client and stops broadcasting Instant Readout while one is connected, so
+   * every sweep is a hole in the live feed the dashboard runs on. Against a backlog of thirty-one
+   * days, a boat visited monthly loses nothing by waiting.
+   *
+   * A failure is left as the receipt's business and is not retried, exactly as the pack's is. The
+   * next watch is the next chance.
+   */
+  function considerAutoSolarHistorySweep(): void {
+    if (solarAutoSweepConsidered || solarAutoSweepRefused || solarHistoryReading.value) return
+    // The archive is probed after first paint. Until it answers there is nothing to keep current,
+    // so the watch's one chance is not spent on a store that has yet to arrive.
+    const store = deps.historyStore()
+    if (store === null) return
+    solarAutoSweepConsidered = true
+    // What follows is about this browser and this watch rather than about this advertisement, so
+    // none of it can change under the latch that has just been spent. A browser that cannot list
+    // its permitted devices, and one that has never been shown a controller, are left to the button.
+    if (!capabilities.canReconnect) return
+    const controllerId = lastController.value?.id ?? null
+    if (controllerId === null) return
+    // Never take a watch nothing will put back. The supervisor is the only thing that restores one
+    // when the tunnel lets go, so a loop that is not running — or an owner who has said this browser
+    // should stop going back to the boat — turns a sweep into a live feed the page never gets back.
+    if (!solarRejoin.canRestoreTheWatch()) return
+    void sweepSolarHistoryIfStale(store, controllerId).catch(() => undefined)
+  }
+
+  /**
+   * The staleness question, asked before the radio is touched.
+   *
+   * The key is read while the watch is still up, because the stand-down forgets the live one — the
+   * stored key digests to the same value, but a ledger read is the one thing here that must happen
+   * before the sweep rather than after it.
+   */
+  async function sweepSolarHistoryIfStale(store: HistoryStore, controllerId: string): Promise<void> {
+    const deviceKey = await storedSolarDeviceKey()
+    const ledger = deviceKey === null ? null : await store.readRingLedger(deviceKey)
+    if (!solarHistoryReadIsDue(ledger, now())) return
+    if (!claimRadioForSweep()) return
+    await sweepStoredHistory(() => solarHistoryLink.readRememberedHistory(controllerId))
+  }
+
+  /**
+   * A watch is back up with nobody having pressed for it, which raises the question of whether it
+   * gets a chance at the controller's stored history.
+   *
+   * A watch the sweep itself took down and the supervisor put straight back is not a new watch, and
+   * it carries the same spent chance. Without that, a sweep whose answer filed no day — a tunnel
+   * that would not open, a controller with nothing to say, one the archive cannot name — would buy
+   * itself another the moment the watch returned, and the page would spend the afternoon cycling
+   * the radio between the tunnel and the watch. A page put away and brought back is a new watch and
+   * does get another chance; the ledger is what decides whether it is worth taking.
+   */
+  function noteWatchIsUp(): void {
+    const restoredAfterSweep = watchStoodDownForSweep
+    watchStoodDownForSweep = false
+    if (!restoredAfterSweep) solarAutoSweepConsidered = false
+  }
+
+  /**
+   * Claims the radio for a sweep, or answers false because a sweep already has it.
+   *
+   * Synchronous from end to end, including the stand-down: the chooser route runs this on the click
+   * that is about to raise the chooser, and one await anywhere inside it would spend the gesture.
+   */
+  function claimRadioForSweep(): boolean {
+    if (solarHistoryReading.value) return false
     solarHistoryReading.value = true
     solarHistoryError.value = null
+    handTheRadioToTheTunnel()
+    return true
+  }
+
+  /**
+   * Takes the live watch down so the tunnel can have the radio, without touching the owner's
+   * standing answer about going back to the boat.
+   *
+   * `stopSolarLink` and not `stopSolar`: the intent and the remembered controller both stand, which
+   * is the whole of what lets the supervisor put the watch back the moment the sweep lets go. A
+   * sweep is the app borrowing the radio, not the owner saying they are done with the controller.
+   *
+   * The watch would hear nothing anyway — the controller stops broadcasting while a client is
+   * connected — so leaving it armed would buy a dead watch and a staleness clock demoting the
+   * reading on screen under it. Doing it here instead means the instruments say what is true: no
+   * radio is reporting, so they fall back to the remembered numbers exactly as they do when a watch
+   * tears itself down.
+   *
+   * Nothing is stood over the recording. A sweep is bounded at well under a minute where the
+   * recorder's idle sweep is two, so unlike a page put away — which has no bound at all — a sweep
+   * cannot have a session closed underneath it.
+   *
+   * Only over a watch that is actually up, on the same guard `noteSolarWatchTornDown` keeps: a
+   * press from the remembered view, or from a page with no radio running at all, has nothing to
+   * stand down — and tearing at nothing would null the remembered reading with no watch coming
+   * back to replace it.
+   */
+  function handTheRadioToTheTunnel(): void {
+    const watchWasUp = solarState.value === 'live' || solarState.value === 'listening'
+    if (watchWasUp) {
+      persistRememberedNow(true)
+      stopSolarLink()
+      recorder.checkpoint()
+      if (source.value === 'live' && neitherRadioIsReporting()) settleView()
+    }
+    // Written after the stand-down, because `stopSolarLink` clears it: every other teardown is a
+    // watch genuinely going away, and only this one is the sweep borrowing the radio.
+    watchStoodDownForSweep = watchWasUp
+  }
+
+  /**
+   * One sweep, whichever route asked for it, against the refs the Stats receipt reads. A sweep the
+   * app started and one the owner pressed for leave the same evidence behind, because a background
+   * errand the page could not account for afterwards is worse than no background errand.
+   *
+   * `sweep` is called before this function's first await, which is what keeps the chooser route's
+   * transient activation intact; an await inserted above it would break a path two callers away.
+   */
+  async function sweepStoredHistory(sweep: () => Promise<SolarHistoryTransfer>): Promise<void> {
     try {
-      const transfer = await solarHistoryLink.readStoredHistory(showAllDevices)
+      const transfer = await sweep()
       solarHistory.value = transfer
       await fileSolarHistory(transfer)
     } catch (error) {
+      // Two refusals no retry can fix: the browser would not hand the remembered id back, or it
+      // connected and then refused the tunnel service because the grant was minted without it. A
+      // silent controller heals by itself; these heal only through a chooser, so the automatic
+      // sweep stands down for good rather than spending a live watch on the same answer again.
+      const retryCannotFixIt =
+        error instanceof ReconnectRefusedError || (error as Error).name === 'SecurityError'
+      if (retryCannotFixIt) solarAutoSweepRefused = true
       solarHistoryError.value = (error as Error).message
     } finally {
       solarHistoryReading.value = false
+      // The radio is free again, and nothing else will say so: the supervisor stood still while the
+      // tunnel held it, so the watch comes back from here or not until the owner does something.
+      solarRejoin.reconsider()
     }
   }
 
@@ -1456,11 +1627,12 @@ export function createTelemetry(deps: TelemetryDeps) {
   }
 
   /**
-   * The controller's key, from the advertisement key this browser has kept.
+   * The controller's key, live if a watch holds one, else from the advertisement key this browser
+   * has kept.
    *
-   * The live `solarDeviceKey` is not used: it exists only while a scan is running, and a sweep is
-   * the one thing that cannot happen while one is. The stored key digests to the same value, so a
-   * sweep and a recording file under one ledger.
+   * The automatic sweep asks this before it stands the watch down, so the live key is usually the
+   * answer; a press from a page with no radio running falls through to storage. The two digest to
+   * the same value, so a sweep and a recording file under one ledger either way.
    */
   async function storedSolarDeviceKey(): Promise<DeviceKey | null> {
     if (solarDeviceKey !== null) return solarDeviceKey
@@ -1498,6 +1670,10 @@ export function createTelemetry(deps: TelemetryDeps) {
       // out of range or the key is wrong, so the user keeps a way to stop it.
       solarState.value = 'listening'
       source.value = 'live'
+      // A press is a fresh watch however the last one ended, so it gets its own chance at the
+      // controller's stored history.
+      watchStoodDownForSweep = false
+      solarAutoSweepConsidered = false
       // One intent covers both radios, because "stop going back to this boat" is an answer about
       // the boat rather than about a radio — Stop solar is what narrows it to the controller, by
       // forgetting which controller it was. So this press is the undo for Disconnect exactly as
@@ -1544,6 +1720,7 @@ export function createTelemetry(deps: TelemetryDeps) {
       // the transport has already unwound the watch under it. Nothing here may claim one is up.
       if (solarState.value !== 'connecting') return
       solarState.value = 'listening'
+      noteWatchIsUp()
       solarDeviceKey = await nameableSolarDevice(key)
       if (solarDeviceKey !== null) recorder.identifySolar(solarDeviceKey, solarModelId)
     } catch (error) {

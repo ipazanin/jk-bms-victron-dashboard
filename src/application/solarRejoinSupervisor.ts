@@ -63,6 +63,16 @@ export interface SolarRejoinSupervisorDeps {
   /** Whether a scan is already up, or a press is already starting one. */
   readonly solarBusy: () => boolean
   /**
+   * Whether the history tunnel has the radio. Asked apart from `solarBusy` because the two want
+   * opposite answers: a watch somebody else put up is one this loop waits behind, where a sweep is
+   * one the app took the watch down *for* — the controller accepts a single BLE client, so a watch
+   * put back mid-sweep would be one hearing nothing over a tunnel it might well have broken.
+   *
+   * There is nothing to poll for either. A sweep is a bounded errand that asks for a fresh look the
+   * moment it lets go, so the gate lifts by being told rather than by being watched.
+   */
+  readonly historySweepHoldsRadio: () => boolean
+  /**
    * One attempt at the remembered controller. Resolves once the watch is armed — which says
    * nothing about the controller being in range, and is not meant to. Rejects with a
    * `ReconnectRefusedError` when the radio was never asked.
@@ -164,7 +174,7 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
   }
 
   function mayResume(): boolean {
-    return pageIsInFront() && whatItTakesToResume()
+    return pageIsInFront() && !deps.historySweepHoldsRadio() && whatItTakesToResume()
   }
 
   /**
@@ -191,6 +201,16 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
 
   function rememberedId(): string | null {
     return deps.rememberedController()?.id ?? null
+  }
+
+  /**
+   * Whether this loop would put a watch back up if the radio were handed to it now. Asked by
+   * whatever is thinking of taking the radio away from a live watch, because a watch nothing will
+   * restore is one the owner loses until they press something — and whether anyone is listening for
+   * that radio to come free is the one thing a caller cannot see from outside.
+   */
+  function canRestoreTheWatch(): boolean {
+    return running && whatItTakesToResume()
   }
 
   /**
@@ -265,7 +285,10 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
     // screen to say why — where a watch left running behind a window is at worst a fiction the
     // platform has already made true.
     if (!whatItTakesToResume()) return
-    if (deps.solarBusy()) deps.standDownSolar()
+    // A sweep counts as the radio being out, even though there is no watch left to stop. What the
+    // page going away settles is the recording as much as the radio, and a session the app itself
+    // took the last reporting radio away from is one nothing else would stand a window over.
+    if (deps.solarBusy() || deps.historySweepHoldsRadio()) deps.standDownSolar()
   }
 
   async function attemptResume(): Promise<void> {
@@ -315,6 +338,7 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
   return {
     searching: readonly(searching),
     blocker: readonly(blocker),
+    canRestoreTheWatch,
     start,
     stop,
     reconsider,

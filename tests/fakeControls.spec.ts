@@ -169,6 +169,13 @@ const page: FakePage = {
 }
 
 beforeEach(async () => {
+  // jsdom answers 'prerender' and unfocused, which would tell both supervisors the page is behind
+  // another window for the whole suite — and the solar loop rightly stands a watch down over a page
+  // nobody is looking at. The page these tests model is the one in front of the developer, so the
+  // browser half of the answer is pinned in front here and the panel's own levers stay the only way
+  // to take it away.
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true })
   localStorage.clear()
   vi.useFakeTimers()
   sessions = 0
@@ -1073,6 +1080,33 @@ describe("the pack's stored log", () => {
 })
 
 describe("the controller's stored history", () => {
+  /**
+   * Two watches of the same controller a day apart, with nothing pressed between them but the two
+   * the panel offers for the clock.
+   *
+   * The first watch is already a sweep: this browser holds none of the backlog, so the automatic
+   * one fires off the first decoded reading. What it files is what the second is measured against.
+   *
+   * Three things about the order matter. The rejoin loop is started first, as the shell starts it
+   * on mount, because the app will not take a watch away that nothing would put back. The clock
+   * moves only with both radios down, which is what Stop solar is doing here rather than any claim
+   * about the owner walking away. And Stop solar is the one press that forgets which controller
+   * this was, so the watch that follows it has to be a press of Connect solar — which remembers it
+   * again, and hands this watch its own chance at the backlog.
+   */
+  async function watchedAcrossADay(page: FakePage): Promise<void> {
+    page.telemetry.startRejoin()
+    await solarLive()
+    await page.play(FIRST_FRAMES_MS)
+
+    page.telemetry.stopSolar()
+    await page.telemetry.drain()
+    page.controller.ageClockByHours(25)
+
+    await solarLive()
+    await page.play(FIRST_FRAMES_MS)
+  }
+
   eachControl([
     {
       control: 'A month of days',
@@ -1193,6 +1227,54 @@ describe("the controller's stored history", () => {
         await page.play(FIRST_FRAMES_MS)
       },
       reaches: (page) => expect(page.telemetry.solarHistoryReading.value).toBe(true),
+    },
+    {
+      control: 'A day since the last sweep, with nobody pressing anything',
+      press: async (page) => {
+        await watchedAcrossADay(page)
+      },
+      reaches: (page) => {
+        // Nobody was shown a chooser. The whole feature rests on there being a way back to a
+        // controller this origin already holds a grant for, because a dialog raised at a watch the
+        // owner did not ask for would be worse than a backlog that never gathers.
+        expect(page.controller.lastSolarSweepRoute).toBe('remembered')
+        expect(page.controller.lastRememberedSolarController).toBe(
+          page.telemetry.lastController.value?.id,
+        )
+
+        // The same registers a day later are the same days, dated one further back — which is the
+        // whole of what proves the second sweep was measured against what the first one filed.
+        const merge = page.telemetry.solarHistoryIngest.value
+        const daysSwept = page.telemetry.solarHistory.value?.days.length ?? 0
+        expect(daysSwept).toBeGreaterThan(1)
+        expect(merge?.redated).toBe(daysSwept)
+        expect(merge?.appended).toBe(0)
+
+        // And the radio is the watch's again. The tunnel borrowed it; nothing was pressed to get
+        // it back.
+        expect(page.telemetry.solarState.value).toBe('live')
+      },
+    },
+    {
+      control: 'This browser has forgotten the controller',
+      press: async (page) => {
+        page.controller.forgetSolarControllerPermission(true)
+        await watchedAcrossADay(page)
+      },
+      reaches: (page) => {
+        // Refused before a tunnel was opened, so nothing came back and nothing was filed. It is
+        // said in the receipt and nowhere else: a browser that has let a grant lapse is not a
+        // fault, and the button is still there for anyone who wants the backlog today.
+        expect(page.telemetry.solarHistoryError.value).toMatch(/no longer has permission/)
+        expect(page.telemetry.solarHistory.value).toBeNull()
+        expect(page.telemetry.solarHistoryIngest.value).toBeNull()
+        expect(page.controller.lastSolarSweepRoute).toBeNull()
+
+        // The live watch is up regardless, which is what makes the failure quiet: the instruments
+        // report the controller as they did before anything was attempted.
+        expect(page.telemetry.solarState.value).toBe('live')
+        expect(page.telemetry.solar.value).not.toBeNull()
+      },
     },
   ])
 })

@@ -49,6 +49,8 @@ import type { DetailLogTransfer } from '../../domain/bms/DetailLogTransfer'
 import { toArrayBuffer } from '../../domain/bytes'
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../domain/bms/types'
 import { DetailLogRun } from './DetailLogRun'
+import { permittedDevice } from './permittedDevice'
+import type { PermittedDeviceRefusals } from './permittedDevice'
 import type { ReconnectPatience } from './ReconnectPatience'
 import { ReconnectRefusedError } from './ReconnectRefusedError'
 
@@ -108,6 +110,17 @@ const SIGHTING_REARM_MS = 10_000
  * frozen reading forever.
  */
 const MAX_STALL_STRIKES = 3
+
+/**
+ * What the shared lookup says when the remembered pack cannot be reached without the chooser, in
+ * the pack's own words: the button these sentences name is the one on the battery panel.
+ */
+const PACK_REFUSALS: PermittedDeviceRefusals = {
+  cannotListPermitted: 'This browser cannot reconnect without the chooser. Use Connect BMS.',
+  wouldNotListPermitted: 'This browser would not list its permitted devices. Use Connect BMS.',
+  permissionGone:
+    'This browser no longer has permission for the last pack. Use Connect BMS to pick it again.',
+}
 
 /**
  * How the link ended. 'dropped' is the radio going away underneath us — out of range, unit
@@ -349,7 +362,7 @@ export class JkBmsClient implements BmsLink {
     patience: ReconnectPatience,
   ): Promise<void> {
     throwIfStoodDown(signal)
-    const device = await this.permittedDevice(deviceId)
+    const device = await permittedDevice(deviceId, PACK_REFUSALS)
     throwIfStoodDown(signal)
 
     // Asked of the handle rather than of the browser, because the handle is the thing that would be
@@ -402,41 +415,6 @@ export class JkBmsClient implements BmsLink {
       if (waitingCannotFixIt) throw error
       return false
     }
-  }
-
-  /**
-   * The remembered pack's handle, or a refusal saying which permission answer stopped us.
-   *
-   * A device missing from `getDevices()` says nothing whatever about range: the list is what this
-   * origin is permitted to talk to, and a pack that has simply not advertised for three minutes is
-   * still on it. So an absence here is permission gone, needs a chooser tap, and must never be
-   * reported as an out-of-range pack that patience would fix.
-   */
-  private async permittedDevice(deviceId: string): Promise<BluetoothDevice> {
-    const bluetooth = typeof navigator !== 'undefined' ? navigator.bluetooth : undefined
-    if (!bluetooth || typeof bluetooth.getDevices !== 'function') {
-      throw new ReconnectRefusedError(
-        'browser-cannot-rejoin',
-        'This browser cannot reconnect without the chooser. Use Connect BMS.',
-      )
-    }
-    let permitted: readonly BluetoothDevice[]
-    try {
-      permitted = await bluetooth.getDevices()
-    } catch {
-      throw new ReconnectRefusedError(
-        'browser-cannot-rejoin',
-        'This browser would not list its permitted devices. Use Connect BMS.',
-      )
-    }
-    const device = permitted.find((candidate) => candidate.id === deviceId)
-    if (!device) {
-      throw new ReconnectRefusedError(
-        'permission-gone',
-        'This browser no longer has permission for the last pack. Use Connect BMS to pick it again.',
-      )
-    }
-    return device
   }
 
   /**

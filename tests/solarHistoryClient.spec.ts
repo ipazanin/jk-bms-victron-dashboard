@@ -15,6 +15,11 @@
  * a second outstanding read would let a resynchronised stream deliver one register's bytes as
  * another's. And no frame this client writes may carry the write opcode except the captured
  * keepalive, which is asserted over every byte that reached the radio.
+ *
+ * The client has two ways to a device handle and one sweep behind them, so the fake radio answers
+ * both `requestDevice` and `getDevices`. What the remembered route owes on top of the chooser's
+ * cases is that it raises no dialog, that it refuses in the controller's own words rather than
+ * falling back on one, and that both invariants above still hold when it is the route that swept.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -28,6 +33,9 @@ import { TUNNEL_KEEPALIVE_FRAME } from '../src/domain/solar/tunnel/session'
 import { TUNNEL_OPCODE_BYTES } from '../src/domain/solar/tunnel/TunnelOpcode'
 import type { RecordedSolarHistoryDay } from '../src/domain/solar/RecordedSolarHistoryDay'
 import type { SolarHistoryDayReading } from '../src/domain/solar/SolarHistoryDayReading'
+import type { SolarHistoryTransfer } from '../src/domain/solar/SolarHistoryTransfer'
+import type { ReconnectRefusal } from '../src/infrastructure/ble/ReconnectRefusal'
+import { ReconnectRefusedError } from '../src/infrastructure/ble/ReconnectRefusedError'
 import { VictronHistoryClient } from '../src/infrastructure/ble/VictronHistoryClient'
 import wire from './fixtures/solarHistoryWire.json'
 
@@ -45,6 +53,9 @@ const NOTIFICATION_BYTES = 20
 
 /** Byte 0 of a day the controller has not filled in yet. */
 const UNWRITTEN_DAY_RECORD_FLAG = 0x04
+
+/** The id the fake controller answers to, which is what a remembered read asks `getDevices()` for. */
+const REMEMBERED_CONTROLLER_ID = 'solar-1'
 
 const VALUE_REPORT_OPCODE = TUNNEL_OPCODE_BYTES.valueReport
 const READ_OPCODE = TUNNEL_OPCODE_BYTES.read
@@ -119,6 +130,7 @@ interface WrittenFrame {
 
 interface Radio {
   requestDevice: ReturnType<typeof vi.fn>
+  getDevices: ReturnType<typeof vi.fn>
   gattDisconnect: ReturnType<typeof vi.fn>
   characteristic(line: TunnelLine): FakeCharacteristic
   /** Every frame the client put on the wire, in order, with the characteristic it went to. */
@@ -130,6 +142,18 @@ interface Radio {
   /** Deliver bytes as notifications of MTU size, as the browser would. */
   deliver(line: TunnelLine, bytes: Uint8Array): void
   dropLink(): void
+  /** The grant behind the remembered id lapses: the controller is gone from the permitted list. */
+  forgetPermission(): void
+  /** A browser old enough to have `requestDevice` and no way to list what it already permits. */
+  withoutGetDevices(): void
+  /** The permitted list can be asked for and will not answer. */
+  refusePermittedList(): void
+  /**
+   * The grant behind the handle does not cover the tunnel service. The browser lets the connection
+   * up and refuses at the service door, which is what a grant the live watch's chooser minted looks
+   * like from here.
+   */
+  withholdTunnelService(): void
 }
 
 /** The mutable side of the radio: what a case reads back through `Radio`'s readonly views. */
@@ -215,10 +239,30 @@ function buildRadio(): Radio {
     },
   }
   const requestDevice = vi.fn(async () => device)
+  const permitted = [device]
+  const getDevices = vi.fn(async () => permitted)
 
-  Object.defineProperty(navigator, 'bluetooth', { configurable: true, value: { requestDevice } })
+  Object.defineProperty(navigator, 'bluetooth', {
+    configurable: true,
+    value: { requestDevice, getDevices },
+  })
 
   radio.requestDevice = requestDevice
+  radio.getDevices = getDevices
+  radio.forgetPermission = () => {
+    permitted.length = 0
+  }
+  radio.withoutGetDevices = () => {
+    Object.defineProperty(navigator, 'bluetooth', { configurable: true, value: { requestDevice } })
+  }
+  radio.refusePermittedList = () => {
+    getDevices.mockRejectedValue(new DOMException('Not allowed', 'NotAllowedError'))
+  }
+  radio.withholdTunnelService = () => {
+    server.getPrimaryService.mockRejectedValue(
+      new DOMException('Origin is not allowed to access the service.', 'SecurityError'),
+    )
+  }
   radio.characteristic = (line) => characteristics[line]
   radio.deliver = (line, bytes) => {
     for (let offset = 0; offset < bytes.length; offset += NOTIFICATION_BYTES) {
@@ -284,6 +328,20 @@ function keepalivesWritten(): number {
 function recorded(reading: SolarHistoryDayReading): RecordedSolarHistoryDay {
   if (!reading.day.recorded) throw new Error(`register 0x${reading.register.toString(16)} is unwritten`)
   return reading.day
+}
+
+/**
+ * Which permission answer a read refused with. Asserted over `refusal` rather than the message,
+ * because that is the field the caller branches on and English is not a contract.
+ */
+async function refusalFrom(reading: Promise<SolarHistoryTransfer>): Promise<ReconnectRefusal> {
+  try {
+    await reading
+  } catch (error) {
+    if (error instanceof ReconnectRefusedError) return error.refusal
+    throw error
+  }
+  throw new Error('The read resolved where it was expected to refuse.')
 }
 
 let radio: Radio
@@ -605,6 +663,108 @@ describe('VictronHistoryClient outcomes', () => {
   })
 })
 
+describe('VictronHistoryClient remembered route', () => {
+  it('sweeps the controller it was granted before, without raising a chooser', async () => {
+    radio.answer = answersFromCapture()
+    const client = new VictronHistoryClient()
+
+    const transfer = await client.readRememberedHistory(REMEMBERED_CONTROLLER_ID)
+
+    // The whole point of the route: a background sweep that raised a dialog would be a dialog
+    // nobody asked for, and on this platform one nobody is there to answer.
+    expect(radio.requestDevice).not.toHaveBeenCalled()
+    expect(radio.getDevices).toHaveBeenCalledTimes(1)
+    expect(transfer.outcome).toBe('days-read')
+    expect(transfer.days).toHaveLength(31)
+    expect(client.deviceName).toBe('SmartSolar HQ2149')
+    expect(radio.gattDisconnect).toHaveBeenCalledTimes(1)
+    expect(client.reading).toBe(false)
+  })
+
+  it('refuses as a browser that cannot rejoin when there is no permitted list to read', async () => {
+    radio.withoutGetDevices()
+    const client = new VictronHistoryClient()
+
+    expect(await refusalFrom(client.readRememberedHistory(REMEMBERED_CONTROLLER_ID))).toBe(
+      'browser-cannot-rejoin',
+    )
+    expect(radio.requestDevice).not.toHaveBeenCalled()
+    expect(client.reading).toBe(false)
+  })
+
+  it('refuses the same way when the browser will not answer for its permitted devices', async () => {
+    radio.refusePermittedList()
+    const client = new VictronHistoryClient()
+
+    expect(await refusalFrom(client.readRememberedHistory(REMEMBERED_CONTROLLER_ID))).toBe(
+      'browser-cannot-rejoin',
+    )
+    expect(radio.requestDevice).not.toHaveBeenCalled()
+  })
+
+  it('calls a controller missing from the list permission gone, not out of range', async () => {
+    // An absence here says nothing about range — the list is what this origin may talk to — so the
+    // caller must be told a tap is owed rather than left to wait for a controller that is present.
+    radio.forgetPermission()
+    const client = new VictronHistoryClient()
+
+    expect(await refusalFrom(client.readRememberedHistory(REMEMBERED_CONTROLLER_ID))).toBe(
+      'permission-gone',
+    )
+    expect(radio.requestDevice).not.toHaveBeenCalled()
+    expect(client.reading).toBe(false)
+  })
+
+  /**
+   * The failure this route is likeliest to meet on a real boat, and the one that looks least like a
+   * failure on the way in. The live watch's chooser grants the controller without the tunnel
+   * service, because a handle it never connects to has no business holding it — so a controller
+   * introduced by that press alone lists here, hands back a handle, connects, and is only refused
+   * at the service door. Nothing is walked back for us: the link has to be dropped from this side,
+   * and the controller stops advertising the whole time one is held.
+   */
+  it('drops the link it opened when the grant turns out not to cover the tunnel', async () => {
+    radio.withholdTunnelService()
+    const client = new VictronHistoryClient()
+
+    await expect(client.readRememberedHistory(REMEMBERED_CONTROLLER_ID)).rejects.toThrow(
+      /not allowed to access the service/i,
+    )
+
+    expect(radio.gattDisconnect).toHaveBeenCalledTimes(1)
+    // Not one frame: the refusal lands before a characteristic is ever in hand, and a sweep that
+    // wrote something on its way to failing would be a write nobody could account for.
+    expect(radio.written).toEqual([])
+    expect(client.reading).toBe(false)
+  })
+
+  it('joins a remembered read to the chooser sweep already running', async () => {
+    radio.answer = answersFromCapture()
+    const client = new VictronHistoryClient()
+
+    const chooser = client.readStoredHistory()
+    const [first, second] = await Promise.all([chooser, client.readRememberedHistory(REMEMBERED_CONTROLLER_ID)])
+
+    expect(second).toBe(first)
+    expect(radio.requestDevice).toHaveBeenCalledTimes(1)
+    expect(radio.getDevices).not.toHaveBeenCalled()
+  })
+
+  it('joins a press to the remembered sweep already running', async () => {
+    // The controller takes one client, so the routes share a session in both orders or the second
+    // one to arrive would find the radio busy with the first.
+    radio.answer = answersFromCapture()
+    const client = new VictronHistoryClient()
+
+    const remembered = client.readRememberedHistory(REMEMBERED_CONTROLLER_ID)
+    const [first, second] = await Promise.all([remembered, client.readStoredHistory()])
+
+    expect(second).toBe(first)
+    expect(radio.getDevices).toHaveBeenCalledTimes(1)
+    expect(radio.requestDevice).not.toHaveBeenCalled()
+  })
+})
+
 // A write and a read differ by one byte on this tunnel, and a register a few bits from the history
 // block is believed to erase the stored days. These assert the property over what actually reached
 // the radio, so an encoder added later fails here rather than on the boat.
@@ -639,6 +799,29 @@ describe('VictronHistoryClient write safety', () => {
     const requested = registersRequested(radio)
     expect(requested.length).toBe(32)
     for (const register of requested) {
+      expect(reachable).toContain(register)
+    }
+  })
+
+  it('holds both invariants when the remembered route is the one that swept', async () => {
+    // The route nobody watches is the one worth asserting hardest: a sweep started in the
+    // background has no user in front of it to notice a frame it should never have written.
+    vi.useFakeTimers()
+    radio.answer = answersAfter(2_500, answersFromCapture())
+    const reachable: readonly number[] = SOLAR_HISTORY_REGISTERS
+    const client = new VictronHistoryClient()
+
+    const reading = client.readRememberedHistory(REMEMBERED_CONTROLLER_ID)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await reading
+
+    const keepaliveHex = toHex(TUNNEL_KEEPALIVE_FRAME)
+    const writeFrames = radio.written.filter((frame) => frame.bytes[0] === WRITE_OPCODE)
+    expect(writeFrames.length).toBeGreaterThan(0)
+    for (const frame of writeFrames) {
+      expect(toHex(frame.bytes)).toBe(keepaliveHex)
+    }
+    for (const register of registersRequested(radio)) {
       expect(reachable).toContain(register)
     }
   })

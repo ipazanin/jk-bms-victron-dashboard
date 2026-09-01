@@ -12,6 +12,7 @@ import type { ScriptedPage } from './support/scriptedPage'
 import { hexToBytes, toArrayBuffer } from '../src/domain/bytes'
 import { SolarWatchScanner } from '../src/infrastructure/ble/SolarWatchScanner'
 import type { VictronHandlers } from '../src/infrastructure/ble/solarScan'
+import { SOLAR_TUNNEL_SERVICE } from '../src/domain/solar/tunnel/session'
 import { VICTRON_COMPANY_ID } from '../src/domain/solar/types'
 
 // jsdom exposes no navigator.bluetooth and no BluetoothDevice, so the fake radio installs both:
@@ -48,14 +49,18 @@ afterEach(() => {
 })
 
 describe('SolarWatchScanner chooser', () => {
-  it('asks for Victron manufacturer data, without which the browser withholds every payload', async () => {
+  it('asks for Victron manufacturer data, and for the tunnel service the background sweep will need', async () => {
     const scanner = watchScanner()
 
     await scanner.start(KEY)
 
+    // The tunnel service must be on this grant even though the watch never connects: the automatic
+    // history sweep reuses the grant through getDevices(), and one minted without the service lets
+    // the sweep connect and then be refused at the service door — which no retry can widen.
     expect(radio.requestDevice).toHaveBeenCalledWith({
       filters: [{ manufacturerData: [{ companyIdentifier: VICTRON_COMPANY_ID }] }],
       optionalManufacturerData: [VICTRON_COMPANY_ID],
+      optionalServices: [SOLAR_TUNNEL_SERVICE],
     })
     scanner.stop()
   })

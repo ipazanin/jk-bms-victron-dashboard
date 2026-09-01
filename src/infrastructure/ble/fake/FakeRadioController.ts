@@ -41,7 +41,7 @@ import { FakeBleEnvironment } from './FakeBleEnvironment'
 import { FakePageActivity } from './FakePageActivity'
 import { PlaybackClock } from './PlaybackClock'
 import { fakeBmsRadio, fakeSolarHistoryRadio, fakeSolarRadio } from './fakeRadios'
-import type { FakeBmsRadio, FakeSolarHistoryRadio, FakeSolarRadio } from './fakeRadios'
+import type { FakeBmsRadio, FakeSolarHistoryRadio, FakeSolarRadio, SolarSweepRoute } from './fakeRadios'
 import type { PackFrame } from './fixture/PackFrame'
 import type { PlaybackFixture } from './fixture/PlaybackFixture'
 import type { PlaybackScenario } from './fixture/PlaybackScenario'
@@ -802,6 +802,29 @@ export class FakeRadioController {
   /** How long 'Sweeping…' stays on screen. A real sweep is bounded at forty-five seconds. */
   holdSolarHistorySweep(dwellMs: number): void {
     this.solarHistory.holdSweepFor(dwellMs)
+  }
+
+  /**
+   * The browser's grant for the remembered controller, thrown away without the chooser being
+   * touched — which is what Chromium does to a device it has not seen for a while.
+   *
+   * Only the unattended sweep is refused by it. The chooser mints a grant of its own, so the button
+   * goes on working, and the state this reaches is the one where history stops gathering itself and
+   * nothing on screen has broken.
+   */
+  forgetSolarControllerPermission(forgotten: boolean): void {
+    this.solarHistory.forgetPermission(forgotten)
+    this.announce()
+  }
+
+  /** Which route the last sweep took, so the panel can show whether it needed a press. */
+  get lastSolarSweepRoute(): SolarSweepRoute | null {
+    return this.solarHistory.lastSweepRoute
+  }
+
+  /** The controller id the last unattended sweep was asked for, null until one has been. */
+  get lastRememberedSolarController(): string | null {
+    return this.solarHistory.lastRememberedController
   }
 
   // ── the archive ────────────────────────────────────────────────────────────

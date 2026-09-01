@@ -9,10 +9,29 @@
  * solar readings come from. Making the whole errand one method means there is no state in which the
  * dashboard is connected and not reading, and no way for a caller to forget the disconnect.
  *
- * `readStoredHistory` must be called from a user gesture: requestDevice is the first statement,
- * before any await, or the browser rejects it for lack of transient activation. The chooser filters
- * on Victron's manufacturer id rather than the tunnel service, because the tunnel is not
- * advertised — filtering on it produces an empty chooser. `showAllDevices` is the escape hatch.
+ * There are two ways in and they differ in nothing but how the device handle is come by; from the
+ * open tunnel on, both are the same sweep and the same session, so a read on either route joins one
+ * already running rather than opening a rival.
+ *
+ * `readStoredHistory` is the chooser route and must be called from a user gesture: requestDevice is
+ * the first statement, before any await, or the browser rejects it for lack of transient activation.
+ * The chooser filters on Victron's manufacturer id rather than the tunnel service, because the
+ * tunnel is not advertised — filtering on it produces an empty chooser. `showAllDevices` is the
+ * escape hatch.
+ *
+ * `readRememberedHistory` is the same errand with no gesture spent at all: `getDevices()` turns an
+ * id this origin was already granted back into the handle the chooser would have returned, which is
+ * what lets the dashboard fetch the stored days off its own bat instead of waiting for a press. It
+ * is free to await whatever it likes before the radio is touched, and it refuses rather than falling
+ * back on the chooser — a dialog nobody asked for is worse than no history. The refusal says which
+ * permission answer stopped it, because a browser that cannot list its devices and a grant that has
+ * lapsed need different answers from the caller.
+ *
+ * The grant behind a remembered id has to cover the tunnel service, and this module's chooser is the
+ * only one in the app that asks for it: the live watch deliberately does not, because a handle it
+ * may never connect to has no business holding that permission. So a controller permitted through
+ * the watch alone lists fine here and is then refused at `getPrimaryService`. The remembered route
+ * is a shortcut past a press already made, never a substitute for the first one.
  *
  * This path works where the advertisement scan does not. On macOS Chrome `requestLEScan` opens its
  * prompt and then never delivers an advertisement, which is what `SolarWatchScanner` exists to work
@@ -59,6 +78,8 @@ import { TunnelReassembler } from '../../domain/solar/tunnel/TunnelReassembler'
 import type { TunnelPdu } from '../../domain/solar/tunnel/TunnelPdu'
 import { VICTRON_COMPANY_ID } from '../../domain/solar/types'
 import { toArrayBuffer } from '../../domain/bytes'
+import { permittedDevice } from './permittedDevice'
+import type { PermittedDeviceRefusals } from './permittedDevice'
 import { SolarHistoryRun } from './SolarHistoryRun'
 
 export interface SolarHistoryHandlers {
@@ -77,7 +98,7 @@ export interface SolarHistoryHandlers {
  * class itself — private fields make it nominal.
  */
 export interface SolarHistoryLink {
-  /** True from the chooser opening until the session is closed. A second read joins this one. */
+  /** True from the moment a route has the radio until the session is closed. A second read joins it. */
   readonly reading: boolean
   /** The name of the controller the last session used, kept after the link is closed. */
   readonly deviceName: string | null
@@ -89,6 +110,16 @@ export interface SolarHistoryLink {
    * — silence, a refusal and an empty history all resolve, with the outcome saying which.
    */
   readStoredHistory(showAllDevices?: boolean): Promise<SolarHistoryTransfer>
+  /**
+   * The same errand on a controller this origin was already granted, with no gesture spent and no
+   * chooser raised. Everything past the handle is `readStoredHistory`, down to the session a second
+   * call joins, so the two routes can never hold the radio at once.
+   *
+   * Rejects with a `ReconnectRefusedError` when the id cannot be turned back into a handle — a
+   * browser without `getDevices()`, or a grant that has lapsed — and otherwise rejects and resolves
+   * exactly as the chooser route does.
+   */
+  readRememberedHistory(deviceId: string): Promise<SolarHistoryTransfer>
 }
 
 /**
@@ -106,6 +137,22 @@ function chooserOptions(showAllDevices: boolean): RequestDeviceOptions {
   }
 }
 
+/**
+ * What the shared lookup says when this route cannot be taken.
+ *
+ * The remedy named is this module's own button rather than the live watch's, because the two grants
+ * are not interchangeable: only the chooser here asks for the tunnel service, so a controller the
+ * watch introduced still has to be picked once from the history chooser before this route can work.
+ */
+const HISTORY_REFUSALS: PermittedDeviceRefusals = {
+  cannotListPermitted:
+    'This browser cannot reach the controller without the chooser. Press Read solar history.',
+  wouldNotListPermitted:
+    'This browser would not list its permitted devices. Press Read solar history.',
+  permissionGone:
+    'This browser no longer has permission for the last controller. Press Read solar history to pick it again.',
+}
+
 export class VictronHistoryClient implements SolarHistoryLink {
   private readonly handlers: SolarHistoryHandlers
   private readonly reassembler = new TunnelReassembler()
@@ -115,7 +162,7 @@ export class VictronHistoryClient implements SolarHistoryLink {
   private bulk: BluetoothRemoteGATTCharacteristic | null = null
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null
   private run: SolarHistoryRun | null = null
-  /** Held so a second press joins the running sweep instead of starting a rival session. */
+  /** Held so a second read, by either route, joins the running sweep rather than rivalling it. */
   private session: Promise<SolarHistoryTransfer> | null = null
   private lastDeviceName: string | null = null
 
@@ -134,7 +181,22 @@ export class VictronHistoryClient implements SolarHistoryLink {
   readStoredHistory(showAllDevices = false): Promise<SolarHistoryTransfer> {
     // Synchronous, so the guard costs no transient activation and the chooser still opens.
     if (this.session !== null) return this.session
-    const session = this.sweepSession(showAllDevices).finally(() => {
+    const options = chooserOptions(showAllDevices)
+    return this.beginSession(() => navigator.bluetooth.requestDevice(options))
+  }
+
+  readRememberedHistory(deviceId: string): Promise<SolarHistoryTransfer> {
+    if (this.session !== null) return this.session
+    return this.beginSession(() => permittedDevice(deviceId, HISTORY_REFUSALS))
+  }
+
+  /**
+   * One session, whichever route asked for it, held so a second read joins it instead of starting a
+   * rival. `acquire` is called before the first await of the sweep, which is what leaves the chooser
+   * route its transient activation — the remembered route needs none and is indifferent.
+   */
+  private beginSession(acquire: () => Promise<BluetoothDevice>): Promise<SolarHistoryTransfer> {
+    const session = this.sweepSession(acquire).finally(() => {
       this.session = null
     })
     this.session = session
@@ -145,9 +207,8 @@ export class VictronHistoryClient implements SolarHistoryLink {
    * The whole errand. Everything up to the open tunnel may reject; from there on the run is the
    * result, and the session is closed on every path out.
    */
-  private async sweepSession(showAllDevices: boolean): Promise<SolarHistoryTransfer> {
-    const options = chooserOptions(showAllDevices)
-    const device = await navigator.bluetooth.requestDevice(options)
+  private async sweepSession(acquire: () => Promise<BluetoothDevice>): Promise<SolarHistoryTransfer> {
+    const device = await acquire()
     this.device = device
     this.lastDeviceName = device.name ?? null
     device.addEventListener('gattserverdisconnected', this.handleDisconnect)

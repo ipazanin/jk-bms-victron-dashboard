@@ -10,7 +10,7 @@ import { calendarDateNow } from '../src/domain/history/calendarDays'
 import { PACK_SAMPLING_PERIOD_SECONDS } from '../src/domain/history/ringClock'
 import { MemoryHistoryStore } from './support/MemoryHistoryStore'
 import { ringRecordBytes, ringSnapshot } from './support/samples'
-import { capturedSolarSnapshot, capturedTotals } from './support/solarHistoryFixture'
+import { CAPTURED_DAYS, capturedSolarSnapshot, capturedTotals } from './support/solarHistoryFixture'
 
 // Stats is a statement about what the two devices themselves kept, and the ways it can lie are all
 // ways of *looking* right: a charge total quietly inflated by the pack resetting its own counter, a
@@ -112,13 +112,39 @@ describe('what the Stats view paints off the two devices’ own records', () => 
     expect(host.textContent).toContain('This browser has no Web Bluetooth')
   })
 
-  it('says a sweep costs the live feed, because that is why it never happens by itself', async () => {
-    // The controller takes one BLE client and changes its advertising while connected. An automatic
-    // sweep would silently kill the Instant Readout feed, so the page has to state the trade.
+  it('says the page sweeps by itself, and what a sweep costs while it runs', async () => {
+    // The controller takes one BLE client and changes its advertising while connected, so every
+    // sweep is a hole in the Instant Readout feed. The page rations it — a day behind, and only a
+    // controller this browser remembers — rather than hiding either half of that from the reader.
     const text = await statsViewShowing(new MemoryHistoryStore())
 
     expect(text).toContain("The controller's stored history")
+    expect(text).toContain('sweeps for them by itself once the copy here is a day behind')
+    expect(text).toContain('still remembers the controller')
     expect(text).toMatch(/VictronConnect cannot reach it and the live solar readings stop/)
+  })
+
+  it('tells the same story on the empty page, where the reader meets it first', async () => {
+    // Nothing has been read off either device, so this paragraph is the only place the trade gets
+    // stated. It has to say the wait is bounded and that the button shortens it.
+    const text = await statsViewShowing(new MemoryHistoryStore())
+
+    expect(text).toContain('fetches them by itself only once the copy here is a day behind')
+    expect(text).toContain('Ask for a sweep now if you would rather not wait')
+  })
+
+  it('paints the same receipt for a sweep nobody in this tab asked for', async () => {
+    // The journal keeps no note of who started a sweep, and the receipt needs none: one the page
+    // took on its own leaves the row a pressed one leaves, and a reader arriving afterwards still
+    // gets the stamp, the outcome sentence and the transport figures off it.
+    const store = new MemoryHistoryStore()
+    await solarLedgerOf(store)
+
+    const text = await statsViewShowing(store)
+
+    expect(text).toContain('Swept ')
+    expect(text).toContain(`${CAPTURED_DAYS} days and the lifetime totals`)
+    expect(text).toContain('Raw bytes')
   })
 
   it('folds the controller’s own days into the solar cards', async () => {

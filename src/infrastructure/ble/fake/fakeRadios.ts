@@ -22,6 +22,7 @@ import type { SolarReading } from '../../../domain/solar/types'
 import type { BleCapabilities } from '../capabilities'
 import type { BmsLink, DisconnectReason, JkBmsHandlers } from '../JkBmsClient'
 import type { ReconnectPatience } from '../ReconnectPatience'
+import { ReconnectRefusedError } from '../ReconnectRefusedError'
 import type { SolarHistoryHandlers, SolarHistoryLink } from '../VictronHistoryClient'
 import type { SolarScan, VictronHandlers } from '../solarScan'
 
@@ -320,6 +321,13 @@ export function fakeSolarRadio(
 }
 
 /**
+ * How a sweep reached the controller: through the chooser a press opened, or straight back to the
+ * one this origin already has permission for. The two routes read the same registers and differ
+ * only in what they cost the person watching, so the route is the whole of what tells them apart.
+ */
+export type SolarSweepRoute = 'chooser' | 'remembered'
+
+/**
  * The controller's history tunnel, which is a one-shot errand rather than a link that stays up.
  *
  * There is no `connected` here for the same reason the real port has no `connect`: a sweep opens
@@ -332,11 +340,24 @@ export interface FakeSolarHistoryRadio {
   /** How long a sweep stays outstanding before the armed answer is built. */
   holdSweepFor(dwellMs: number): void
   /**
-   * What a sweep comes back with from now on. It is handed the handlers because a real sweep talks
-   * through them while it runs — progress as each register answers, and any reply it could not
-   * read — and a fake that answered without them would leave those paths unreachable.
+   * What a sweep comes back with from now on, whichever route asked for it. It is handed the
+   * handlers because a real sweep talks through them while it runs — progress as each register
+   * answers, and any reply it could not read — and a fake that answered without them would leave
+   * those paths unreachable.
    */
   answerSweepWith(sweep: (handlers: SolarHistoryHandlers) => Promise<SolarHistoryTransfer>): void
+  /**
+   * Whether this origin still has permission for the controller it remembers.
+   *
+   * Forgotten, only the chooser-free route is refused: the chooser is what mints a fresh grant, so
+   * a press still reaches the same registers. That asymmetry is the whole of the state — an
+   * unattended sweep that can no longer run while the button beside it still can.
+   */
+  forgetPermission(forgotten: boolean): void
+  /** Which route the last sweep took, so a panel can say whether anyone had to press anything. */
+  readonly lastSweepRoute: SolarSweepRoute | null
+  /** The controller id the last chooser-free sweep was asked for, null until one has been. */
+  readonly lastRememberedController: string | null
 }
 
 export function fakeSolarHistoryRadio(): FakeSolarHistoryRadio {
@@ -346,6 +367,21 @@ export function fakeSolarHistoryRadio(): FakeSolarHistoryRadio {
     Promise.reject(new Error('The fake controller has no history answer armed.'))
   /** Held so a second press joins the running sweep instead of starting a rival session. */
   let session: Promise<SolarHistoryTransfer> | null = null
+  let permissionForgotten = false
+  let lastSweepRoute: SolarSweepRoute | null = null
+  let lastRememberedController: string | null = null
+
+  const sweep = (route: SolarSweepRoute): Promise<SolarHistoryTransfer> => {
+    if (session !== null) return session
+    lastSweepRoute = route
+    const running = dwell(sweepDwellMs)
+      .then(() => answerSweep(handlers))
+      .finally(() => {
+        session = null
+      })
+    session = running
+    return running
+  }
 
   const link: SolarHistoryLink = {
     get reading() {
@@ -355,14 +391,20 @@ export function fakeSolarHistoryRadio(): FakeSolarHistoryRadio {
       return DEMO_CONTROLLER_NAME
     },
     readStoredHistory() {
-      if (session !== null) return session
-      const running = dwell(sweepDwellMs)
-        .then(() => answerSweep(handlers))
-        .finally(() => {
-          session = null
-        })
-      session = running
-      return running
+      return sweep('chooser')
+    },
+    async readRememberedHistory(deviceId: string) {
+      lastRememberedController = deviceId
+      // The permitted list is what this route turns an id in against, so both refusals are settled
+      // before anything is opened. A fake that has been shown one controller can only answer for
+      // that one, and every other id is an id this origin was never granted.
+      if (permissionForgotten || deviceId !== DEMO_CONTROLLER_ID) {
+        throw new ReconnectRefusedError(
+          'permission-gone',
+          'This browser no longer has permission for the last controller. Press Read solar history to pick it again.',
+        )
+      }
+      return sweep('remembered')
     },
   }
 
@@ -377,8 +419,17 @@ export function fakeSolarHistoryRadio(): FakeSolarHistoryRadio {
     holdSweepFor: (dwellMs) => {
       sweepDwellMs = dwellMs
     },
-    answerSweepWith: (sweep) => {
-      answerSweep = sweep
+    answerSweepWith: (armed) => {
+      answerSweep = armed
+    },
+    forgetPermission: (forgotten) => {
+      permissionForgotten = forgotten
+    },
+    get lastSweepRoute() {
+      return lastSweepRoute
+    },
+    get lastRememberedController() {
+      return lastRememberedController
     },
   }
 }
