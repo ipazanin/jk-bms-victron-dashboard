@@ -871,6 +871,8 @@ describe('gathering the controller’s stored history without being asked', () =
   /** The floor the supervisor paces its attempts by, which a restored watch waits out. */
   const ATTEMPT_GAP_MS = 1_000
 
+  let pendingDigests: Set<Promise<ArrayBuffer>>
+  let restoreDigest = (): void => undefined
   let timers: ManualSchedule
   let page: ScriptedPage
   let solar: FakeSolarScan
@@ -879,15 +881,12 @@ describe('gathering the controller’s stored history without being asked', () =
   /** What `historyStore` answers, so a case can play an archive that has not landed yet. */
   let archive: HistoryStore | null
 
-  /**
-   * Drains the chain a sweep runs on. It is longer than the pack's: naming the controller for the
-   * archive digests the stored key, which is a real crypto call rather than one of these fakes, and
-   * a sweep does it twice — once to ask the ledger and once to file what came back.
-   */
+  /** Native hashes finish outside the microtask queue; filing can start another after one settles. */
   async function settle(): Promise<void> {
-    for (let turn = 0; turn < 4; turn += 1) {
+    do {
+      await Promise.allSettled([...pendingDigests])
       await new Promise((resolve) => setTimeout(resolve, 0))
-    }
+    } while (pendingDigests.size > 0)
   }
 
   /** The captured backlog, which is a sweep that leaves the ledger with nothing left to fetch. */
@@ -955,6 +954,18 @@ describe('gathering the controller’s stored history without being asked', () =
   beforeEach(() => {
     localStorage.clear()
     timers = manualSchedule(Date.UTC(2026, 7, 1, 11, 14))
+    pendingDigests = new Set()
+    const nativeDigest = crypto.subtle.digest.bind(crypto.subtle)
+    const digestSpy = vi.spyOn(crypto.subtle, 'digest').mockImplementation((...parameters) => {
+      const digest = nativeDigest(...parameters)
+      pendingDigests.add(digest)
+      void digest.then(
+        () => pendingDigests.delete(digest),
+        () => pendingDigests.delete(digest),
+      )
+      return digest
+    })
+    restoreDigest = () => digestSpy.mockRestore()
     page = scriptedPage()
     store = new MemoryHistoryStore({ now: () => timers.now() })
     archive = store
@@ -965,6 +976,7 @@ describe('gathering the controller’s stored history without being asked', () =
 
   afterEach(() => {
     store.close()
+    restoreDigest()
   })
 
   it('sweeps the controller by itself when this browser holds none of its backlog', async () => {
