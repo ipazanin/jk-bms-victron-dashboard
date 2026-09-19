@@ -39,16 +39,23 @@ export async function openHistoryStore(databaseName: string = DATABASE_NAME): Pr
   const attempt = await openDatabase(factory, databaseName)
   if (attempt.kind === 'failed') return unavailableHistoryStore(attempt.reason)
 
+  const [persisted, storageEstimate] = await Promise.all([readPersistence(), measureStorage()])
   const availability: HistoryAvailability = {
     usable: true,
     reason: null,
-    persisted: await requestPersistence(),
-    ...(await measureStorage()),
+    persisted,
+    ...storageEstimate,
   }
   const store = new IdbHistoryStore(attempt.database, availability, openArchiveChannel(databaseName))
   // A failed sweep is not a failed archive: reads and writes still work, the tidying simply did not
   // happen on this load and will be attempted again on the next one.
   await store.recover(Date.now()).catch(() => undefined)
+  // Firefox can leave this permission prompt open indefinitely; the archive is already usable.
+  if (persisted !== true) {
+    void requestPersistence().then((protectedFromEviction) => {
+      if (protectedFromEviction !== null) store.reportPersistence(protectedFromEviction)
+    })
+  }
   return store
 }
 
@@ -107,6 +114,16 @@ function openDatabase(factory: IDBFactory, databaseName: string): Promise<OpenAt
  */
 function reasonFor(error: DOMException | null): HistoryUnavailableReason {
   return error?.name === 'VersionError' ? 'version-newer' : 'open-denied'
+}
+
+async function readPersistence(): Promise<boolean | null> {
+  const storage = storageManager()
+  if (typeof storage?.persisted !== 'function') return null
+  try {
+    return await storage.persisted()
+  } catch {
+    return null
+  }
 }
 
 async function requestPersistence(): Promise<boolean | null> {

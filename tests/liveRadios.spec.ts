@@ -462,6 +462,9 @@ describe('what the instruments say while the pack is being hunted', () => {
     await flush()
     expect(telemetry.bmsState.value).toBe('connecting')
 
+    // Solar keeps reporting while the pack is away, including beyond the snapshot write interval.
+    timers.advance(16_000)
+    solar.emitReading(solarReading({ pvPower: 42 }))
     telemetry.stopSolar()
 
     // Both radios are off the boat: one the owner stopped, one that nothing has found yet. What

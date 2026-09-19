@@ -30,9 +30,9 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
-      # The only thing in CI that draws an instrument. The unit suite covers the decoders, the
-      # store's failure paths and the archive's arithmetic, and none of it renders a pixel.
-      # ubuntu-latest ships Chrome at /usr/bin/google-chrome, which the script already probes for.
+      - name: Offline and update check
+        run: npm run check:pwa
+      # ubuntu-latest ships Chrome at /usr/bin/google-chrome, which the visual check probes for.
       - name: Visual check
         run: |
           # Redirected, or the backgrounded server holds the step's stdout open and the job hangs

@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 
 import ConnectPanel from '../ConnectPanel.vue'
+import OfflinePanel from '../OfflinePanel.vue'
 import { loadAdvertisementKey } from '../../application/storage'
 import { useTelemetry } from '../../application/telemetry'
 
@@ -68,6 +69,7 @@ const reconnectName = computed(() => lastDevice.value?.name ?? null)
         @start-solar="telemetry.startSolar"
         @stop-solar="telemetry.stopSolar"
       />
+      <OfflinePanel />
     </div>
   </section>
 </template>

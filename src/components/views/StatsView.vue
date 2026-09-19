@@ -45,6 +45,7 @@ import {
   solarRangeSummary,
   solarYieldPerDay,
 } from '../../application/history/solarRange'
+import { loadStatsPreferences, saveStatsPreferences } from '../../application/history/statsPreferences'
 import { bucketUnitFor, windowFor } from '../../application/history/statsRange'
 import type { RangeKind } from '../../application/history/statsRange'
 import { eventWallTime } from '../../application/logbook'
@@ -106,7 +107,8 @@ const UNCERTAINTY_FLOOR_MS = 60_000
  * and refreshed only when a range is picked or a read lands, never on a timer: a window recomputed
  * every second would reflow the whole page and trip the steadiness check.
  */
-const range = ref<RangeKind>('week')
+let preferences = loadStatsPreferences()
+const range = ref<RangeKind>(preferences.range)
 const now = ref(Date.now())
 
 /**
@@ -114,7 +116,9 @@ const now = ref(Date.now())
  * the last seven days — the same span the Week preset covers — so switching to Custom moves nothing
  * until the reader picks a date.
  */
-const customWindow = ref<TimeWindow>({ from: Date.now() - 6 * 86_400_000, to: Date.now() })
+const customWindow = ref<TimeWindow>(
+  preferences.custom ?? { from: Date.now() - 6 * 86_400_000, to: Date.now() },
+)
 
 onMounted(() => {
   void browser.refresh().catch(() => undefined)
@@ -123,11 +127,25 @@ onMounted(() => {
 function selectRange(kind: RangeKind): void {
   now.value = Date.now()
   range.value = kind
+  preferences = {
+    ...preferences,
+    range: kind,
+    custom: kind === 'custom' ? customWindow.value : preferences.custom,
+  }
+  saveStatsPreferences(preferences)
 }
 
 function selectCustom(window: TimeWindow): void {
   customWindow.value = window
   now.value = Date.now()
+  preferences = { ...preferences, custom: window }
+  saveStatsPreferences(preferences)
+}
+
+function selectPack(key: DeviceKey): void {
+  packKey.value = key
+  preferences = { ...preferences, pack: key }
+  saveStatsPreferences(preferences)
 }
 
 // ── which device ────────────────────────────────────────────────────────────
@@ -152,7 +170,8 @@ watch(
   (rows) => {
     const held = packKey.value
     if (held !== null && rows.some((row) => row.deviceKey === held)) return
-    packKey.value = rows[0]?.deviceKey ?? null
+    packKey.value =
+      rows.find((row) => row.deviceKey === preferences.pack)?.deviceKey ?? rows[0]?.deviceKey ?? null
   },
   { immediate: true },
 )
@@ -987,7 +1006,7 @@ function utcLabel(offsetMinutes: number): string {
           :pack="packKey"
           @update:model-value="selectRange"
           @update:custom="selectCustom"
-          @update:pack="packKey = $event"
+          @update:pack="selectPack"
         />
 
         <!-- The pack's half of the page, absent until a ring has been read into this browser. -->

@@ -11,7 +11,8 @@
     "test": "vitest run",
     "typecheck": "vue-tsc -b --noEmit",
     "check": "npm run typecheck && npm test",
-    "check:visual": "node scripts/visual-check.mjs"
+    "check:visual": "node scripts/visual-check.mjs",
+    "check:pwa": "node scripts/check-pwa.mjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",

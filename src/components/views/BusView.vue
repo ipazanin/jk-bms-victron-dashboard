@@ -240,9 +240,10 @@ const recordedSummary = computed(() => {
     <!-- The live trend sits late: a strip mounting when a series first arrives grows the panel,
          and from the foot of the stack that nudges only the footer, never the instruments above. -->
     <TrendStrips
-      v-if="source === 'live' && packPhase !== 'absent'"
+      v-if="(source === 'live' && packPhase !== 'absent') || (source === 'remembered' && history.length > 0)"
       class="card"
       :history="history"
+      :stale="stale"
     />
 
     <!-- The record of what the annunciator has already stopped showing. Last in the stack and a

@@ -15,9 +15,8 @@
  * longer exists. Their shape:
  *
  *   tests/fixtures/rememberedSession.json   a RememberedSession, exactly as `shunt.rememberedSession`
- *                                           holds it. Its `capturedAt` is restamped below, because
- *                                           the loader drops a snapshot older than its age bound and
- *                                           a fixed stamp would expire.
+ *                                           holds it. Its `capturedAt` is restamped below to keep
+ *                                           the remembered age consistent between runs.
  *   tests/fixtures/storedSession.json       { device, session, chunks[], meta } — one row for each
  *                                           store of `shunt.log`. Chunk columns arrive as plain
  *                                           arrays and are widened to typed arrays here.
@@ -36,7 +35,7 @@ import { launch } from 'puppeteer-core'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const FIXTURE_DIR = join(ROOT, 'tests', 'fixtures')
-const SCREENSHOT_DIR = join(ROOT, 'docs')
+const SCREENSHOT_DIR = process.env.VISUAL_OUTPUT_DIR ?? join(ROOT, 'docs')
 
 const BASE = process.argv[2] ?? 'http://localhost:4173/jk-bms-victron-dashboard/'
 
@@ -90,7 +89,7 @@ const STEADY_RUN_MS = 40_000
 const MAX_LAYOUT_SHIFT = 0.02
 const HEIGHT_SAMPLE_MS = 250
 
-/** Fresh enough that the loader keeps it, old enough that the banner reads as memory. */
+/** A consistent remembered age for the banner. */
 const REMEMBERED_AGE_MS = 3 * 60_000
 
 /** Recent enough that the staleness hint reads as a read just taken, not as a stale copy. */
@@ -107,6 +106,17 @@ function fail(scope, message) {
 // ── the states the page can be in with no radios attached ─────────────────────
 
 const PASSES = [
+  {
+    name: 'connect',
+    archive: false,
+    remembered: false,
+    hash: '#/connect',
+    ready: '[data-testid="connect-view"]',
+    check(scope, report) {
+      if (!/Install & offline/.test(report.text)) fail(scope, 'the install and offline controls did not render')
+      if (!/Ready offline/.test(report.text)) fail(scope, 'the app did not finish preparing its offline copy')
+    },
+  },
   {
     name: 'cold',
     /** Nothing seeded: the state a first-time visitor lands in. */
@@ -551,13 +561,14 @@ function watchForErrors(page) {
  * returns — so the seed can land after the archive has already been listed as empty.
  */
 async function seedOrigin(page, pass) {
-  if (!pass.remembered && !pass.archive) return
-  await page.evaluate(
-    seedStores,
-    pass.remembered ? { ...seeds.remembered, capturedAt: Date.now() - REMEMBERED_AGE_MS } : null,
-    pass.archive ? seeds.archive : null,
-    pass.ring ? slideRingOntoToday(seeds.ring) : null,
-  )
+  if (pass.remembered || pass.archive) {
+    await page.evaluate(
+      seedStores,
+      pass.remembered ? { ...seeds.remembered, capturedAt: Date.now() - REMEMBERED_AGE_MS } : null,
+      pass.archive ? seeds.archive : null,
+      pass.ring ? slideRingOntoToday(seeds.ring) : null,
+    )
+  }
   if (pass.hash) await page.evaluate((hash) => (window.location.hash = hash), pass.hash)
 }
 
@@ -792,7 +803,11 @@ function readPage(page) {
     // --tap is declared the floor for every control on the page, not a target for the new ones.
     const smallTargets = [...document.querySelectorAll('button, a[href], input, select, summary')]
       .filter((element) => {
-        const box = element.getBoundingClientRect()
+        // A checkbox's associated label is also its clickable target.
+        const target = element instanceof HTMLInputElement && element.type === 'checkbox'
+          ? element.labels?.[0] ?? element
+          : element
+        const box = target.getBoundingClientRect()
         return box.height > 0 && box.height < 44
       })
 

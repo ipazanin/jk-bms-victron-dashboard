@@ -1,19 +1,16 @@
 # Shunt — a JK-BMS + Victron dashboard in your browser
 
-A static web page that talks Bluetooth directly to a **JK-BMS** and a **Victron SmartSolar MPPT**,
-and reconciles them. No app, no account, no backend, no cloud.
+A static, installable web app that talks Bluetooth directly to a **JK-BMS** and a **Victron SmartSolar MPPT**,
+and reconciles them. No account, no backend, no cloud.
 
 **[Open it →](https://ipazanin.github.io/jk-bms-victron-dashboard/)** — needs Chrome or Edge and the
 two radios. With no hardware you get the instrument drawn empty, the copy explaining what it will
 show, and nothing else: no numbers, no charge figure, no sample data. The page shows what its own
 radios recorded, and until they have recorded something there is nothing honest to draw.
 
-| The bus, reconciled | The Log |
-|---|---|
-| ![The dashboard, with both radios seen](docs/desktop-remembered.png) | ![The Log, listing one recorded session](docs/desktop-log.png) |
-
-Both are rendered from the built app by `npm run check:visual`, which drives a recorded session
-through the same `localStorage` and IndexedDB the page uses in the field.
+`npm run check:visual` renders the dashboard and Log from the built app, driving a recorded session
+through the same `localStorage` and IndexedDB the page uses in the field. It generates local
+screenshots in `docs/`.
 
 ---
 
@@ -48,7 +45,8 @@ different record types and are **not** decoded — only the solar-charger record
 
 ## Browser support — read this before filing an issue
 
-Web Bluetooth is a Chromium-only API. This is not something the page can work around.
+Installing Shunt does not add Bluetooth APIs to a browser. Direct Bluetooth access needs a
+supported Chromium browser or a specialist browser such as Bluefy; offline viewing works more widely.
 
 | Browser | Battery (GATT) | Solar (live advertisements) |
 |---|---|---|
@@ -60,10 +58,11 @@ Web Bluetooth is a Chromium-only API. This is not something the page can work ar
 | Safari, macOS & iOS | ❌ | ❌ |
 | Bluefy (iOS) | ✅ | ❌ neither route |
 
-- **Firefox will never work.** Mozilla's [standards position on Web Bluetooth](https://github.com/mozilla/standards-positions/issues/95)
-  is *negative*; there is no implementation to enable.
-- **Safari ships nothing**, and Apple requires iOS browsers to use WebKit, so Chrome-on-iOS
-  inherits the gap. iOS users need [Bluefy](https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055).
+- **Firefox and Safari have no native Web Bluetooth.** Their offline app shell and browser storage
+  work, but installing the page cannot enable direct radio access. See the
+  [Web Bluetooth implementation status](https://github.com/whatwg/bluetooth/blob/main/implementation-status.md).
+  On iOS, [Bluefy](https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055) provides the battery
+  GATT connection; installing Shunt in Safari does not inherit Bluefy's Bluetooth support.
 - **Solar needs a flag.** Both routes to a live advertisement — the device-free scan
   (`requestLEScan`) and watching one chosen device (`watchAdvertisements`) — sit behind
   `chrome://flags/#enable-experimental-web-platform-features`. The page detects each separately and
@@ -92,18 +91,17 @@ Web Bluetooth is a Chromium-only API. This is not something the page can work ar
   relays the raw payload to the page over `ws://localhost`, where the same code decodes it with your
   key exactly as a browser scan would. Serve the app locally and open it with `?bridge=1`.
 
-Storage is the opposite shape, and it changes what the Log can be. Firefox and Safari have perfect
-IndexedDB and no Web Bluetooth at all, so they can never record — and having never recorded, they
-have nothing to browse. The Log is per-origin and per-browser: a session recorded in Chrome is
-invisible from Safari on the same machine, and from a different Chrome profile, and there is no
-mechanism that could make it otherwise. Private browsing usually blocks storage outright; the page
-says so in a sentence and keeps working as a live instrument.
+The Log is per-origin and per-browser: a session recorded in Chrome is invisible from Firefox or
+Safari, a different profile, or a different site address. Installing may use a separate storage
+container on some platforms, so check the installed app before relying on existing recordings.
+Private browsing may provide temporary storage or refuse it. The local [bridge](bridge/README.md)
+supplies solar advertisements only; it is not a native replacement for the battery connection.
 
-**On iOS the JSON export is the durability story.** Bluefy is a WKWebView app, and WebKit wipes
-script-writable storage — IndexedDB included — after seven days without a visit. Nothing the page
-can do prevents that, so the download button sits in the session header on every platform rather
-than being shouted about on the one where it matters most. Bluefy also has GATT but no advertisement
-scanning, so every iOS session is pack-only.
+Browser storage can be evicted. Shunt asks for persistent storage without delaying the Log or
+recorder while a permission prompt is unanswered. The Log shows the browser's answer; a grant
+protects against ordinary storage-pressure eviction, not clearing site data. Safari also has
+proactive eviction policies for inactive sites. Export important sessions
+as JSON. See [browser storage policies](https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria).
 
 The page feature-detects all of this and degrades honestly. With no solar it is still a complete,
 correct battery instrument — it withholds the house-load span rather than faking it to zero.
@@ -112,6 +110,61 @@ A **What this page needs** checklist under *Connect* shows the live state of eve
 Web Bluetooth, HTTPS, whether the radio is actually switched on, whether the devices you have
 allowed can be listed, advertisement listening, Web Crypto — tagged by whether it gates the battery
 or only the solar half, with the remedy for each.
+
+## Install, offline use and refresh recovery
+
+Open Shunt online and wait for **Ready offline** in the footer. This downloads the app, fonts and
+icons into this browser. After that, a normal reload or reopening the same address works without
+internet, including the saved Log and Stats. Installation is optional for offline use.
+
+In **Connect → Install & offline**, use **Install Shunt** when the browser offers it, or the browser's
+own install menu:
+
+| Browser | Installation |
+|---|---|
+| Chrome / Edge on desktop; Chrome on Android | Install app from the browser menu or Shunt's install button |
+| Safari on macOS Sonoma or later | File → Add to Dock |
+| Safari on iPhone / iPad | Share → Add to Home Screen |
+| Firefox on Windows | Web-app windows where offered; Mozilla documents Firefox 143+, or 150+ for Microsoft Store builds |
+| Firefox on Android | Menu → Install → Add to Home Screen |
+| Firefox on macOS | Use the offline page in a normal tab |
+
+Installation controls vary by platform; Shunt only shows its install button when the browser
+supplies an installer. See [MDN installability](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Guides/Making_PWAs_installable),
+[Firefox Windows](https://support.mozilla.org/en-US/kb/web-apps-firefox-windows), and
+[Firefox Android](https://support.mozilla.org/en-US/kb/use-web-apps-firefox-android).
+
+**What survives a refresh:** the last battery and/or solar reading, its observation timestamp,
+up to ten minutes of recorded trend, device/key/reconnect preferences, theme/sidebar preferences,
+the Log, the current hash route, and Stats range/custom dates/pack selection. Older readings remain
+available until forgotten or replaced, with a **STALE — not live data** label and observation date.
+Rejoining the same remembered battery keeps the recent trend and its real gaps. Rate estimates
+start with fresh observations because an old rate is not evidence of what the boat is doing now.
+
+**What must restart:** browser Bluetooth connections end on reload. Shunt attempts to reconnect
+using the existing permissions and remembered devices; a chooser may still be required by the
+browser. Offline Bluetooth works while the app is running and the radios are available, under the
+same browser restrictions as online. Closing the app, locking a phone, or suspending its browser
+does not provide continuous background recording. The native solar bridge must still be running
+when used. A PWA is not a replacement for a continuously running native logger.
+
+Snapshots are saved periodically and synchronously when the page is hidden or left; the archive
+checkpoints every ten seconds. An abrupt process kill without lifecycle events can still lose the
+latest uncheckpointed samples (up to 15 seconds of snapshot state or ten seconds of Log samples).
+These are recovery checkpoints, not a guarantee against browser storage refusal, device failure,
+or clearing site data. The existing JSON export is the independent backup. Browsers recommend
+[saving on visibility changes](https://developer.chrome.com/docs/web-platform/page-lifecycle-api)
+because unload callbacks are not guaranteed.
+
+**Updates wait for you.** New app files download into a separate cache. Shunt never reloads an
+open recording to install them. When the update notice appears, finish recording, close **all**
+Shunt tabs and app windows, then reopen. Reloading while another Shunt window remains open keeps
+the current version. This follows the [service-worker lifecycle](https://web.dev/articles/service-worker-lifecycle).
+Only Shunt's own app caches are cleaned up; readings and the Log are not part of that cache.
+
+The first visit needs internet, and offline support needs HTTPS or localhost. If **Offline copy
+unavailable** appears, check site storage permissions and reload online. Clearing site data removes
+the offline app as well as saved state, so it must be downloaded again.
 
 ## Before you connect
 
@@ -183,10 +236,9 @@ check byte equal to the key's first byte, so a wrong key is rejected instead of 
 garbage.
 
 **Where the key lives.** In your browser's `localStorage`, and nowhere else — alongside the last
-frame each radio sent, and beside the Log in IndexedDB. **The page issues zero network requests
-after it loads.** That is a statement about the code, not a policy: nothing in `src/` calls `fetch`,
-the fonts are bundled, and the site is static, so there is no server to send anything to even if it
-wanted to.
+frame each radio sent, and beside the Log in IndexedDB. Shunt downloads its own static app files
+for offline use and checks for updates. It sends no readings, keys or recordings to a backend and
+has no analytics. Fonts are bundled; no font CDN is contacted.
 
 **Why the check byte matters.** Every Victron device on earth advertises under company id `0x02E1`.
 In a marina you will receive your neighbours' broadcasts too. The check byte is what separates your
@@ -228,7 +280,7 @@ any session a tab is still writing are never evicted.
 
 **`[ DOWNLOAD JSON ]`** writes every sample exactly as the radios reported it, in engineering units,
 with the stored ledger and a ledger recomputed from the samples side by side so the two can be
-compared. On iOS it is the only durable copy — see the storage note above.
+compared. Keep exports outside the browser for recordings you cannot afford to lose.
 
 **Where it degrades, it says so.** Storage blocked by private browsing, a disk too full to accept
 another chunk, or a database written by a newer build of this page each get their own sentence
@@ -280,6 +332,7 @@ npm test               # decoder tests against real captured frames
 npm run typecheck
 npm run build
 npm run check:visual   # renders in real Chrome, asserts no overflow, no console errors, no jitter
+npm run check:pwa      # built app: offline reload, stored Log, update lifecycle, failed downloads
 ```
 
 `localhost` is a secure context, so Web Bluetooth works on the dev server as-is. Viewing the dev
@@ -288,14 +341,27 @@ build from a phone needs a real HTTPS origin: run
 `cloudflared tunnel --url http://localhost:5173` at it. The tunnel URL changes per run, and each
 new URL is a new origin — Bluetooth permissions reset with it.
 
+Offline caching is enabled only in production builds, never in `dev` or fake-radio mode. Run
+`npm run build && npm run check:pwa` for the isolated browser check; it starts its own temporary
+local server and browser profile. `CHROME_PATH` selects the Chrome executable. To try the install
+and offline experience manually, run `npm run build && npm run preview`. Keep preview and dev on
+different ports so a production service worker cannot serve cached files over your development
+server. The build derives its cache version and asset list from the emitted files, including lazy
+chunks and self-hosted fonts. No PWA runtime dependency is required.
+Run `npm run check:pwa -- --firefox` for the same checks in Firefox; `FIREFOX_PATH` selects its executable.
+
+Install icons are generated from `public/icons/shunt.svg`; regenerate with
+`CHROME_PATH=/path/to/chrome node scripts/generate-icons.mjs` after editing the vector.
+
 `check:visual` drives the *built* site, so run `npm run build && npm run preview` first and leave the
 preview server up (it serves `http://localhost:4173/jk-bms-victron-dashboard/`, the script's default
 target). It launches your installed Chrome, resolved per platform; set `CHROME_PATH` to point at a
 different binary if the check cannot find one.
+Set `VISUAL_OUTPUT_DIR=/tmp/shunt-visual` to keep verification screenshots outside the repository.
 
 It seeds `localStorage` and IndexedDB from `tests/fixtures/`, the same payloads the unit suite
-loads, and asserts four states at four widths: the cold landing (which must print no charge figure
-at all), the remembered session, the Log list and one session's detail. Screenshots land in `docs/`.
+loads, and checks Connect/install, the cold landing, remembered readings, the Log list and session
+detail, Stats with and without stored ring history, and Warnings at four widths. Screenshots land in `docs/`.
 It then runs the instrument for forty seconds at desktop width and fails on cumulative layout shift
 above 0.02, on the document height taking more than one value, or on the pack value label's `x`
 moving. Those three are the measurements the layout work was aimed at, taken the way they were taken

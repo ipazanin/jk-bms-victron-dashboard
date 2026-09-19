@@ -11,6 +11,7 @@ import { createApp } from 'vue'
 import App from './App.vue'
 import { forgetSupersededSolarLiveTransport } from './application/storage'
 import { applyInitialTheme } from './application/theme'
+import { startOfflineApp } from './application/offlineApp'
 
 // Before the mount, not inside it: the stylesheet's :root is the dark plane, so resolving this
 // from a component would paint dark and correct itself a frame later for anyone who chose light.
@@ -19,6 +20,9 @@ applyInitialTheme()
 // Once a load, and nowhere near a radio: the entry it clears is dead weight in a browser that has
 // run an older build, and nothing on the page would ever notice it going.
 forgetSupersededSolarLiveTransport()
+
+const stopOfflineApp = startOfflineApp()
+if (import.meta.hot) import.meta.hot.dispose(stopOfflineApp)
 
 createApp(App).mount('#app')
 

@@ -448,7 +448,9 @@ describe('what a watch that tore itself down leaves behind', () => {
     await flush()
 
     expect(telemetry.solarState.value).toBe('idle')
-    expect(telemetry.solar.value).toBeNull()
+    expect(telemetry.source.value).toBe('remembered')
+    expect(telemetry.solar.value).toEqual(solarReading())
+    expect(telemetry.rememberedAt.value).not.toBeNull()
     expect(telemetry.solarError.value).toBe('the radio would not re-arm')
 
     // And the loop is free again: while the page claimed a watch was up, it read the radio as

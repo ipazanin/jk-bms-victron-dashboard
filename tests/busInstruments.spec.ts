@@ -47,7 +47,7 @@ const IDLE: RecorderState = {
 let host: HTMLElement
 let app: App | null = null
 
-/** The snapshot the loader restores, dated recently enough that the twelve-hour gate keeps it. */
+/** A captured snapshot for the remembered instruments. */
 function remembered(): RememberedSession {
   return {
     version: REMEMBERED_SCHEMA_VERSION,
@@ -195,6 +195,22 @@ describe('what tells a restored session apart from a measured one', () => {
     // the banner that used to carry the whole claim has scrolled off the top of a phone.
     expect(text).toContain('not live · last seen')
     expect(text).toContain('not live · boat = solar − pack')
+    expect(liveFlags()).toEqual(['false', 'false'])
+  })
+
+  it('dates an older offline snapshot and shows its trend as recorded history', () => {
+    const capturedAt = new Date(2026, 0, 4, 12, 30).getTime()
+    saveRememberedSession({ ...remembered(), capturedAt, history: [
+      { at: capturedAt - 60_000, packCurrent: -2, packVoltage: 13, pvPower: null, housePower: null },
+      { at: capturedAt, packCurrent: -3, packVoltage: 13, pvPower: null, housePower: null },
+    ] })
+    expect(useTelemetry().restoreRemembered()).toBe(true)
+
+    const text = busView()
+
+    expect(text).toContain('2026')
+    expect(text).toContain('Recorded 60 s')
+    expect(text).not.toContain('Last 60 s')
     expect(liveFlags()).toEqual(['false', 'false'])
   })
 

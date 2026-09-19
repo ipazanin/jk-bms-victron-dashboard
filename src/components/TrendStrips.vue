@@ -25,7 +25,10 @@ import type { BandPoint, LinearScale, TracePoint } from '../domain/history/geome
 import { MAX_SAMPLE_GAP_MS } from '../domain/history/join'
 import { POWER_LADDER, nextStop } from '../domain/scaleLadder'
 
-const props = defineProps<{ history: TrendPoint[] }>()
+const props = defineProps<{
+  history: TrendPoint[]
+  stale?: boolean
+}>()
 
 const STRIP_HEIGHT = 46
 /** viewBox units held clear at the left rail for the band labels. */
@@ -64,7 +67,8 @@ const spanLabel = computed(() => {
   const window = span.value
   if (window === null) return 'Trend'
   const seconds = Math.round((window.end - window.start) / 1000)
-  return seconds < 90 ? `Last ${seconds} s` : `Last ${Math.round(seconds / 60)} min`
+  const prefix = props.stale ? 'Recorded' : 'Last'
+  return seconds < 90 ? `${prefix} ${seconds} s` : `${prefix} ${Math.round(seconds / 60)} min`
 })
 
 const timeScale = computed<LinearScale>(() =>

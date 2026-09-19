@@ -32,10 +32,7 @@ const props = defineProps<{
 const MEAN_SAMPLE_BYTES = (PACK_SAMPLE_BYTES + SOLAR_SAMPLE_BYTES) / 2
 const BYTES_PER_MB = 1_000_000
 
-/**
- * iPadOS reports itself as a Mac, and the seven-day eviction applies there too, so the touch count
- * is what separates a real desktop from a tablet claiming to be one.
- */
+/** iPadOS may identify itself as a Mac. */
 const onApplePortable = ((): boolean => {
   if (typeof navigator === 'undefined') return false
   const agent = navigator.userAgent
@@ -87,8 +84,8 @@ function megabytes(bytes: number): string {
     </p>
 
     <p v-if="onApplePortable" class="copy">
-      iOS clears storage for sites you have not opened in seven days. Download anything you want to
-      keep — there is nothing the page can do about it.
+      Storage retention on iOS depends on the browser and how the app was installed. Download
+      important sessions so you have a copy outside this browser.
     </p>
   </div>
 </template>

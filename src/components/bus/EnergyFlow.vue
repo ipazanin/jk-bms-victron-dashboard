@@ -28,7 +28,6 @@ import {
   amps,
   ampsAbsolute,
   aperture,
-  clockTime,
   duration,
   storedWattHours,
   volts,
@@ -382,17 +381,18 @@ const packStoredBasis = computed(() => {
 /** The word the row's own label carries once the figures stop being a measurement. */
 const storedPlate = computed(() => (props.stale ? 'Stored (last seen)' : 'Stored'))
 
-/**
- * The clock time rather than an age, because this caption is read once and never re-read. It is a
- * computed over a capturedAt that does not move, so a relative age would be evaluated at mount and
- * then sit there claiming "moments ago" for as long as the page is open — and the banner that does
- * tick its own age is the first thing off the top of a phone. A wall-clock time cannot go stale,
- * and it holds its width, which a counting age does not. Remembered snapshots expire at twelve
- * hours, so an hour and a minute is all the resolution the reader needs.
- */
+/** The complete observation date stays honest even after a long offline absence. */
 const staleNote = computed(() => {
   if (props.stale) {
-    return props.capturedAt === null ? 'not live' : `not live · last seen ${clockTime(props.capturedAt)}`
+    if (props.capturedAt === null) return 'not live'
+    const observedAt = new Date(props.capturedAt).toLocaleString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+    return `not live · last seen ${observedAt}`
   }
   const basis = props.readoutSpanMs === null ? '' : ` · averaged ${aperture(props.readoutSpanMs)}`
   return `solar · bus · boat · pack${basis}`

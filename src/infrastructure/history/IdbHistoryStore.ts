@@ -229,6 +229,12 @@ export class IdbHistoryStore implements HistoryStore {
     return this.state
   }
 
+  reportPersistence(persisted: boolean): void {
+    if (!this.connected || this.state.persisted === persisted) return
+    this.state = { ...this.state, persisted }
+    for (const watcher of [...this.watchers]) watcher()
+  }
+
   async openSession(record: SessionRecord): Promise<void> {
     if (!this.connected) return
     await runTransaction(this.database, [SESSIONS], 'readwrite', async (transaction) => {

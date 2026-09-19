@@ -59,6 +59,7 @@ import { SessionRecorder } from './history/SessionRecorder'
 import type { PackStreamEndReason, RecorderState } from './history/SessionRecorder'
 import { createObservations } from './observations'
 import {
+  MAX_REMEMBERED_TREND_POINTS,
   REMEMBERED_SCHEMA_VERSION,
   forgetRememberedSession,
   loadRememberedSession,
@@ -327,6 +328,9 @@ export function createTelemetry(deps: TelemetryDeps) {
   let lastWriteAt = 0
   /** Observation time of the latest battery snapshot — the honest age of remembered data. */
   let lastSnapshotAt = 0
+  let lastSolarAt = 0
+  let rememberedBmsDeviceId: string | null = null
+  let rememberedTrend: readonly TrendPoint[] = []
 
   /** The controller's identity, learned across two events that arrive in either order. */
   let solarDeviceKey: DeviceKey | null = null
@@ -538,29 +542,28 @@ export function createTelemetry(deps: TelemetryDeps) {
     return { worst: worstFault.value, headline: faults.value[0]?.title ?? 'No active faults' }
   }
 
-  /**
-   * The single guarded write. Only genuinely live data with a battery present is ever persisted,
-   * so a solar-only session and a browsed archive session both no-op here — the exclusion is
-   * structural rather than a special case, and it is what stops browsing a stored session from
-   * overwriting the remembered snapshot with the session being browsed. Throttled unless forced
-   * on session end.
-   */
+  /** Only live observations can replace the saved view; lifecycle events bypass the throttle. */
   function persistRememberedNow(force = false): void {
     if (source.value !== 'live') return
     const snapshot = battery.value
-    if (!snapshot) return
+    if (!snapshot && !solar.value) return
+    // A dropped pack is still part of this watch. Keep its last complete snapshot until it returns.
+    if (!snapshot && lastSnapshotAt !== 0) return
     const at = now()
     if (!force && at - lastWriteAt < WRITE_THROTTLE_MS) return
     lastWriteAt = at
     saveRememberedSession({
       version: REMEMBERED_SCHEMA_VERSION,
-      capturedAt: lastSnapshotAt || at,
+      capturedAt: (snapshot ? lastSnapshotAt : lastSolarAt) || at,
       battery: snapshot,
       solar: solar.value,
       device: device.value,
       settings: settings.value,
       solarRssi: solarRssi.value,
       status: currentStatus(),
+      history: history.slice(-MAX_REMEMBERED_TREND_POINTS),
+      // The transport clears its device before notifying us of a drop.
+      bmsDeviceId: snapshot ? (bmsLink.deviceId ?? lastDevice.value?.id ?? null) : null,
     })
   }
 
@@ -656,12 +659,14 @@ export function createTelemetry(deps: TelemetryDeps) {
       // the toggle, so the reason goes with it rather than standing over a live reading.
       solarRejection.value = null
       solar.value = reading
+      lastSolarAt = at
       solarRssi.value = rssi
       solarState.value = 'live'
       evaluateFaults(at)
       // Sample here too: a run of solar advertisements between BMS frames must still feed the
       // trend, and the SAMPLE_INTERVAL_MS gate keeps it to one point a second across both radios.
       recordSample()
+      persistRememberedNow()
       if (source.value === 'live') {
         // A row, and not a watch coming up, is what says the page is back: a watch armed over a
         // controller that never speaks leaves the recording exactly as empty as the gap did.
@@ -735,8 +740,12 @@ export function createTelemetry(deps: TelemetryDeps) {
    * browsed one — stops being what the numbers are the moment a live one arrives.
    */
   function claimInstruments(): void {
-    if (source.value === 'remembered') leaveRemembered()
-    else if (source.value === 'history') leaveHistory()
+    if (source.value === 'remembered') {
+      // Solar returning first must not replace the saved pack with a solar-only snapshot.
+      const previousPackAt = lastSnapshotAt
+      leaveRemembered()
+      lastSnapshotAt = previousPackAt
+    } else if (source.value === 'history') leaveHistory()
     source.value = 'live'
   }
 
@@ -755,6 +764,8 @@ export function createTelemetry(deps: TelemetryDeps) {
     settings.value = null
     history.splice(0, history.length)
     lastSampleAt = 0
+    lastSnapshotAt = 0
+    lastSolarAt = 0
     observations.clear()
     faults.value = []
   }
@@ -1055,9 +1066,8 @@ export function createTelemetry(deps: TelemetryDeps) {
   /**
    * Restores the last live session from localStorage on load, so the instruments render with
    * the last-seen numbers rather than the empty landing page — even in browsers without Web
-   * Bluetooth. Pure localStorage, no gesture required. History is deliberately not restored,
-   * and neither are the windows: a projection over a window that ended hours ago would assert a
-   * rate that no longer describes the boat.
+   * Bluetooth. The timestamped trend is restored for review, but observation windows stay empty:
+   * a projection over a window that ended hours ago would assert a rate that no longer applies.
    */
   function restoreRemembered(): boolean {
     if (source.value !== 'none') return false
@@ -1069,6 +1079,10 @@ export function createTelemetry(deps: TelemetryDeps) {
     device.value = session.device
     settings.value = session.settings
     solarRssi.value = session.solarRssi
+    history.splice(0, history.length, ...(session.history ?? []))
+    rememberedBmsDeviceId = session.bmsDeviceId ?? null
+    rememberedTrend = session.history ?? []
+    lastSnapshotAt = session.battery === null ? 0 : session.capturedAt
     rememberedAt.value = session.capturedAt
     rememberedStatus.value = session.status
     source.value = 'remembered'
@@ -1077,6 +1091,8 @@ export function createTelemetry(deps: TelemetryDeps) {
   }
 
   function forgetRemembered(): void {
+    rememberedBmsDeviceId = null
+    rememberedTrend = []
     forgetRememberedSession()
     if (source.value !== 'remembered') return
     resetReadings()
@@ -1114,6 +1130,8 @@ export function createTelemetry(deps: TelemetryDeps) {
     // A second connect over a live one abandons the first device with its drop listener still
     // bound to it, and nothing afterwards holds a reference able to remove it.
     if (bmsState.value === 'live') return
+    rememberedBmsDeviceId = null
+    rememberedTrend = []
     bmsError.value = null
     if (source.value === 'remembered') leaveRemembered()
     else if (source.value === 'history') leaveHistory()
@@ -1169,8 +1187,22 @@ export function createTelemetry(deps: TelemetryDeps) {
       // An attempt nobody asked for writes no banner of its own, but it is still the thing that
       // answers the one the drop left standing.
       bmsError.value = null
+      const reconnectAt = now()
+      // Solar can claim the instruments first; the saved pack trend still belongs to this rejoin.
+      const previousTrend = rememberedBmsDeviceId === deviceId &&
+        (source.value === 'remembered' || (source.value === 'live' && battery.value === null))
+        ? rememberedTrend.filter((point) =>
+          point.at >= reconnectAt - HISTORY_SECONDS * 1000 && point.at <= reconnectAt,
+        )
+        : []
       if (source.value === 'remembered') leaveRemembered()
       else if (source.value === 'history') leaveHistory()
+      if (previousTrend.length > 0) {
+        history.splice(0, history.length, ...previousTrend)
+        lastSampleAt = previousTrend.at(-1)?.at ?? 0
+      }
+      rememberedBmsDeviceId = null
+      rememberedTrend = []
       bmsState.value = 'live'
       source.value = 'live'
       ringAutoReadConsidered = false
@@ -1759,6 +1791,7 @@ export function createTelemetry(deps: TelemetryDeps) {
    * a press of Connect is for the pack.
    */
   function stopSolar(): void {
+    persistRememberedNow(true)
     forgetLastController()
     lastController.value = null
     stopSolarLink()
@@ -1801,7 +1834,10 @@ export function createTelemetry(deps: TelemetryDeps) {
     recorder.checkpoint()
   }
   const onVisibilityChange = (): void => {
-    if (document.visibilityState === 'hidden') recorder.checkpoint()
+    if (document.visibilityState === 'hidden') {
+      persistRememberedNow(true)
+      recorder.checkpoint()
+    }
   }
   if (typeof window !== 'undefined') window.addEventListener('pagehide', onPageHide)
   if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibilityChange)

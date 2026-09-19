@@ -730,6 +730,88 @@ describe('probing for an archive', () => {
     expect(store.availability.estimatedBytes).toBeNull()
     store.close()
   })
+
+  it('opens and writes the archive while storage protection is waiting for permission', async () => {
+    let answerPermission!: (persisted: boolean) => void
+    const permission = new Promise<boolean>((resolve) => { answerPermission = resolve })
+    const persist = vi.fn(() => permission)
+    vi.stubGlobal('navigator', { storage: { persisted: async () => false, persist } })
+
+    const store = await openHistoryStore()
+    const changed = vi.fn()
+    const stopWatching = store.watch(changed)
+    try {
+      expect(persist).toHaveBeenCalledOnce()
+      expect(store.availability).toMatchObject({ usable: true, persisted: false })
+      await store.openSession(sessionRecord())
+      expect((await store.listSessions()).map((session) => session.record.id)).toContain(SESSION_ID)
+
+      answerPermission(true)
+      await vi.waitFor(() => expect(store.availability.persisted).toBe(true))
+      expect(store.availability.usable).toBe(true)
+      expect(changed).toHaveBeenCalledOnce()
+    } finally {
+      stopWatching()
+      store.close()
+    }
+  })
+
+  it('keeps an already protected archive usable without another permission request', async () => {
+    const persist = vi.fn()
+    vi.stubGlobal('navigator', { storage: { persisted: async () => true, persist } })
+    const store = await openHistoryStore()
+    try {
+      expect(store.availability).toMatchObject({ usable: true, persisted: true })
+      expect(persist).not.toHaveBeenCalled()
+    } finally {
+      store.close()
+    }
+  })
+
+  it.each(['denied', 'rejected'] as const)('keeps the archive usable when protection is %s', async (decision) => {
+    const persist = vi.fn(async () => {
+      if (decision === 'rejected') throw new DOMException('Unavailable', 'NotAllowedError')
+      return false
+    })
+    vi.stubGlobal('navigator', { storage: { persisted: async () => false, persist } })
+    const store = await openHistoryStore()
+    try {
+      await vi.waitFor(() => expect(persist.mock.settledResults[0]?.type).toBe(decision === 'denied' ? 'fulfilled' : 'rejected'))
+      expect(store.availability).toMatchObject({ usable: true, persisted: false })
+      await store.openSession(sessionRecord())
+      expect((await store.listSessions()).map((session) => session.record.id)).toContain(SESSION_ID)
+    } finally {
+      store.close()
+    }
+  })
+
+  it.each(['closed', 'upgraded'] as const)('ignores a permission answer after the archive was %s', async (closure) => {
+    let answerPermission!: (persisted: boolean) => void
+    const permission = new Promise<boolean>((resolve) => { answerPermission = resolve })
+    vi.stubGlobal('navigator', { storage: { persisted: async () => false, persist: () => permission } })
+    const store = await openHistoryStore()
+    const changed = vi.fn()
+    const stopWatching = store.watch(changed)
+    try {
+      if (closure === 'closed') store.close()
+      else {
+        const upgraded = await openDatabase(DATABASE_NAME, DATABASE_VERSION + 1)
+        upgraded.close()
+      }
+      const availabilityBeforeAnswer = store.availability
+      changed.mockClear()
+      answerPermission(true)
+      await permission
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(store.availability).toEqual(availabilityBeforeAnswer)
+      expect(changed).not.toHaveBeenCalled()
+      if (closure === 'upgraded') expect(store.availability.reason).toBe('version-newer')
+    } finally {
+      stopWatching()
+      store.close()
+    }
+  })
 })
 
 describe('classifying a failed write', () => {

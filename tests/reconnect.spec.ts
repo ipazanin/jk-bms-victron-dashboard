@@ -9,14 +9,14 @@ import { createTelemetry } from '../src/application/telemetry'
 import type { Telemetry } from '../src/application/telemetry'
 import { ReconnectRefusedError } from '../src/infrastructure/ble/ReconnectRefusedError'
 import { browserThatCanRejoin } from './support/browserThatCanRejoin'
-import { battery, rememberedSession } from './support/samples'
+import { battery, rememberedSession, solarReading } from './support/samples'
 import { manualSchedule } from './support/manualSchedule'
 import type { ManualSchedule } from './support/manualSchedule'
 import { scriptedPage } from './support/scriptedPage'
 import type { ScriptedPage } from './support/scriptedPage'
 import { MemoryHistoryStore } from './support/MemoryHistoryStore'
 import { fakeBmsLink, fakeSolarHistoryLink, fakeSolarScan } from './support/fakeRadios'
-import type { FakeBmsLink } from './support/fakeRadios'
+import type { FakeBmsLink, FakeSolarScan } from './support/fakeRadios'
 
 let clock = 0
 let ids = 0
@@ -30,6 +30,7 @@ function flush(): Promise<void> {
 function spawn(options: { deviceId?: string | null; deviceName?: string | null } = {}): {
   telemetry: Telemetry
   bms: FakeBmsLink
+  solar: FakeSolarScan
   timers: ManualSchedule
   store: MemoryHistoryStore
   page: ScriptedPage
@@ -64,7 +65,7 @@ function spawn(options: { deviceId?: string | null; deviceName?: string | null }
     await telemetry.drain()
     store.close()
   })
-  return { telemetry, bms, timers, store, page }
+  return { telemetry, bms, solar, timers, store, page }
 }
 
 beforeEach(() => {
@@ -529,6 +530,74 @@ describe('the banner after an attempt that failed mid-handshake', () => {
 })
 
 describe('holding the remembered view through the attempt', () => {
+  it('continues only the recent trend from the same pack without restoring live windows', async () => {
+    const point = { at: clock - 1000, packCurrent: -4, packVoltage: 13, pvPower: null, housePower: null }
+    saveRememberedSession(rememberedSession({
+      capturedAt: clock - 1000,
+      bmsDeviceId: 'jk-abc',
+      history: [{ ...point, at: clock - 601_000 }, point],
+    }))
+    saveLastDevice('jk-abc', 'JK_B2A8S20P', clock)
+    const { telemetry, bms, timers } = spawn()
+    telemetry.restoreRemembered()
+
+    await telemetry.reconnectBms()
+
+    expect(telemetry.history).toEqual([point])
+    expect(telemetry.packReach.value).toBeNull()
+    expect(telemetry.projection.value).toBeNull()
+    timers.advance(5000)
+    bms.emitSnapshot(battery({ current: -8 }))
+    expect(telemetry.history).toHaveLength(2)
+    expect(telemetry.history[1].at - telemetry.history[0].at).toBe(6000)
+  })
+
+  it('continues the saved pack trend when solar reports before the BMS reconnects', async () => {
+    const point = { at: clock - 1000, packCurrent: -4, packVoltage: 13, pvPower: null, housePower: null }
+    saveRememberedSession(rememberedSession({ capturedAt: point.at, bmsDeviceId: 'jk-abc', history: [point] }))
+    saveLastDevice('jk-abc', 'JK_B2A8S20P', clock)
+    const { telemetry, solar } = spawn()
+    telemetry.restoreRemembered()
+    solar.emitReading(solarReading(), -60)
+    expect(telemetry.source.value).toBe('live')
+    expect(telemetry.battery.value).toBeNull()
+
+    await telemetry.reconnectBms()
+
+    expect(telemetry.history).toEqual([point])
+    expect(telemetry.packReach.value).toBeNull()
+  })
+
+  it('clears the saved trend when the remembered device is a different pack', async () => {
+    saveRememberedSession(rememberedSession({
+      capturedAt: clock,
+      bmsDeviceId: 'previous-pack',
+      history: [{ at: clock, packCurrent: -4, packVoltage: 13, pvPower: null, housePower: null }],
+    }))
+    saveLastDevice('jk-abc', 'JK_B2A8S20P', clock)
+    const { telemetry } = spawn()
+    telemetry.restoreRemembered()
+
+    await telemetry.reconnectBms()
+
+    expect(telemetry.history).toEqual([])
+  })
+
+  it('clears the saved trend when a chooser starts a fresh connection', async () => {
+    saveRememberedSession(rememberedSession({
+      capturedAt: clock,
+      bmsDeviceId: 'jk-abc',
+      history: [{ at: clock, packCurrent: -4, packVoltage: 13, pvPower: null, housePower: null }],
+    }))
+    const { telemetry, bms } = spawn()
+    telemetry.restoreRemembered()
+    bms.becomesAnotherPack('different-pack')
+
+    await telemetry.connectBms()
+
+    expect(telemetry.history).toEqual([])
+  })
+
   it('replaces the remembered numbers only once the link is live', async () => {
     saveRememberedSession(rememberedSession({ capturedAt: clock }))
     saveLastDevice('jk-abc', 'JK_B2A8S20P', clock)

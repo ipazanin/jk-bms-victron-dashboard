@@ -17,7 +17,7 @@ import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../domain/bms/typ
 import type { ChargeState, SolarReading } from '../domain/solar/types'
 // Type-only: FaultLevel is erased at build, so this leaves no runtime import edge back
 // into telemetry.ts. Importing a *value* from telemetry here would create a cycle.
-import type { FaultLevel } from './telemetry'
+import type { FaultLevel, TrendPoint } from './telemetry'
 import { storageKey } from './storageKey'
 
 const SESSION_STORAGE = 'shunt.rememberedSession'
@@ -29,13 +29,8 @@ const SESSION_STORAGE = 'shunt.rememberedSession'
  */
 export const REMEMBERED_SCHEMA_VERSION = SNAPSHOT_SCHEMA_VERSION
 
-/**
- * Hours, not weeks. This file answers only "what was on screen last time"; the Log is where a
- * bank's history actually lives, and it keeps its sessions on their own budget. A day-old frame
- * presented as the dashboard's current state is a claim about the boat right now that nothing
- * has checked since.
- */
-export const MAX_REMEMBERED_AGE_MS = 12 * 60 * 60 * 1000
+/** Ten minutes at one point per second, including both endpoints. */
+export const MAX_REMEMBERED_TREND_POINTS = 601
 
 export interface RememberedStatus {
   /** Captured annunciator severity, preserved as history rather than re-run as a live alarm. */
@@ -49,8 +44,8 @@ export interface RememberedSession {
   readonly version: number
   /** Epoch ms of the snapshot observation, never the write time, so the age stays honest. */
   readonly capturedAt: number
-  /** Required: it drives every instrument, so a remembered view exists only if present. */
-  readonly battery: BatterySnapshot
+  /** Null for a solar-only watch; at least one radio must have reported. */
+  readonly battery: BatterySnapshot | null
   /** House load and SolarRow; null when solar was never connected. */
   readonly solar: SolarReading | null
   /** Firmware/model line in BreakerPanel. */
@@ -61,6 +56,10 @@ export interface RememberedSession {
   readonly solarRssi: number
   /** Captured summary, so the alarm engine is not re-run against stale numbers. */
   readonly status: RememberedStatus
+  /** Captured trend, never fed back into live observation windows. Optional for older saves. */
+  readonly history?: readonly TrendPoint[]
+  /** The pack that produced the trend, so reconnect never joins different packs. */
+  readonly bmsDeviceId?: string | null
 }
 
 export function saveRememberedSession(session: RememberedSession): void {
@@ -82,7 +81,7 @@ export function loadRememberedSession(): RememberedSession | null {
 
   const session = parseRememberedSession(raw)
   if (session === null) {
-    // Corrupt, wrong-version, or over-age entries are cleared so they never reload.
+    // Corrupt or wrong-version entries are cleared so they never reload.
     forgetRememberedSession()
     return null
   }
@@ -109,16 +108,25 @@ function parseRememberedSession(raw: string): RememberedSession | null {
   if (parsed.version !== REMEMBERED_SCHEMA_VERSION) return null
 
   const capturedAt = parsed.capturedAt
-  if (!isFiniteNumber(capturedAt)) return null
-  if (Date.now() - capturedAt > MAX_REMEMBERED_AGE_MS) return null
+  if (!isFiniteNumber(capturedAt) || capturedAt <= 0 || capturedAt > 8.64e15) return null
 
-  if (!isValidBattery(parsed.battery)) return null
+  if (parsed.battery !== null && !isValidBattery(parsed.battery)) return null
   if (!isValidSolarOrNull(parsed.solar)) return null
+  if (parsed.battery === null && parsed.solar === null) return null
   if (!isValidDeviceOrNull(parsed.device)) return null
   if (!isValidSettingsOrNull(parsed.settings)) return null
   if (!isFiniteNumber(parsed.solarRssi)) return null
   if (!isValidStatus(parsed.status)) return null
+  if (
+    parsed.bmsDeviceId !== undefined &&
+    parsed.bmsDeviceId !== null &&
+    typeof parsed.bmsDeviceId !== 'string'
+  ) return null
 
+  // An optional damaged trend must not cost the valid instrument snapshot.
+  if (parsed.history !== undefined && !isValidHistory(parsed.history)) {
+    return { ...parsed, history: [] } as unknown as RememberedSession
+  }
   return parsed as unknown as RememberedSession
 }
 
@@ -219,4 +227,16 @@ function isValidStatus(value: unknown): value is RememberedStatus {
 
 function isFiniteNumberOrNull(value: unknown): value is number | null {
   return value === null || isFiniteNumber(value)
+}
+
+function isValidHistory(history: unknown): history is readonly TrendPoint[] {
+  if (!Array.isArray(history) || history.length > MAX_REMEMBERED_TREND_POINTS) return false
+  let previousAt = 0
+  for (const point of history) {
+    if (!isRecord(point) || !isFiniteNumber(point.at) || point.at <= previousAt) return false
+    if (!isFiniteNumber(point.packCurrent) || !isFiniteNumber(point.packVoltage)) return false
+    if (!isFiniteNumberOrNull(point.pvPower) || !isFiniteNumberOrNull(point.housePower)) return false
+    previousAt = point.at
+  }
+  return true
 }

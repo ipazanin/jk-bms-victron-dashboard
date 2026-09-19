@@ -366,6 +366,7 @@ button.ghost {
 .checkbox {
   display: flex;
   align-items: center;
+  min-height: var(--tap);
   gap: 0.5rem;
   font-size: 0.875rem;
   color: var(--ink-secondary);

@@ -1,13 +1,18 @@
 <script setup lang="ts">
-// Static footer: no props, no emits. The privacy paragraph is the product's core promise,
-// stated verbatim so it never drifts from what the app actually does.
+import { useOfflineApp } from '../application/offlineApp'
+
+const { state, status, updateReady } = useOfflineApp()
 </script>
 
 <template>
   <footer class="app-footer" data-testid="app-footer">
+    <p v-if="state !== 'development'" class="privacy" data-testid="offline-status" role="status">
+      <a href="#/connect">{{ status }}</a>
+      <span v-if="updateReady"> · Update ready. Finish recording, close all Shunt windows, then reopen.</span>
+    </p>
     <p class="privacy">
-      Nothing leaves this page. It makes no network request after it loads: no backend, no
-      telemetry, no analytics. Your encryption key and your log stay in this browser.
+      Your encryption key and your log stay in this browser. Shunt downloads app files for offline
+      use and checks for updates. No backend, telemetry or analytics.
     </p>
     <p class="colophon">
       <span>Domain Software Solutions d.o.o</span>
@@ -36,6 +41,13 @@
   color: var(--ink-secondary);
   max-width: 70ch;
   margin: 0;
+}
+
+.privacy a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  color: var(--ink-secondary);
 }
 
 .colophon {

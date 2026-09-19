@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
-  MAX_REMEMBERED_AGE_MS,
   REMEMBERED_SCHEMA_VERSION,
   forgetRememberedSession,
   loadRememberedSession,
@@ -130,16 +129,11 @@ describe('rememberedSession', () => {
     expect(storage.has(KEY)).toBe(false)
   })
 
-  it('discards a session captured longer ago than the maximum age', () => {
-    saveRememberedSession(session({ capturedAt: Date.now() - MAX_REMEMBERED_AGE_MS - 1000 }))
-    expect(loadRememberedSession()).toBeNull()
-    expect(storage.has(KEY)).toBe(false)
-  })
-
-  it('keeps a session captured just within the maximum age', () => {
-    const fresh = session({ capturedAt: Date.now() - MAX_REMEMBERED_AGE_MS + 60_000 })
-    saveRememberedSession(fresh)
-    expect(loadRememberedSession()).toEqual(fresh)
+  it('retains an old session with its original timestamp for explicitly stale offline review', () => {
+    const saved = session({ capturedAt: Date.now() - 30 * 24 * 60 * 60 * 1000 })
+    saveRememberedSession(saved)
+    expect(loadRememberedSession()).toEqual(saved)
+    expect(storage.has(KEY)).toBe(true)
   })
 
   it('discards a session whose battery is missing a field', () => {
@@ -185,6 +179,31 @@ describe('rememberedSession', () => {
     expect(loadRememberedSession()).toBeNull()
   })
 
+  it('accepts solar-only observations but rejects a session with neither radio reading', () => {
+    const solarOnly = session({ battery: null })
+    saveRememberedSession(solarOnly)
+    expect(loadRememberedSession()).toEqual(solarOnly)
+    saveRememberedSession(session({ battery: null, solar: null }))
+    expect(loadRememberedSession()).toBeNull()
+  })
+
+  it.each([
+    [{ at: 1, packCurrent: -2, packVoltage: null, pvPower: null, housePower: null }],
+    [{ at: 2, packCurrent: -2, packVoltage: 13, pvPower: null, housePower: null },
+      { at: 1, packCurrent: -2, packVoltage: 13, pvPower: null, housePower: null }],
+    Array.from({ length: 602 }, (_, index) => ({ at: index + 1, packCurrent: -2, packVoltage: 13, pvPower: null, housePower: null })),
+  ].map((history) => ({ history })))('drops malformed or oversized trends while retaining valid instruments (%#)', ({ history }) => {
+    const saved = session()
+    storage.setItem(KEY, JSON.stringify({ ...saved, history }))
+    expect(loadRememberedSession()).toEqual({ ...saved, history: [] })
+  })
+
+  it('continues without persistence when browser storage rejects writes', () => {
+    vi.spyOn(storage, 'setItem').mockImplementation(() => { throw new DOMException('Full', 'QuotaExceededError') })
+    expect(() => saveRememberedSession(session())).not.toThrow()
+    expect(loadRememberedSession()).toBeNull()
+  })
+
   it('forget removes the key', () => {
     saveRememberedSession(session())
     forgetRememberedSession()
@@ -199,8 +218,7 @@ describe('the payload seeded into a real browser', () => {
   // field added to BatterySnapshot fails this rather than quietly failing the visual check.
 
   it('is accepted by the validator once it is stamped with a time', () => {
-    // capturedAt is zero in the file because a committed fixture cannot be fresh, and the age gate
-    // is right to discard a stale one. Both readers stamp it before writing it.
+    // The fixture has no observation time until the caller stamps it.
     const seeded = { ...fixture, capturedAt: Date.now() } as unknown as RememberedSession
 
     storage.setItem(KEY, JSON.stringify(seeded))
@@ -208,7 +226,7 @@ describe('the payload seeded into a real browser', () => {
     expect(loadRememberedSession()).toEqual(seeded)
   })
 
-  it('is discarded unstamped, which is the age gate doing its job', () => {
+  it('is discarded unstamped because it has no valid observation time', () => {
     storage.setItem(KEY, JSON.stringify(fixture))
 
     expect(loadRememberedSession()).toBeNull()

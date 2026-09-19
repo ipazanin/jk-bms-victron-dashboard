@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createApp, nextTick } from 'vue'
 import type { App } from 'vue'
 
-import { provideHistoryEnvironment } from '../src/application/history/historyBrowser'
+import { provideHistoryEnvironment, useHistoryBrowser } from '../src/application/history/historyBrowser'
 import StatsView from '../src/components/views/StatsView.vue'
 import { calendarDateNow } from '../src/domain/history/calendarDays'
 import { PACK_SAMPLING_PERIOD_SECONDS } from '../src/domain/history/ringClock'
@@ -26,6 +26,7 @@ let host: HTMLElement
 let app: App | null = null
 
 beforeEach(() => {
+  localStorage.clear()
   host = document.createElement('div')
   document.body.append(host)
 })
@@ -34,6 +35,7 @@ afterEach(() => {
   app?.unmount()
   app = null
   host.remove()
+  localStorage.clear()
 })
 
 /** Mounted text with its wrapping collapsed, so the copy can be asserted as one sentence. */
@@ -88,6 +90,58 @@ async function solarLedgerOf(store: MemoryHistoryStore): Promise<void> {
 }
 
 describe('what the Stats view paints off the two devices’ own records', () => {
+  it('restores a selected older pack after asynchronous archive loading and falls back after deletion', async () => {
+    const store = new MemoryHistoryStore()
+    await store.appendRingSnapshot(ringSnapshot())
+    await store.appendRingSnapshot(ringSnapshot({ deviceKey: 'jk:SECONDPACK', observedAt: 5 }))
+    await statsViewShowing(store)
+    const picker = host.querySelector<HTMLSelectElement>('#stats-pack')!
+    expect(picker.value).not.toBe('jk:SECONDPACK')
+    picker.value = 'jk:SECONDPACK'
+    picker.dispatchEvent(new Event('change'))
+    await nextTick()
+
+    app?.unmount()
+    app = null
+    await statsViewShowing(store)
+
+    expect(host.querySelector<HTMLSelectElement>('#stats-pack')?.value).toBe('jk:SECONDPACK')
+    expect(useHistoryBrowser().ringLedger.value?.deviceKey).toBe('jk:SECONDPACK')
+    await useHistoryBrowser().deleteRingLedger('jk:SECONDPACK')
+    for (let turn = 0; turn < 12; turn += 1) await nextTick()
+    expect(useHistoryBrowser().ringLedger.value?.deviceKey).toBe(ringSnapshot().deviceKey)
+  })
+
+  it('restores the selected range and custom dates after the view is recreated', async () => {
+    const store = new MemoryHistoryStore()
+    await ledgerOf(store, 48, (index) => 280 + index * 0.5)
+    await statsViewShowing(store)
+
+    const custom = [...host.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find(
+      (button) => button.textContent?.trim() === 'Custom',
+    )!
+    custom.click()
+    await nextTick()
+    const dates = host.querySelectorAll<HTMLInputElement>('input[type="date"]')
+    dates[0]!.value = '2026-01-02'
+    dates[0]!.dispatchEvent(new Event('change'))
+    await nextTick()
+    dates[1]!.value = '2026-01-09'
+    dates[1]!.dispatchEvent(new Event('change'))
+    await nextTick()
+
+    app?.unmount()
+    app = null
+    await statsViewShowing(store)
+
+    expect(host.querySelector('[role="radio"][aria-checked="true"]')?.textContent?.trim()).toBe(
+      'Custom',
+    )
+    expect(
+      [...host.querySelectorAll<HTMLInputElement>('input[type="date"]')].map((input) => input.value),
+    ).toEqual(['2026-01-02', '2026-01-09'])
+  })
+
   it('says the history is still on the devices when this browser holds no ledger', async () => {
     // The one empty state for the whole page. A reader who has never read either device needs to be
     // told the records exist and where, not shown six cards of em dashes.

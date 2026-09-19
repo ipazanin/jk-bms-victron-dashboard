@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { browserStandardUtcOffsetMinutes } from '../src/application/browserZone'
 import { unavailableHistoryStore } from '../src/application/history/port'
@@ -302,6 +302,121 @@ describe('what reaches the archive is raw', () => {
     expect(telemetry.battery.value).toBe(snapshot)
     const persisted = JSON.parse(localStorage.getItem(KEY) ?? 'null') as RememberedSession
     expect(persisted.battery).toEqual(snapshot)
+  })
+
+  it('restores the latest readings and timestamped trends after a refresh', async () => {
+    await telemetry.connectBms()
+    drive(CURRENTS)
+    const capturedHistory = [...telemetry.history]
+    const capturedBattery = telemetry.battery.value
+
+    window.dispatchEvent(new Event('pagehide'))
+    telemetry.dispose()
+    telemetry = createTelemetry(radioDeps())
+
+    expect(telemetry.restoreRemembered()).toBe(true)
+    expect(telemetry.source.value).toBe('remembered')
+    expect(telemetry.bmsState.value).toBe('idle')
+    expect(telemetry.battery.value).toEqual(capturedBattery)
+    expect(telemetry.history).toEqual(capturedHistory)
+    expect(telemetry.packReach.value).toBeNull()
+    expect(telemetry.projection.value).toBeNull()
+  })
+
+  it('flushes the latest snapshot when hidden before the periodic write is due', async () => {
+    await telemetry.connectBms()
+    drive([-1, -9])
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+    try {
+      document.dispatchEvent(new Event('visibilitychange'))
+      const persisted = JSON.parse(localStorage.getItem(KEY) ?? 'null') as RememberedSession
+      expect(persisted.battery?.current).toBe(-9)
+      expect(persisted.capturedAt).toBe(clock - 1000)
+    } finally {
+      visibility.mockRestore()
+    }
+  })
+
+  it('restores a solar-only watch after refresh without inventing a battery reading', async () => {
+    await telemetry.startSolar(VALID_ADVERTISEMENT_KEY)
+    const reading = solarReading({ pvPower: 123 })
+    solar.emitReading(reading, -62)
+    window.dispatchEvent(new Event('pagehide'))
+    telemetry.dispose()
+    telemetry = createTelemetry(radioDeps())
+
+    expect(telemetry.restoreRemembered()).toBe(true)
+    expect(telemetry.source.value).toBe('remembered')
+    expect(telemetry.battery.value).toBeNull()
+    expect(telemetry.solar.value).toEqual(reading)
+    expect(telemetry.solarState.value).toBe('idle')
+  })
+
+  it('keeps the final solar-only reading when the owner stops its watch', async () => {
+    await telemetry.startSolar(VALID_ADVERTISEMENT_KEY)
+    solar.emitReading(solarReading({ pvPower: 40 }), -62)
+    clock += 1000
+    const finalReading = solarReading({ pvPower: 90 })
+    solar.emitReading(finalReading, -61)
+
+    telemetry.stopSolar()
+
+    expect(telemetry.source.value).toBe('remembered')
+    expect(telemetry.battery.value).toBeNull()
+    expect(telemetry.solar.value).toEqual(finalReading)
+    expect(telemetry.rememberedAt.value).toBe(clock)
+    expect(telemetry.solarState.value).toBe('idle')
+  })
+
+  it('keeps the saved pack through a second refresh when solar rejoins first', async () => {
+    await telemetry.connectBms()
+    drive(CURRENTS)
+    solar.emitReading(solarReading({ pvPower: 40 }), -62)
+    window.dispatchEvent(new Event('pagehide'))
+    const saved = localStorage.getItem(KEY)
+
+    telemetry.dispose()
+    telemetry = createTelemetry({ ...radioDeps(), createSolarScan: solar.create })
+    expect(telemetry.restoreRemembered()).toBe(true)
+    solar.emitReading(solarReading({ pvPower: 90 }), -61)
+    expect(telemetry.source.value).toBe('live')
+    expect(telemetry.battery.value).toBeNull()
+    window.dispatchEvent(new Event('pagehide'))
+
+    expect(localStorage.getItem(KEY)).toBe(saved)
+    telemetry.dispose()
+    telemetry = createTelemetry(radioDeps())
+    expect(telemetry.restoreRemembered()).toBe(true)
+    expect(telemetry.battery.value).not.toBeNull()
+    expect(telemetry.solar.value?.pvPower).toBe(40)
+    expect(telemetry.history).toHaveLength(CURRENTS.length + 1)
+  })
+
+  it('keeps the saved trend identity when the adapter clears its device before reporting a drop', async () => {
+    telemetry.dispose()
+    let deviceCleared = false
+    telemetry = createTelemetry({
+      ...radioDeps(),
+      createBmsLink: (handlers) => {
+        const link = bms.create(handlers)
+        return {
+          ...link,
+          get deviceId() {
+            return deviceCleared ? null : 'jk-abc'
+          },
+        }
+      },
+    })
+    await telemetry.connectBms()
+    bms.emitSnapshot(battery())
+    deviceCleared = true
+
+    bms.emitDisconnect()
+
+    const saved = JSON.parse(localStorage.getItem(KEY) ?? 'null') as RememberedSession
+    expect(saved.bmsDeviceId).toBe('jk-abc')
+    expect(saved.history).toHaveLength(1)
+    expect(telemetry.source.value).toBe('remembered')
   })
 
   it('does not persist while a stored session is on the instruments', async () => {
