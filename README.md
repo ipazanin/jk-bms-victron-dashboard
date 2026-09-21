@@ -463,6 +463,11 @@ The pack records at about 3.76 Hz and native is what is committed (475 KB). `--p
 interval and hides the jitter the dashboard exists to absorb, and float's cell spread collapses from
 46 mV to 5 mV, because the imbalance excursions live between the samples.
 
+## Support
+
+If Shunt is useful to you, you can [buy me a coffee](https://buymeacoffee.com/ipazanin).
+Support is completely optional.
+
 ## Credits
 
 Protocol work stands on the shoulders of the [ESPHome JK-BMS component](https://github.com/syssi/esphome-jk-bms)

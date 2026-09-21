@@ -17,11 +17,19 @@ const { state, status, updateReady } = useOfflineApp()
     <p class="colophon">
       <span>Domain Software Solutions d.o.o</span>
       <span class="sep" aria-hidden="true">·</span>
-      <a class="mail" href="mailto:ivan.pazanin1996@gmail.com">ivan.pazanin1996@gmail.com</a>
+      <a href="mailto:ivan.pazanin1996@gmail.com">ivan.pazanin1996@gmail.com</a>
       <span class="sep" aria-hidden="true">·</span>
       <span>Free to use</span>
       <span class="sep" aria-hidden="true">·</span>
       <span>MIT license</span>
+      <span class="sep" aria-hidden="true">·</span>
+      <a href="https://github.com/ipazanin/jk-bms-victron-dashboard" target="_blank" rel="noopener noreferrer">
+        Source on GitHub
+      </a>
+      <span class="sep" aria-hidden="true">·</span>
+      <a href="https://buymeacoffee.com/ipazanin" target="_blank" rel="noopener noreferrer">
+        Buy me a coffee
+      </a>
     </p>
   </footer>
 </template>
@@ -65,7 +73,7 @@ const { state, status, updateReady } = useOfflineApp()
   color: var(--ink-muted);
 }
 
-.mail {
+.colophon a {
   display: inline-flex;
   align-items: center;
   min-height: var(--tap);
@@ -75,7 +83,7 @@ const { state, status, updateReady } = useOfflineApp()
   text-decoration: none;
 }
 
-.mail:hover {
+.colophon a:hover {
   color: var(--ink);
   text-decoration: underline;
 }
