@@ -24,6 +24,7 @@ import type { BmsLink, DisconnectReason, JkBmsHandlers } from '../JkBmsClient'
 import type { ReconnectPatience } from '../ReconnectPatience'
 import { ReconnectRefusedError } from '../ReconnectRefusedError'
 import type { SolarHistoryHandlers, SolarHistoryLink } from '../VictronHistoryClient'
+import { awaitSolarOperation } from '../solarScan'
 import type { SolarScan, VictronHandlers } from '../solarScan'
 
 /** The name the history tunnel reports for the controller it last talked to. */
@@ -266,6 +267,7 @@ export function fakeSolarRadio(
 
   let handlers: VictronHandlers = {}
   let scanning = false
+  let generation = 0
   let startDwellMs = 0
   let startRejection: Error | null = null
 
@@ -273,8 +275,11 @@ export function fakeSolarRadio(
     get scanning() {
       return scanning
     },
+    resumeAvailableAt: 0,
     async start() {
+      const attempt = ++generation
       await dwell(startDwellMs)
+      if (attempt !== generation) return
       if (startRejection !== null) throw startRejection
       scanning = true
       handlers.onWatchedDevice?.(DEMO_CONTROLLER_ID, DEMO_CONTROLLER_NAME)
@@ -285,14 +290,18 @@ export function fakeSolarRadio(
     // drive the behaviour at all.
     canResume: (rememberedDeviceId) => rememberedDeviceId === DEMO_CONTROLLER_ID && canEverResume(),
     canEverResume,
-    async resume() {
-      await dwell(startDwellMs)
+    async resume(_keyHex, _rememberedDeviceId, signal) {
+      const attempt = ++generation
+      if (signal) await awaitSolarOperation(dwell(startDwellMs), signal)
+      else await dwell(startDwellMs)
+      if (attempt !== generation || signal?.aborted) return
       if (startRejection !== null) throw startRejection
       scanning = true
       handlers.onWatchedDevice?.(DEMO_CONTROLLER_ID, DEMO_CONTROLLER_NAME)
       onScanChange()
     },
     stop() {
+      generation += 1
       scanning = false
       onScanChange()
     },

@@ -1,24 +1,26 @@
 // @vitest-environment jsdom
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { SESSION_IDLE_TIMEOUT_MS } from '../src/application/history/SessionRecorder'
 import { loadLastController, saveLastController } from '../src/application/lastController'
 import { loadRejoinIntent, saveRejoinIntent } from '../src/application/rejoinIntent'
 import { saveRememberedSession } from '../src/application/rememberedSession'
+import { SOLAR_RESUME_TIMEOUT_MS } from '../src/application/solarRejoinSupervisor'
 import { saveAdvertisementKey } from '../src/application/storage'
 import { PAGE_AWAY_WINDOW_MS, createTelemetry } from '../src/application/telemetry'
 import type { Telemetry } from '../src/application/telemetry'
+import { solarDeviceKeyFor } from '../src/domain/history/identity'
 import { ReconnectRefusedError } from '../src/infrastructure/ble/ReconnectRefusedError'
 import { browserThatCanRejoin } from './support/browserThatCanRejoin'
 import { manualSchedule } from './support/manualSchedule'
 import type { ManualSchedule } from './support/manualSchedule'
-import { rememberedSession, solarReading } from './support/samples'
+import { battery, rememberedSession, solarReading } from './support/samples'
 import { MemoryHistoryStore } from './support/MemoryHistoryStore'
 import { scriptedPage } from './support/scriptedPage'
 import type { ScriptedPage } from './support/scriptedPage'
 import { fakeBmsLink, fakeSolarHistoryLink, fakeSolarScan } from './support/fakeRadios'
-import type { FakeSolarHistoryLink, FakeSolarScan } from './support/fakeRadios'
+import type { FakeBmsLink, FakeSolarHistoryLink, FakeSolarScan } from './support/fakeRadios'
 
 // The controller's half of automatic rejoin, at the level where the policy actually lives. The
 // radio is faked at the port, so what is under test is the schedule — when a watch is put up, when
@@ -32,6 +34,7 @@ const ADVERTISEMENT_KEY = '0123456789abcdef0123456789abcdef'
 let timers: ManualSchedule
 let page: ScriptedPage
 let telemetry: Telemetry
+let bms: FakeBmsLink
 let solar: FakeSolarScan
 let tunnel: FakeSolarHistoryLink
 let store: MemoryHistoryStore
@@ -61,6 +64,7 @@ function spawn(options: { adapterNeverReports?: boolean } = {}): void {
   timers = manualSchedule(Date.now())
   page = scriptedPage()
   session = 0
+  bms = fakeBmsLink({ deviceId: 'jk-abc', deviceName: 'JK_B2A8S20P' })
   solar = fakeSolarScan()
   solar.allowResume(true)
   solar.reportsDevice('victron-1', 'SmartSolar HQ22487VZHZ')
@@ -68,7 +72,7 @@ function spawn(options: { adapterNeverReports?: boolean } = {}): void {
   tunnel = fakeSolarHistoryLink()
   const browser = browserThatCanRejoin()
   telemetry = createTelemetry({
-    createBmsLink: fakeBmsLink({ deviceId: 'jk-abc', deviceName: 'JK_B2A8S20P' }).create,
+    createBmsLink: bms.create,
     createSolarScan: solar.create,
     createSolarHistoryLink: tunnel.create,
     // A browser with no `navigator.bluetooth` never reports an adapter at all, which is where the
@@ -92,6 +96,7 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   telemetry.dispose()
   await telemetry.drain()
   store.close()
@@ -543,7 +548,7 @@ describe('what a resume that fails costs', () => {
     await flush()
 
     expect(solar.resumeCalls).toEqual(['victron-1', 'victron-1', 'victron-1'])
-    expect(timers.delaysAsked).toEqual([1_000, 2_000, 4_000])
+    expect(timers.delaysAsked.filter((delay) => delay !== SOLAR_RESUME_TIMEOUT_MS)).toEqual([1_000, 2_000, 4_000])
     // A controller behind a bulkhead or asleep at sunset is the ordinary case on a boat, and the
     // answer to it is to keep listening rather than to interrupt the owner.
     expect(telemetry.solarError.value).toBeNull()
@@ -562,7 +567,7 @@ describe('what a resume that fails costs', () => {
     await flush()
     timers.advance(2_000)
     await flush()
-    expect(timers.delaysAsked).toEqual([1_000, 2_000, 4_000])
+    expect(timers.delaysAsked.filter((delay) => delay !== SOLAR_RESUME_TIMEOUT_MS)).toEqual([1_000, 2_000, 4_000])
 
     // The owner goes away and comes back. Chromium killed every watch on the way out and puts
     // none of them back, so the eight-second wait the ladder had climbed to is about a world that
@@ -771,5 +776,303 @@ describe('what the two solar buttons mean', () => {
 
     expect(telemetry.lastController.value?.id).toBe('victron-1')
     expect(solar.resumeCalls).toEqual(['victron-1'])
+  })
+})
+
+
+describe('ownership of pending solar attempts', () => {
+  it('expires an unresponsive resume and retries even when cancellation never settles it', async () => {
+    rememberController()
+    spawn()
+    solar.parkNextResume()
+    telemetry.startRejoin()
+    expect(telemetry.solarState.value).toBe('connecting')
+
+    timers.advance(SOLAR_RESUME_TIMEOUT_MS)
+    expect(solar.resumeSignals[0]?.aborted).toBe(true)
+    expect(telemetry.solarState.value).toBe('idle')
+    expect(telemetry.solarRejoinSearching.value).toBe(true)
+
+    timers.advance(1_000)
+    await flush()
+    expect(solar.resumeCalls).toHaveLength(2)
+    expect(telemetry.solarState.value).toBe('listening')
+    expect(telemetry.solarError.value).toBeNull()
+  })
+
+  it('does not start another attempt for repeated foreground notifications', async () => {
+    rememberController()
+    spawn()
+    solar.parkNextResume()
+    telemetry.startRejoin()
+    page.show()
+    page.focus()
+    telemetry.startRejoin()
+    telemetry.rejoinNow()
+    timers.advance(SOLAR_RESUME_TIMEOUT_MS - 1)
+
+    expect(solar.resumeCalls).toHaveLength(1)
+    expect(solar.resumeSignals[0]?.aborted).toBe(false)
+    expect(telemetry.solarState.value).toBe('connecting')
+  })
+
+  it('checkpoints and settles early readings when their native startup never finishes', async () => {
+    rememberController()
+    spawn()
+    solar.parkNextResume()
+    vi.spyOn(store, 'readRingLedger').mockImplementation(() => new Promise(() => undefined))
+    telemetry.startRejoin()
+    for (let second = 0; second < 12; second += 1) {
+      solar.emitReading(solarReading())
+      timers.advance(1_000)
+    }
+    timers.advance(SOLAR_RESUME_TIMEOUT_MS - 12_000)
+    await telemetry.drain()
+
+    expect(telemetry.solarState.value).toBe('idle')
+    expect(telemetry.source.value).toBe('remembered')
+    expect(telemetry.solar.value).toEqual(solarReading())
+    expect((await store.listSessions())[0].record.state).toBe('open')
+  })
+
+  it.each(['manual', 'resume'] as const)(
+    'settles early readings and seals their stream when current %s startup rejects',
+    async (route) => {
+      rememberController()
+      spawn()
+      vi.spyOn(store, 'readRingLedger').mockImplementation(() => new Promise(() => undefined))
+      const settle = route === 'manual' ? solar.parkNextStart() : solar.parkNextResume()
+      let starting = Promise.resolve()
+      if (route === 'manual') starting = telemetry.startSolar(ADVERTISEMENT_KEY)
+      else telemetry.startRejoin()
+      for (let second = 0; second < 12; second += 1) {
+        solar.emitReading(solarReading())
+        timers.advance(1_000)
+      }
+      settle(new Error('native startup failed after a reading'))
+      await starting
+      await flush()
+      await telemetry.drain()
+
+      expect(telemetry.solarState.value).toBe('idle')
+      expect(telemetry.source.value).toBe('remembered')
+      expect(telemetry.solar.value).toEqual(solarReading())
+      expect(solar.scanning).toBe(false)
+      const [listing] = await store.listSessions()
+      const recorded = await store.readSession(listing.record.id)
+      expect(recorded?.record.state).toBe('open')
+      expect(recorded?.solar.length).toBeGreaterThan(0)
+      expect(recorded?.solar.every((chunk) => chunk.sealed)).toBe(true)
+      expect(telemetry.solarError.value).toBe(route === 'manual'
+        ? 'native startup failed after a reading'
+        : null)
+    },
+  )
+
+  it('resumes automatically after a replacement chooser fails over an in-flight attempt', async () => {
+    rememberController()
+    spawn()
+    solar.parkNextResume()
+    telemetry.startRejoin()
+    solar.failStartWith(new Error('chooser refused'))
+    await telemetry.startSolar(ADVERTISEMENT_KEY)
+    expect(solar.resumeSignals[0]?.aborted).toBe(true)
+    timers.advance(1_000)
+    await flush()
+
+    expect(solar.resumeCalls).toHaveLength(2)
+    expect(telemetry.solarState.value).toBe('listening')
+  })
+
+  it('waits for the transport quota before starting the attempt deadline', async () => {
+    rememberController()
+    spawn()
+    solar.resumeAfter(timers.now() + 30_000)
+    solar.parkNextResume()
+    telemetry.startRejoin()
+
+    timers.advance(29_999)
+    expect(solar.resumeCalls).toHaveLength(0)
+    expect(telemetry.solarState.value).toBe('idle')
+    timers.advance(1)
+    expect(solar.resumeCalls).toHaveLength(1)
+    timers.advance(SOLAR_RESUME_TIMEOUT_MS - 1)
+    expect(solar.resumeSignals[0]?.aborted).toBe(false)
+    timers.advance(1)
+    expect(solar.resumeSignals[0]?.aborted).toBe(true)
+  })
+
+  it.each(['success', 'failure'] as const)(
+    'ignores late %s from a resume superseded by a page return',
+    async (outcome) => {
+      rememberController()
+      spawn()
+      const settleOld = solar.parkNextResume()
+      telemetry.startRejoin()
+      page.hide()
+      expect(solar.resumeSignals[0]?.aborted).toBe(true)
+      page.show()
+      const settleCurrent = solar.parkNextResume()
+      timers.advance(1_000)
+      expect(solar.resumeCalls).toHaveLength(2)
+
+      settleOld(outcome === 'failure' ? new Error('old resume failed') : undefined)
+      await flush()
+      expect(telemetry.solarState.value).toBe('connecting')
+      expect(solar.scanning).toBe(false)
+      expect(telemetry.solarError.value).toBeNull()
+
+      settleCurrent()
+      await flush()
+      expect(telemetry.solarState.value).toBe('listening')
+      expect(solar.scanning).toBe(true)
+    },
+  )
+
+  it.each(['success', 'failure'] as const)(
+    'ignores late chooser %s after Stop solar',
+    async (outcome) => {
+      spawn()
+      const settle = solar.parkNextStart()
+      const starting = telemetry.startSolar(ADVERTISEMENT_KEY)
+      telemetry.stopSolar()
+      settle(outcome === 'failure' ? new Error('old chooser failed') : undefined)
+      await starting
+
+      expect(telemetry.solarState.value).toBe('idle')
+      expect(telemetry.source.value).toBe('none')
+      expect(telemetry.solarError.value).toBeNull()
+      expect(telemetry.lastController.value).toBeNull()
+      expect(solar.scanning).toBe(false)
+    },
+  )
+
+  it('cancels a pending chooser on Disconnect before it can rearm rejoin', async () => {
+    spawn()
+    const settle = solar.parkNextStart()
+    const starting = telemetry.startSolar(ADVERTISEMENT_KEY)
+    await telemetry.disconnectBms()
+    settle()
+    await starting
+
+    expect(telemetry.solarState.value).toBe('idle')
+    expect(telemetry.rejoinArmed.value).toBe(false)
+    expect(telemetry.lastController.value).toBeNull()
+  })
+
+  it.each(['manual', 'resume'] as const)(
+    'preserves a reading received before %s startup resolves',
+    async (route) => {
+      rememberController()
+      spawn()
+      vi.spyOn(store, 'readRingLedger').mockImplementation(() => new Promise(() => undefined))
+      const settle = route === 'manual' ? solar.parkNextStart() : solar.parkNextResume()
+      let starting = Promise.resolve()
+      if (route === 'manual') starting = telemetry.startSolar(ADVERTISEMENT_KEY)
+      else telemetry.startRejoin()
+      solar.emitReading(solarReading())
+      expect(telemetry.solarState.value).toBe('live')
+      settle()
+      await starting
+      await flush()
+
+      expect(telemetry.solarState.value).toBe('live')
+      expect(telemetry.solar.value).toEqual(solarReading())
+    },
+  )
+
+  it.each(['manual', 'resume'] as const)(
+    'ignores the old %s identity digest after a replacement watch starts',
+    async (route) => {
+      rememberController()
+      spawn()
+      const replacementKey = 'fedcba9876543210fedcba9876543210'
+      const expectedKey = await solarDeviceKeyFor(replacementKey)
+      let settleDigest = (_digest: ArrayBuffer): void => undefined
+      vi.spyOn(crypto.subtle, 'digest').mockImplementationOnce(() => new Promise<ArrayBuffer>((resolve) => {
+        settleDigest = resolve
+      }))
+      let starting = Promise.resolve()
+      if (route === 'manual') starting = telemetry.startSolar(ADVERTISEMENT_KEY)
+      else telemetry.startRejoin()
+      await flush()
+      await telemetry.startSolar(replacementKey)
+      telemetry.stopRejoin()
+      settleDigest(new Uint8Array(32).buffer)
+      await starting
+      await flush()
+      for (let second = 0; second < 12; second += 1) {
+        solar.emitReading(solarReading())
+        timers.advance(1_000)
+      }
+      await telemetry.drain()
+
+      const [session] = await store.listSessions()
+      expect(session.record.solarDeviceKey).toBe(expectedKey)
+    },
+  )
+
+  it('borrows the radio from a pending resume and releases supervisor ownership immediately', async () => {
+    rememberController()
+    spawn()
+    const settleResume = solar.parkNextResume()
+    telemetry.startRejoin()
+    const settleSweep = tunnel.parkNextSweep()
+    const sweeping = telemetry.readSolarHistory()
+
+    expect(solar.resumeSignals[0]?.aborted).toBe(true)
+    expect(telemetry.solarState.value).toBe('idle')
+    expect(telemetry.solarRejoinSearching.value).toBe(false)
+    timers.advance(SOLAR_RESUME_TIMEOUT_MS + 1_000)
+    expect(solar.resumeCalls).toHaveLength(1)
+
+    settleSweep()
+    await sweeping
+    await flush()
+    expect(solar.resumeCalls).toHaveLength(2)
+    expect(telemetry.solarState.value).toBe('listening')
+    settleResume(new Error('abandoned native resume'))
+    await flush()
+    expect(telemetry.solarState.value).toBe('listening')
+  })
+
+  it.each(['stop', 'disconnect', 'replacement'] as const)(
+    'does not start a stale automatic history sweep after %s',
+    async (action) => {
+      rememberController()
+      spawn()
+      telemetry.startRejoin()
+      await flush()
+      let settleLedger = (): void => undefined
+      vi.spyOn(store, 'readRingLedger').mockImplementationOnce(() => new Promise((resolve) => {
+        settleLedger = () => resolve(null)
+      }))
+      solar.emitReading(solarReading())
+      await flush()
+      if (action === 'stop') telemetry.stopSolar()
+      else if (action === 'disconnect') await telemetry.disconnectBms()
+      else await telemetry.startSolar(ADVERTISEMENT_KEY)
+      settleLedger()
+      await flush()
+
+      expect(tunnel.rememberedSweepCalls).toHaveLength(0)
+      expect(telemetry.solarHistoryReading.value).toBe(false)
+    },
+  )
+
+  it('keeps a healthy BMS live while a pending solar resume expires', async () => {
+    rememberController()
+    spawn()
+    await telemetry.connectBms()
+    bms.emitSnapshot(battery())
+    solar.parkNextResume()
+    telemetry.startRejoin()
+    timers.advance(SOLAR_RESUME_TIMEOUT_MS)
+
+    expect(telemetry.bmsState.value).toBe('live')
+    expect(telemetry.battery.value).toEqual(battery())
+    expect(telemetry.source.value).toBe('live')
+    bms.emitSnapshot(battery({ current: -7 }))
+    expect(telemetry.battery.value?.current).toBe(-7)
   })
 })

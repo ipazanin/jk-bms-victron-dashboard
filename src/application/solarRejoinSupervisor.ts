@@ -1,33 +1,3 @@
-/**
- * Putting the controller's watch back up without being asked, on the same terms the pack rejoins.
- *
- * It is a sibling of `rejoinSupervisor` rather than a second instance of it because the two radios
- * fail differently and so must wait differently. A pack that does not answer leaves the loop with
- * nothing to show for the attempt, which is what the deadline and the token there are for; a watch
- * either comes up or does not, in one call, and a controller that is merely out of range is
- * answered by the watch sitting there listening rather than by trying again. What the two do share
- * is the whole of the schedule — the gates, the ladder, and the page being in front — so the ladder
- * is imported from the pack's supervisor and the page is one object handed to both.
- *
- * Their standing down together is the point of that sharing. The pack's rejoin watches
- * advertisements for a sighting and this watches them for a reading, and two advertisement watches
- * on one adapter is the worst thing this app can ask of a phone's battery. Chromium tears both down
- * the moment the page is hidden or the window loses focus, silently, so a watch left armed behind
- * another window is not a link — it is a radio burning for nothing. When the page goes away the
- * watch goes with it, and comes back when the page does.
- *
- * What decides whether a running scan may be handed back is not who started it but whether this
- * loop can put it up again: the chooser's own watch dies behind another window exactly as an
- * automatic one does, and taking down a scan we could not restore would be the app deciding it knew
- * better. So a route with nothing to come back to — the browser's own scan, which needs its
- * permission prompt however many times it has been answered — is left running and left alone.
- *
- * Nothing in here writes a banner either, for the reason the pack's supervisor does not: a
- * controller asleep at sunset is the ordinary case, not a fault. The one thing it does say is that
- * this browser has no way back at all — and it says it whatever the adapter is doing, because a
- * browser that will not report an adapter is exactly where the bridge is used.
- */
-
 import { readonly, ref } from 'vue'
 
 import { ReconnectRefusedError } from '../infrastructure/ble/ReconnectRefusedError'
@@ -42,43 +12,19 @@ import {
 } from './rejoinSupervisor'
 import type { CancelScheduled, Schedule } from './schedule'
 
+export const SOLAR_RESUME_TIMEOUT_MS = 15_000
+
 export interface SolarRejoinSupervisorDeps {
-  /** The owner's standing answer about going back to the boat, read at every decision. */
   readonly rejoinArmed: () => boolean
-  /**
-   * Whether the radio is on. Only a plain no holds an attempt back: null is the browser declining
-   * to say, and the bridge — which uses no browser radio at all — never gets any other answer.
-   */
   readonly adapterOn: () => boolean | null
   readonly rememberedController: () => LastController | null
-  /**
-   * Whether the key is held. Asked as a question rather than taken as a value, because the key
-   * itself has no business leaving the one module that stores it.
-   */
   readonly advertisementKeyStored: () => boolean
-  /** Whether the route this browser would take could come up with no gesture at all. */
   readonly canResume: (rememberedDeviceId: string | null) => boolean
-  /** Whether that route has any gesture-free start in it at all, as `SolarScan` defines it. */
   readonly canEverResume: () => boolean
-  /** Whether a scan is already up, or a press is already starting one. */
+  readonly resumeAvailableAt: () => number
   readonly solarBusy: () => boolean
-  /**
-   * Whether the history tunnel has the radio. Asked apart from `solarBusy` because the two want
-   * opposite answers: a watch somebody else put up is one this loop waits behind, where a sweep is
-   * one the app took the watch down *for* — the controller accepts a single BLE client, so a watch
-   * put back mid-sweep would be one hearing nothing over a tunnel it might well have broken.
-   *
-   * There is nothing to poll for either. A sweep is a bounded errand that asks for a fresh look the
-   * moment it lets go, so the gate lifts by being told rather than by being watched.
-   */
   readonly historySweepHoldsRadio: () => boolean
-  /**
-   * One attempt at the remembered controller. Resolves once the watch is armed — which says
-   * nothing about the controller being in range, and is not meant to. Rejects with a
-   * `ReconnectRefusedError` when the radio was never asked.
-   */
-  readonly resumeSolar: (rememberedDeviceId: string | null) => Promise<void>
-  /** Hands the radio back when the page goes away. Only ever called on a watch that can come back. */
+  readonly resumeSolar: (rememberedDeviceId: string | null, signal: AbortSignal) => Promise<void>
   readonly standDownSolar: () => void
   readonly pageActivity: PageActivity
   readonly schedule: Schedule
@@ -86,20 +32,16 @@ export interface SolarRejoinSupervisorDeps {
 }
 
 export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
-  /** True from the first attempt until the loop has nothing left to do — backoff waits included. */
   const searching = ref(false)
   const blocker = ref<RejoinBlocker | null>(null)
 
   let running = false
   let unsubscribeFromPage: (() => void) | null = null
   let cancelPendingLook: CancelScheduled | null = null
-  /**
-   * Which attempt is the current one. A resume that settles after the loop walked away from it
-   * carries a stale token and is dropped where it lands, so a watch nobody wants any more cannot
-   * flip state under the one that does.
-   */
   let attemptToken = 0
   let attemptInFlight = false
+  let attemptController: AbortController | null = null
+  let cancelAttemptDeadline: CancelScheduled | null = null
   let retryDelayMs = FIRST_RETRY_MS
   let lastAttemptStartedAt = Number.NEGATIVE_INFINITY
 
@@ -110,11 +52,6 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
     reconsider()
   }
 
-  /**
-   * Hands back the timer and stops watching the page. The radio is left exactly as it is: this is
-   * the app going away, and a page being torn down has no business stopping a scan the owner may
-   * be reading a number off as it goes.
-   */
   function stop(): void {
     if (!running) return
     running = false
@@ -124,11 +61,6 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
     blocker.value = null
   }
 
-  /**
-   * Something changed that could make an attempt worth making — or worth abandoning. The backoff
-   * goes back to its first step, because whatever happened is a better reason to try than the
-   * failures that built it up.
-   */
   function reconsider(): void {
     retryDelayMs = FIRST_RETRY_MS
     look()
@@ -140,9 +72,6 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
     if (!running) return
 
     reportBlocker()
-    // First and on its own, because it is the one thing here that is not about starting a watch.
-    // A page that has gone behind something else cannot hold one, so the radio comes back now
-    // rather than at whatever later moment the rest of the gates happen to agree.
     if (!pageIsInFront()) releaseWatchThePageCannotHold()
     if (!mayResume()) {
       standDown()
@@ -150,20 +79,19 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
     }
     if (attemptInFlight) return
     if (deps.solarBusy()) {
-      // The radio is somebody else's for the moment — a press putting a watch up, or one already
-      // listening. Neither is this loop's to interrupt and neither owes it a word when it is over,
-      // so the question is put again shortly rather than parked on a wake-up nobody promised.
       searching.value = false
       cancelPendingLook = deps.schedule(look, MINIMUM_GAP_MS)
       return
     }
 
-    const sinceLastAttempt = deps.now() - lastAttemptStartedAt
-    if (sinceLastAttempt < MINIMUM_GAP_MS) {
-      // Still on the job, and saying so: the gap is this supervisor pacing itself, not a pause the
-      // owner should be shown as having stopped looking.
+    const availableAt = Math.max(
+      lastAttemptStartedAt + MINIMUM_GAP_MS,
+      deps.resumeAvailableAt(),
+    )
+    const waitMs = availableAt - deps.now()
+    if (waitMs > 0) {
       searching.value = true
-      cancelPendingLook = deps.schedule(look, MINIMUM_GAP_MS - sinceLastAttempt)
+      cancelPendingLook = deps.schedule(look, waitMs)
       return
     }
     void attemptResume()
@@ -177,21 +105,9 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
     return pageIsInFront() && !deps.historySweepHoldsRadio() && whatItTakesToResume()
   }
 
-  /**
-   * Everything bar the page being in front, which is asked on its own either side of this.
-   *
-   * Whether there is a controller to go back to is settled here rather than left to the transport.
-   * `canResume` answers for the route alone — whether it could come up with no gesture — and the
-   * bridge, a WebSocket with no device handle anywhere in it, answers yes whatever the owner has
-   * just pressed. Stop solar means forgetting the controller, so this is where that has to bite,
-   * and it is the same gate the pack's own supervisor puts on a remembered pack.
-   */
   function whatItTakesToResume(): boolean {
     return (
       deps.rejoinArmed() &&
-      // Not `=== true`: a browser with no `navigator.bluetooth` never reports an adapter at all, and
-      // the bridge runs there on purpose. An attempt that cannot work fails and backs off; one that
-      // is never made leaves the page waiting on an answer nothing is going to give it.
       deps.adapterOn() !== false &&
       deps.advertisementKeyStored() &&
       rememberedId() !== null &&
@@ -203,49 +119,23 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
     return deps.rememberedController()?.id ?? null
   }
 
-  /**
-   * Whether this loop would put a watch back up if the radio were handed to it now. Asked by
-   * whatever is thinking of taking the radio away from a live watch, because a watch nothing will
-   * restore is one the owner loses until they press something — and whether anyone is listening for
-   * that radio to come free is the one thing a caller cannot see from outside.
-   */
   function canRestoreTheWatch(): boolean {
     return running && whatItTakesToResume()
   }
 
-  /**
-   * What the owner would have to do about it, when there is anything to be done. A browser holding
-   * no key is silent: that is not a fault, and a page that has been given nothing to decode with
-   * must not open with a complaint about permissions.
-   *
-   * `permission-gone` is the one answer only an attempt can give, so whatever the last one said
-   * stands until an attempt — or a watch that is up, which settles the question by existing — says
-   * otherwise.
-   */
   function reportBlocker(): void {
     if (!deps.rejoinArmed() || !deps.advertisementKeyStored()) {
       blocker.value = null
       return
     }
-    // A blocker is a claim about right now, and a watch that is up or coming up contradicts every
-    // one of them. Connect solar is how a lapsed permission is answered and it runs no attempt
-    // through here, so without this nothing would ever take the claim back.
     if (deps.solarBusy()) {
       blocker.value = null
       return
     }
-    // Before the remembered controller and not after it, which is the whole reason the route is a
-    // question of its own. A route that can never come back has nothing to remember a controller
-    // for and never remembers one, so a gate on the id first left the browser's own scan standing
-    // down in total silence — the one case where silence is a lie, because no amount of waiting
-    // will put the controller back.
     if (!deps.canEverResume()) {
       blocker.value = 'browser-cannot-rejoin'
       return
     }
-    // Nothing to go back to, and nothing to say about it: on a route that could resume, this is a
-    // browser that has never watched a controller, or one whose owner has just pressed Stop solar.
-    // Both are standing down on purpose.
     if (rememberedId() === null) {
       blocker.value = null
       return
@@ -261,53 +151,44 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
     if (blocker.value !== 'permission-gone') blocker.value = null
   }
 
-  /**
-   * Lets go of whatever is pending without costing anything. Superseding the token is what makes an
-   * abandoned attempt harmless when it finally unwinds, and it is also what keeps a deliberate
-   * stand-down out of the backoff: this is a gate closing, not the controller refusing.
-   */
   function standDown(): void {
     cancelPendingLook?.()
     cancelPendingLook = null
     attemptToken += 1
+    cancelAttemptDeadline?.()
+    cancelAttemptDeadline = null
+    const controller = attemptController
+    attemptController = null
     attemptInFlight = false
+    controller?.abort()
     searching.value = false
   }
 
-  /**
-   * The battery measure. A remembered controller on a route that can resume is a watch this loop
-   * will have back up within a second of the page returning, so holding it open behind another
-   * window buys the owner nothing and costs them the radio. Anything else is left running.
-   */
   function releaseWatchThePageCannotHold(): void {
-    // Never take what this loop could not give back. An owner who has pressed Disconnect or Stop
-    // solar, or a browser holding no key, would be left with a dead solar link and nothing on
-    // screen to say why — where a watch left running behind a window is at worst a fiction the
-    // platform has already made true.
     if (!whatItTakesToResume()) return
-    // A sweep counts as the radio being out, even though there is no watch left to stop. What the
-    // page going away settles is the recording as much as the radio, and a session the app itself
-    // took the last reporting radio away from is one nothing else would stand a window over.
     if (deps.solarBusy() || deps.historySweepHoldsRadio()) deps.standDownSolar()
   }
 
   async function attemptResume(): Promise<void> {
     const token = (attemptToken += 1)
     attemptInFlight = true
+    const controller = new AbortController()
+    attemptController = controller
+    cancelAttemptDeadline = deps.schedule(() => {
+      standDown()
+      searching.value = true
+      scheduleRetry()
+    }, SOLAR_RESUME_TIMEOUT_MS)
     lastAttemptStartedAt = deps.now()
     searching.value = true
 
     try {
-      await deps.resumeSolar(rememberedId())
+      await deps.resumeSolar(rememberedId(), controller.signal)
       if (token !== attemptToken) return
-      // The watch is up, which is as far as this loop's business goes: whether the controller is
-      // there to hear is the staleness clock's question and it is already asking it.
       searching.value = false
       blocker.value = null
       retryDelayMs = FIRST_RETRY_MS
     } catch (error) {
-      // A superseded attempt is one the loop already walked away from, whatever it rejected with:
-      // it says nothing about the controller, and it must not lengthen the next wait.
       if (token !== attemptToken) return
       if (error instanceof ReconnectRefusedError) {
         blocker.value = error.refusal
@@ -316,22 +197,23 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
       }
       scheduleRetry()
     } finally {
-      if (token === attemptToken) attemptInFlight = false
+      if (token === attemptToken) {
+        cancelAttemptDeadline?.()
+        cancelAttemptDeadline = null
+        attemptController = null
+        attemptInFlight = false
+      }
     }
   }
 
   function scheduleRetry(): void {
     if (!running) {
-      // Nothing is watching the page, so nothing will put the question again. Going on saying it is
-      // listening would be a promise this loop has no way of keeping.
       searching.value = false
       return
     }
     const delayMs = retryDelayMs
     retryDelayMs = Math.min(retryDelayMs * RETRY_GROWTH, RETRY_CEILING_MS)
     cancelPendingLook?.()
-    // `look` and not `reconsider`: a timer running out has learned nothing, so the wait it just
-    // served stands and the next one is longer.
     cancelPendingLook = deps.schedule(look, delayMs)
   }
 
@@ -339,6 +221,7 @@ export function createSolarRejoinSupervisor(deps: SolarRejoinSupervisorDeps) {
     searching: readonly(searching),
     blocker: readonly(blocker),
     canRestoreTheWatch,
+    cancelPendingResume: standDown,
     start,
     stop,
     reconsider,

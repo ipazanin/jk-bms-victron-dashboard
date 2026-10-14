@@ -517,3 +517,141 @@ describe('SolarWatchScanner re-arm loop', () => {
     expect(scanner.scanning).toBe(false)
   })
 })
+
+describe('SolarWatchScanner cancellation and registration budget', () => {
+  it('settles an aborted permitted-device lookup before the browser answers', async () => {
+    let finishLookup!: (devices: BluetoothDevice[]) => void
+    radio.getDevices.mockImplementationOnce(() => new Promise((resolve) => { finishLookup = resolve }))
+    const onReading = vi.fn()
+    const scanner = watchScanner({ onReading })
+    const cancellation = new AbortController()
+    const resumed = scanner.resume(KEY, 'victron-1', cancellation.signal)
+
+    cancellation.abort()
+    await expect(resumed).rejects.toMatchObject({ name: 'AbortError' })
+    expect(scanner.scanning).toBe(false)
+    expect(radio.watchCalls).toHaveLength(0)
+
+    await scanner.resume(KEY, 'victron-1')
+    finishLookup([radio.device])
+    await Promise.resolve()
+    radio.deliver()
+    await vi.waitFor(() => expect(onReading).toHaveBeenCalledTimes(1))
+    expect(radio.watchCalls).toHaveLength(1)
+    scanner.stop()
+  })
+
+  it('settles an aborted initial watch even when the browser ignores abort', async () => {
+    let finishWatch!: () => void
+    vi.mocked(radio.device.watchAdvertisements).mockImplementationOnce(() => new Promise((resolve) => { finishWatch = resolve }))
+    const onWatchedDevice = vi.fn()
+    const onError = vi.fn()
+    const scanner = watchScanner({ onWatchedDevice, onError })
+    const cancellation = new AbortController()
+    const resumed = scanner.resume(KEY, 'victron-1', cancellation.signal)
+    await vi.waitFor(() => expect(finishWatch).toBeTypeOf('function'))
+
+    cancellation.abort()
+    await expect(resumed).rejects.toMatchObject({ name: 'AbortError' })
+    await scanner.resume(KEY, 'victron-1')
+    finishWatch()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(scanner.scanning).toBe(true)
+    expect(onWatchedDevice).toHaveBeenCalledTimes(1)
+    expect(onError).not.toHaveBeenCalled()
+    scanner.stop()
+  })
+
+  it('keeps the chooser synchronous and waits indefinitely until explicitly stopped', async () => {
+    vi.useFakeTimers()
+    radio.requestDevice.mockImplementationOnce(() => new Promise(() => undefined))
+    const scanner = watchScanner()
+    let settled = false
+    const started = scanner.start(KEY).then(() => { settled = true })
+    expect(radio.requestDevice).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(settled).toBe(false)
+    scanner.stop()
+    await started
+    expect(settled).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('paces every automatic first registration across rapid stop and resume calls', async () => {
+    vi.useFakeTimers()
+    const scanner = watchScanner()
+    const firstRegistrationAt = Date.now()
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await scanner.resume(KEY, 'victron-1')
+      scanner.stop()
+    }
+    expect(scanner.resumeAvailableAt).toBe(firstRegistrationAt + 30_000)
+    const resumed = scanner.resume(KEY, 'victron-1')
+    await vi.advanceTimersByTimeAsync(29_999)
+    expect(radio.watchCalls).toHaveLength(4)
+    await vi.advanceTimersByTimeAsync(1)
+    await resumed
+    expect(radio.watchCalls).toHaveLength(5)
+    scanner.stop()
+  })
+
+  it('cancels quota waiting without spending a registration or leaving timers', async () => {
+    vi.useFakeTimers()
+    const scanner = watchScanner()
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await scanner.resume(KEY, 'victron-1')
+      scanner.stop()
+    }
+    const cancellation = new AbortController()
+    const resumed = scanner.resume(KEY, 'victron-1', cancellation.signal)
+    await vi.advanceTimersByTimeAsync(1)
+    cancellation.abort()
+    await expect(resumed).rejects.toMatchObject({ name: 'AbortError' })
+    expect(radio.watchCalls).toHaveLength(4)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('drops an old decrypt rejection after the scan stops', async () => {
+    let failDecrypt!: (error: Error) => void
+    vi.spyOn(crypto.subtle, 'decrypt').mockImplementationOnce(() => new Promise((_, reject) => { failDecrypt = reject }))
+    const onError = vi.fn()
+    const scanner = watchScanner({ onError })
+    await scanner.start(KEY)
+    radio.deliver()
+    scanner.stop()
+    failDecrypt(new Error('old decrypt failed'))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(onError).not.toHaveBeenCalled()
+  })
+})
+
+describe('SolarWatchScanner decoder startup', () => {
+  it('keeps a newer decoder alive when a cancelled key import finishes late', async () => {
+    vi.useFakeTimers()
+    const cryptoKey = await crypto.subtle.importKey('raw', toArrayBuffer(hexToBytes(KEY)), 'AES-CTR', false, ['decrypt'])
+    let finishImport!: (key: CryptoKey) => void
+    vi.spyOn(crypto.subtle, 'importKey').mockImplementationOnce(() => new Promise((resolve) => { finishImport = resolve }))
+    const onReading = vi.fn()
+    const onError = vi.fn()
+    const scanner = watchScanner({ onReading, onError })
+    const started = scanner.start(KEY)
+    await vi.waitFor(() => expect(finishImport).toBeTypeOf('function'))
+    scanner.stop()
+    await started
+
+    await scanner.resume(KEY, 'victron-1')
+    finishImport(cryptoKey)
+    await Promise.resolve()
+    await Promise.resolve()
+    radio.deliver()
+    await vi.waitFor(() => expect(onReading).toHaveBeenCalledTimes(1))
+    expect(scanner.scanning).toBe(true)
+    expect(onError).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(2)
+    scanner.stop()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})

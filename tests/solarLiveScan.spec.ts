@@ -46,6 +46,7 @@ function installRadio(routes: { scan: boolean; watch: boolean }): FakeRadio {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   delete (navigator as { bluetooth?: unknown }).bluetooth
   Reflect.deleteProperty(globalThis, 'BluetoothDevice')
@@ -137,5 +138,30 @@ describe('coming back up without a press', () => {
 
     expect(watched).toEqual([['victron-1', 'SmartSolar HQ']])
     scan.stop()
+  })
+})
+
+describe('SolarLiveScan registration history', () => {
+  it('retains the automatic registration budget when it recreates its scanner', async () => {
+    vi.useFakeTimers()
+    installRadio({ scan: true, watch: true })
+    const scan = new SolarLiveScan()
+    const firstRegistrationAt = Date.now()
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await scan.resume(KEY, 'victron-1')
+      scan.stop()
+    }
+    const [device] = await navigator.bluetooth.getDevices()
+    expect(device.watchAdvertisements).toHaveBeenCalledTimes(4)
+    expect(scan.resumeAvailableAt).toBe(firstRegistrationAt + 30_000)
+
+    const resumed = scan.resume(KEY, 'victron-1')
+    await vi.advanceTimersByTimeAsync(29_999)
+    expect(device.watchAdvertisements).toHaveBeenCalledTimes(4)
+    await vi.advanceTimersByTimeAsync(1)
+    await resumed
+    expect(device.watchAdvertisements).toHaveBeenCalledTimes(5)
+    scan.stop()
+    vi.useRealTimers()
   })
 })

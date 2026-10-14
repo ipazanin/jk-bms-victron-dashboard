@@ -1,29 +1,10 @@
-/**
- * Passive listener for Victron "Instant Readout" advertisements.
- *
- * We never connect to the charge controller. It broadcasts continuously and we decrypt what it
- * says. `keepRepeatedDevices` must be true, or the browser suppresses every advertisement after
- * the first one and the display freezes on a stale reading.
- *
- * Marinas are full of Victron hardware, all advertising under company id 0x02E1. The key-check
- * byte is what separates your controller from your neighbour's, and anything that fails it is
- * reported as a rejection heard from anything in range — which is what lets the page say a
- * mismatch here is most likely the boat next door, where on the watch route it could only be
- * this controller's own key.
- *
- * This is the scan route `SolarLiveScan` picks; it never wires itself. It is picked only where the
- * browser has no `watchAdvertisements`, because `requestLEScan` is unreliable on some desktop
- * platforms — on macOS Chrome it opens its prompt and then never delivers an advertisement — and
- * needs its prompt answered afresh on every start. `BridgeSolarScan` stays the fallback for a
- * browser that has neither radio.
- */
-
 import { parseAdvertisementKey } from '../../domain/solar/advertisement'
 import { VICTRON_COMPANY_ID } from '../../domain/solar/types'
-import { SolarAdvertisementProcessor } from './solarScan'
+import { awaitSolarOperation, SolarAdvertisementProcessor } from './solarScan'
 import type { SolarScan, VictronHandlers } from './solarScan'
 
 export class VictronScanner implements SolarScan {
+  private attempt: AbortController | null = null
   private scan: BluetoothLEScan | null = null
   private readonly processor: SolarAdvertisementProcessor
 
@@ -31,16 +12,16 @@ export class VictronScanner implements SolarScan {
     this.processor = new SolarAdvertisementProcessor(handlers, 'anything-in-range')
   }
 
+  get resumeAvailableAt(): number {
+    return 0
+  }
+
   get scanning(): boolean {
     return this.scan?.active === true
   }
 
-  /** Call from a user gesture. requestLEScan is awaited before any other async work. */
   async start(keyHex: string): Promise<void> {
-    // Idempotent: a second start must not orphan the first scan or its stale timer.
     this.stop()
-    // Validate the key before the permission prompt: a malformed key should fail loudly without
-    // ever raising the browser's scan dialog. begin() parses it again, which is cheap.
     parseAdvertisementKey(keyHex)
 
     if (typeof navigator.bluetooth?.requestLEScan !== 'function') {
@@ -50,27 +31,34 @@ export class VictronScanner implements SolarScan {
       )
     }
 
-    this.scan = await navigator.bluetooth.requestLEScan({
+    const attempt = new AbortController()
+    this.attempt = attempt
+    // requestLEScan must run before any await consumes the user gesture.
+    const requested = navigator.bluetooth.requestLEScan({
       filters: [{ manufacturerData: [{ companyIdentifier: VICTRON_COMPANY_ID }] }],
       keepRepeatedDevices: true,
+    }).then((scan) => {
+      if (attempt.signal.aborted) scan.stop()
+      return scan
     })
-
-    // After requestLEScan resolves, so the key import cannot spend the click's transient activation
-    // ahead of it. The listener goes on last, once the processor is ready to decode.
-    await this.processor.begin(keyHex)
-    navigator.bluetooth.addEventListener('advertisementreceived', this.handleAdvertisement)
+    try {
+      const scan = await awaitSolarOperation(requested, attempt.signal)
+      if (attempt.signal.aborted) return
+      this.scan = scan
+      await awaitSolarOperation(this.processor.begin(keyHex), attempt.signal)
+      if (attempt.signal.aborted) return
+      navigator.bluetooth.addEventListener('advertisementreceived', this.handleAdvertisement)
+    } catch (error) {
+      if (attempt.signal.aborted) return
+      this.stop()
+      throw error
+    }
   }
 
-  /**
-   * Never. `requestLEScan` raises a permission prompt that needs transient activation, and it
-   * needs it however many times this browser has answered it before — there is no permitted-device
-   * list for a scan to be found on, because a scan is not about a device at all.
-   */
   canResume(): boolean {
     return false
   }
 
-  /** Never, and for the reason above: no controller this browser could be shown changes it. */
   canEverResume(): boolean {
     return false
   }
@@ -82,8 +70,8 @@ export class VictronScanner implements SolarScan {
   }
 
   stop(): void {
-    // Advance the generation so a decode already in flight is dropped when it resolves, and does
-    // not resurrect a stale 'live' reading after the user has stopped.
+    this.attempt?.abort()
+    this.attempt = null
     this.processor.end()
     navigator.bluetooth?.removeEventListener('advertisementreceived', this.handleAdvertisement)
     this.scan?.stop()

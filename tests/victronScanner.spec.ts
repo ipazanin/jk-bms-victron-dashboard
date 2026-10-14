@@ -109,3 +109,26 @@ describe('VictronScanner staleness', () => {
     expect(onStale).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('VictronScanner pending permission', () => {
+  it('settles Stop immediately and stops a scan granted after a new scan starts', async () => {
+    let grant!: (scan: BluetoothLEScan) => void
+    vi.spyOn(scanTarget, 'requestLEScan').mockImplementationOnce(() => new Promise((resolve) => { grant = resolve }))
+    const onReading = vi.fn()
+    const scanner = new VictronScanner({ onReading })
+    const started = scanner.start(KEY)
+    expect(grant).toBeTypeOf('function')
+    scanner.stop()
+    await started
+
+    await scanner.start(KEY)
+    const stopOldScan = vi.fn()
+    grant({ active: true, stop: stopOldScan } as unknown as BluetoothLEScan)
+    await Promise.resolve()
+    scanTarget.dispatchEvent(advertisement())
+    await vi.waitFor(() => expect(onReading).toHaveBeenCalledTimes(1))
+    expect(stopOldScan).toHaveBeenCalledTimes(1)
+    expect(scanner.scanning).toBe(true)
+    scanner.stop()
+  })
+})

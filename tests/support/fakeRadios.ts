@@ -283,7 +283,10 @@ export interface FakeSolarScan {
    * Holds the next resume outstanding and hands back what settles it, so a spec can land a press
    * in the middle of one — which on a real radio is the whole of a second or two.
    */
-  parkNextResume(): () => void
+  parkNextResume(): (error?: Error) => void
+  parkNextStart(): (error?: Error) => void
+  resumeAfter(at: number): void
+  readonly resumeSignals: readonly (AbortSignal | undefined)[]
   /** Every remembered id `resume` was asked for, in order, so a spec can read the loop off. */
   readonly resumeCalls: readonly (string | null)[]
   emitReading(reading: SolarReading, rssi?: number): void
@@ -306,14 +309,26 @@ export function fakeSolarScan(): FakeSolarScan {
   let resumeRejection: Error | null = null
   let startRejection: Error | null = null
   let parkedResume: Promise<void> | null = null
+  let parkedStart: Promise<void> | null = null
+  let generation = 0
+  let resumeAvailableAt = 0
+  const resumeSignals: (AbortSignal | undefined)[] = []
   const resumeCalls: (string | null)[] = []
 
   const scan: SolarScan = {
     get scanning() {
       return scanning
     },
+    get resumeAvailableAt() {
+      return resumeAvailableAt
+    },
     async start() {
+      const attempt = ++generation
+      const parked = parkedStart
+      parkedStart = null
+      if (parked !== null) await parked
       if (startRejection !== null) throw startRejection
+      if (attempt !== generation) return
       scanning = true
       if (watchedDevice) handlers.onWatchedDevice?.(watchedDevice.id, watchedDevice.name)
     },
@@ -325,15 +340,19 @@ export function fakeSolarScan(): FakeSolarScan {
     // The route on its own, which is what `allowResume` has always meant: whether a controller has
     // been shown to it yet is the other question.
     canEverResume: () => !handleNeeded || resumeAllowed,
-    async resume(_keyHex, rememberedDeviceId) {
+    async resume(_keyHex, rememberedDeviceId, signal) {
+      const attempt = ++generation
+      resumeSignals.push(signal)
       resumeCalls.push(rememberedDeviceId)
       const parked = parkedResume
       parkedResume = null
       if (parked !== null) await parked
       if (resumeRejection !== null) throw resumeRejection
+      if (attempt !== generation || signal?.aborted) return
       scanning = true
     },
     stop() {
+      generation += 1
       scanning = false
     },
   }
@@ -362,11 +381,24 @@ export function fakeSolarScan(): FakeSolarScan {
       startRejection = rejection
     },
     parkNextResume() {
-      let settle = (): void => undefined
-      parkedResume = new Promise<void>((resolve) => {
-        settle = () => resolve()
+      let settle = (_error?: Error): void => undefined
+      parkedResume = new Promise<void>((resolve, reject) => {
+        settle = (error) => error ? reject(error) : resolve()
       })
       return settle
+    },
+    parkNextStart() {
+      let settle = (_error?: Error): void => undefined
+      parkedStart = new Promise<void>((resolve, reject) => {
+        settle = (error) => error ? reject(error) : resolve()
+      })
+      return settle
+    },
+    resumeAfter(at) {
+      resumeAvailableAt = at
+    },
+    get resumeSignals() {
+      return [...resumeSignals]
     },
     get resumeCalls() {
       return [...resumeCalls]

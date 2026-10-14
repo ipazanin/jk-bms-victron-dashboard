@@ -332,7 +332,7 @@ export function createTelemetry(deps: TelemetryDeps) {
   let rememberedBmsDeviceId: string | null = null
   let rememberedTrend: readonly TrendPoint[] = []
 
-  /** The controller's identity, learned across two events that arrive in either order. */
+  let solarAttempt = 0
   let solarDeviceKey: DeviceKey | null = null
   let solarModelId: number | null = null
 
@@ -796,6 +796,7 @@ export function createTelemetry(deps: TelemetryDeps) {
    * remembered view both happen on the click that is about to open the chooser.
    */
   function stopSolarLink(): void {
+    solarAttempt += 1
     solarScan.stop()
     recorder.endSolarStream()
     solar.value = null
@@ -1257,6 +1258,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     // decision, and the drop this is about to cause is one of the things that makes it look again.
     // Between those two facts, a Disconnect that disarmed second could be rejoined over the top of.
     disarmRejoin()
+    if (solarState.value === 'connecting') stopSolarLink()
     await bmsLink.disconnect()
     bmsState.value = 'idle'
     settleAfterLive('user-disconnect')
@@ -1295,6 +1297,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     advertisementKeyStored: () => loadAdvertisementKey() !== '',
     canResume: (deviceId) => solarScan.canResume(deviceId),
     canEverResume: () => solarScan.canEverResume(),
+    resumeAvailableAt: () => solarScan.resumeAvailableAt,
     solarBusy: () => solarState.value !== 'idle',
     historySweepHoldsRadio: () => solarHistoryReading.value,
     resumeSolar,
@@ -1516,7 +1519,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     // when the tunnel lets go, so a loop that is not running — or an owner who has said this browser
     // should stop going back to the boat — turns a sweep into a live feed the page never gets back.
     if (!solarRejoin.canRestoreTheWatch()) return
-    void sweepSolarHistoryIfStale(store, controllerId).catch(() => undefined)
+    void sweepSolarHistoryIfStale(store, controllerId, solarAttempt).catch(() => undefined)
   }
 
   /**
@@ -1526,9 +1529,21 @@ export function createTelemetry(deps: TelemetryDeps) {
    * stored key digests to the same value, but a ledger read is the one thing here that must happen
    * before the sweep rather than after it.
    */
-  async function sweepSolarHistoryIfStale(store: HistoryStore, controllerId: string): Promise<void> {
+  async function sweepSolarHistoryIfStale(
+    store: HistoryStore,
+    controllerId: string,
+    attempt: number,
+  ): Promise<void> {
     const deviceKey = await storedSolarDeviceKey()
     const ledger = deviceKey === null ? null : await store.readRingLedger(deviceKey)
+    if (
+      attempt !== solarAttempt ||
+      lastController.value?.id !== controllerId ||
+      !solarRejoin.canRestoreTheWatch() ||
+      !pageActivity.visible() ||
+      !pageActivity.focused() ||
+      (solarState.value !== 'live' && solarState.value !== 'listening')
+    ) return
     if (!solarHistoryReadIsDue(ledger, now())) return
     if (!claimRadioForSweep()) return
     await sweepStoredHistory(() => solarHistoryLink.readRememberedHistory(controllerId))
@@ -1562,6 +1577,7 @@ export function createTelemetry(deps: TelemetryDeps) {
     solarHistoryReading.value = true
     solarHistoryError.value = null
     handTheRadioToTheTunnel()
+    solarRejoin.reconsider()
     return true
   }
 
@@ -1590,9 +1606,9 @@ export function createTelemetry(deps: TelemetryDeps) {
    */
   function handTheRadioToTheTunnel(): void {
     const watchWasUp = solarState.value === 'live' || solarState.value === 'listening'
+    if (watchWasUp) persistRememberedNow(true)
+    if (watchWasUp || solarState.value === 'connecting') stopSolarLink()
     if (watchWasUp) {
-      persistRememberedNow(true)
-      stopSolarLink()
       recorder.checkpoint()
       if (source.value === 'live' && neitherRadioIsReporting()) settleView()
     }
@@ -1682,83 +1698,78 @@ export function createTelemetry(deps: TelemetryDeps) {
     }
   }
 
+  function cancelSolarAttempt(attempt: number): void {
+    if (attempt !== solarAttempt) return
+    const watchWasUp = solarState.value === 'live' || solarState.value === 'listening'
+    if (watchWasUp) persistRememberedNow(true)
+    stopSolarLink()
+    if (watchWasUp) {
+      recorder.checkpoint()
+      if (source.value === 'live' && neitherRadioIsReporting()) settleView()
+    }
+  }
+
   async function startSolar(key: string): Promise<void> {
+    solarRejoin.cancelPendingResume()
+    stopSolarLink()
+    const attempt = solarAttempt
     solarError.value = null
     solarRejection.value = null
     if (source.value === 'remembered') leaveRemembered()
     else if (source.value === 'history') leaveHistory()
     solarState.value = 'connecting'
-    // Saved before the attempt, not after it. Starting the radio raises a native prompt — a scan
-    // permission or a device chooser — and an attempt that is declined, dismissed or simply never
-    // answered would otherwise discard thirty-two hex characters the owner has to find in
-    // VictronConnect and type again. This is a synchronous localStorage write, so it yields
-    // nothing: the chooser route depends on that, because a single await here would spend the
-    // click's transient activation before requestDevice could ask for it.
+    // Keep the key even if the chooser is dismissed. No await may precede the chooser call.
     saveAdvertisementKey(key)
+    solarRejoin.reconsider()
     try {
       await solarScan.start(key)
-      // The scan is running, but no advertisement has arrived yet. It only becomes 'live'
-      // once a packet decodes under this key — which may never happen if the controller is
-      // out of range or the key is wrong, so the user keeps a way to stop it.
-      solarState.value = 'listening'
+      if (attempt !== solarAttempt) return
+      if (solarState.value === 'connecting') solarState.value = 'listening'
       source.value = 'live'
-      // A press is a fresh watch however the last one ended, so it gets its own chance at the
-      // controller's stored history.
       watchStoodDownForSweep = false
       solarAutoSweepConsidered = false
-      // One intent covers both radios, because "stop going back to this boat" is an answer about
-      // the boat rather than about a radio — Stop solar is what narrows it to the controller, by
-      // forgetting which controller it was. So this press is the undo for Disconnect exactly as
-      // Connect and Reconnect are, and without it the watch it has just put up is one nothing
-      // stands back up after the next blur.
       armRejoin()
-      // The transient activation is already spent, so hashing the key costs nothing here. The key
-      // itself never reaches the archive; only a digest of it does. Awaited rather than left to
-      // settle on its own, so that a scan which has started is a scan whose controller the archive
-      // can already name — an identity arriving right behind it has somewhere to land.
-      solarDeviceKey = await nameableSolarDevice(key)
-      if (solarDeviceKey !== null) recorder.identifySolar(solarDeviceKey, solarModelId)
+      const deviceKey = await nameableSolarDevice(key)
+      if (attempt !== solarAttempt) return
+      solarDeviceKey = deviceKey
+      if (deviceKey !== null) recorder.identifySolar(deviceKey, solarModelId)
     } catch (error) {
-      solarState.value = 'idle'
+      if (attempt !== solarAttempt) return
+      cancelSolarAttempt(attempt)
       solarError.value = describeScanError(error as Error)
-      // As with connectBms: don't leave the user blank if the scan never started.
       if (source.value === 'none' && !battery.value) restoreRemembered()
     }
   }
 
-  /**
-   * The same watch as `startSolar`, brought up with no chooser and no press behind it.
-   *
-   * Nothing here writes a banner. A controller that has gone to sleep at sunset or drifted behind
-   * the coachroof is the ordinary case and is answered by listening, and the two answers the owner
-   * would actually have to act on reach them as the supervisor's blocker instead. The key comes
-   * from storage and goes straight to the radio; it is never held, echoed or logged.
-   *
-   * The instruments are left exactly as they are — a remembered session stays on screen until the
-   * controller speaks — which is what makes an automatic attempt free to fail.
-   */
-  async function resumeSolar(deviceId: string | null): Promise<void> {
+  async function resumeSolar(deviceId: string | null, signal: AbortSignal): Promise<void> {
     const key = loadAdvertisementKey()
     if (key === '') throw new Error('No advertisement key is stored, so there is no watch to resume.')
+    const attempt = ++solarAttempt
+    const cancelAttempt = (): void => cancelSolarAttempt(attempt)
+    signal.addEventListener('abort', cancelAttempt, { once: true })
+    if (signal.aborted) {
+      cancelAttempt()
+      signal.removeEventListener('abort', cancelAttempt)
+      return
+    }
     solarRejection.value = null
-    // The banner the last watch left behind asked the owner to press a button, and this is the page
-    // doing that for them. Leaving it standing under the search would tell them to fix something
-    // that is already being fixed.
     solarError.value = null
     solarState.value = 'connecting'
     try {
-      await solarScan.resume(key, deviceId)
-      // A Stop solar that landed while the radio was coming up has already put the state back, and
-      // the transport has already unwound the watch under it. Nothing here may claim one is up.
-      if (solarState.value !== 'connecting') return
-      solarState.value = 'listening'
+      await solarScan.resume(key, deviceId, signal)
+      if (attempt !== solarAttempt) return
+      if (solarState.value === 'connecting') solarState.value = 'listening'
       noteWatchIsUp()
-      solarDeviceKey = await nameableSolarDevice(key)
-      if (solarDeviceKey !== null) recorder.identifySolar(solarDeviceKey, solarModelId)
+      const deviceKey = await nameableSolarDevice(key)
+      if (attempt !== solarAttempt) return
+      solarDeviceKey = deviceKey
+      if (deviceKey !== null) recorder.identifySolar(deviceKey, solarModelId)
     } catch (error) {
-      if (solarState.value === 'connecting') solarState.value = 'idle'
-      // The caller decides what a failure costs. Down here it is only ever reported, never explained.
+      if (attempt !== solarAttempt) return
+      cancelSolarAttempt(attempt)
       throw error
+    } finally {
+      signal.removeEventListener('abort', cancelAttempt)
     }
   }
 

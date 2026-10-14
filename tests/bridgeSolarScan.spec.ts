@@ -156,3 +156,62 @@ describe('BridgeSolarScan', () => {
     await expect(started).rejects.toThrow(/Victron bridge/)
   })
 })
+
+describe('BridgeSolarScan cancellation', () => {
+  it('settles a stopped socket connection without waiting for a socket event', async () => {
+    const scan = new BridgeSolarScan('ws://localhost:8787')
+    const started = scan.start(KEY)
+    const socket = FakeWebSocket.last!
+    scan.stop()
+    await started
+    expect(socket.readyState).toBe(3)
+    expect(scan.scanning).toBe(false)
+  })
+
+  it('rejects an aborted resume and ignores late callbacks from its old socket', async () => {
+    const onError = vi.fn()
+    const onReading = vi.fn()
+    const scan = new BridgeSolarScan('ws://localhost:8787', { onError, onReading })
+    const cancellation = new AbortController()
+    const resumed = scan.resume(KEY, null, cancellation.signal)
+    const oldSocket = FakeWebSocket.last!
+    const oldOpen = oldSocket.onopen!
+    const oldError = oldSocket.onerror!
+    const oldClose = oldSocket.onclose!
+    cancellation.abort()
+    await expect(resumed).rejects.toMatchObject({ name: 'AbortError' })
+
+    const restarted = scan.resume(KEY)
+    const socket = FakeWebSocket.last!
+    socket.open()
+    await restarted
+    oldOpen()
+    oldError()
+    oldClose()
+    socket.deliver(JSON.stringify({ mfg: PAYLOAD_HEX, rssi: -55 }))
+    await vi.waitFor(() => expect(onReading).toHaveBeenCalledTimes(1))
+    expect(scan.scanning).toBe(true)
+    expect(onError).not.toHaveBeenCalled()
+    scan.stop()
+  })
+})
+
+describe('BridgeSolarScan decoder startup', () => {
+  it('rejects when the socket closes while the advertisement key is importing', async () => {
+    const cryptoKey = await crypto.subtle.importKey('raw', toArrayBuffer(hexToBytes(KEY)), 'AES-CTR', false, ['decrypt'])
+    let finishImport!: (key: CryptoKey) => void
+    vi.spyOn(crypto.subtle, 'importKey').mockImplementationOnce(() => new Promise((resolve) => { finishImport = resolve }))
+    const scan = new BridgeSolarScan('ws://localhost:8787')
+    const resumed = scan.resume(KEY)
+    const socket = FakeWebSocket.last!
+    socket.open()
+    await vi.waitFor(() => expect(finishImport).toBeTypeOf('function'))
+
+    socket.close()
+    socket.onclose?.()
+    finishImport(cryptoKey)
+
+    await expect(resumed).rejects.toThrow(/closed while preparing/)
+    expect(scan.scanning).toBe(false)
+  })
+})

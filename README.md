@@ -180,13 +180,17 @@ first failure and doubling to half a minute. It never gives up — this is a boa
 controller comes back the same way whenever the page is in front of you, so its chooser tap is one
 per browser rather than one per page load.
 
-**It keeps going while you work in another application.** Chromium tears down every advertisement
-watch when the tab goes behind another or the window loses focus, and fires no event to say so — so
-there the page stops listening for the pack and asks the radio straight out instead, about once a
-minute. That half needs no focus, and a link once made is not affected by focus at all, so the pack
-can come back while you are in another application and still be there when you look. Bring the page
-forward and it returns to the fast schedule at once. The controller cannot follow: advertisements
-are the only thing it has, so its watch waits for the page to come back.
+**The two radios behave differently in the background.** Chromium can stop advertisement delivery
+when the tab is hidden or the window loses focus. The BMS uses a GATT connection that can remain
+active, and its reconnect loop can try the radio directly while the page is away. Android may
+suspend the page and its timers, including when the dashboard is installed on the home screen.
+Solar waits for the page to return before starting a fresh advertisement watch.
+
+**Returning to the app restarts solar automatically.** Each automatic startup attempt has a
+15-second deadline. A stalled attempt is cancelled and retried, and delayed results from an old
+attempt cannot change the current connection. Rapid app switches share the same scan budget, so
+a cooldown may delay the next attempt before its deadline starts. Live readings resume when fresh
+packets arrive. The browser must still have permission for the remembered controller.
 
 **While it is looking, it stays quiet.** A pack out of range is the ordinary case on a boat, so the
 Bus view says it is looking and the recording is held open across the gap: a link that comes back

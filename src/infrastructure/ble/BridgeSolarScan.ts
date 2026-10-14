@@ -1,27 +1,7 @@
-/**
- * Solar readings relayed from a native Bluetooth helper over a localhost WebSocket.
- *
- * `requestLEScan` opens its prompt on macOS Chrome and then finds nothing. A small local script
- * (see the bridge/ directory) scans with CoreBluetooth, which works, and forwards the raw
- * manufacturer payload here. This class is the other end: it feeds those bytes to the same
- * `SolarAdvertisementProcessor` the browser's own radios use, so the decrypt and every downstream
- * handler are identical.
- *
- * `SolarWatchScanner` reads the same advertisements in the browser off a chooser-picked handle,
- * so this is the route for someone who wants neither a chooser tap nor the experimental flag.
- *
- * The key is never sent to the bridge; the browser still holds it and does the decrypt. The
- * relayed bytes are a public broadcast that anything in radio range already hears.
- *
- * Opt in by opening the app with `?bridge=1` (see solarBridge.ts). Only reachable from a page
- * served over http://localhost — an https page may not open a ws://localhost socket.
- */
-
 import { parseAdvertisementKey } from '../../domain/solar/advertisement'
-import { SolarAdvertisementProcessor } from './solarScan'
+import { awaitSolarOperation, SolarAdvertisementProcessor } from './solarScan'
 import type { SolarScan, VictronHandlers } from './solarScan'
 
-/** One relayed advertisement: the Victron manufacturer payload as hex, and the rssi it arrived at. */
 interface BridgeFrame {
   readonly mfg?: unknown
   readonly rssi?: unknown
@@ -40,56 +20,77 @@ export class BridgeSolarScan implements SolarScan {
   private readonly url: string
   private readonly handlers: VictronHandlers
   private readonly processor: SolarAdvertisementProcessor
+  private attempt: AbortController | null = null
+  private detachAbort: (() => void) | null = null
   private socket: WebSocket | null = null
 
   constructor(url: string, handlers: VictronHandlers = {}) {
     this.url = url
     this.handlers = handlers
-    // The helper scans with CoreBluetooth and relays whatever it hears, so this end is listening
-    // to the whole marina exactly as the browser's own scan is.
     this.processor = new SolarAdvertisementProcessor(handlers, 'anything-in-range')
+  }
+
+  get resumeAvailableAt(): number {
+    return 0
   }
 
   get scanning(): boolean {
     return this.socket !== null && this.socket.readyState === WebSocket.OPEN
   }
 
-  async start(keyHex: string): Promise<void> {
-    // Idempotent, and validate the key before opening anything — both mirroring VictronScanner.
-    this.stop()
-    parseAdvertisementKey(keyHex)
-    await this.openSocket()
-    await this.processor.begin(keyHex)
+  start(keyHex: string): Promise<void> {
+    return this.connect(keyHex)
   }
 
-  /**
-   * Always, and whatever this browser remembers. A WebSocket needs no gesture and no permission,
-   * and the helper on the other end picks the radio's targets itself — so there is no device id in
-   * this route for a remembered one to have to match.
-   *
-   * That is the whole of what this answers. This route names no controller, so it has no way to
-   * tell a page that has never listened from one the owner has just told to stop, and it must not
-   * pretend to: holding the difference is the supervisor's job.
-   */
+  private async connect(keyHex: string, signal?: AbortSignal): Promise<void> {
+    this.stop()
+    if (signal?.aborted) throw new DOMException('Solar scan cancelled.', 'AbortError')
+    parseAdvertisementKey(keyHex)
+    const attempt = new AbortController()
+    this.attempt = attempt
+    const cancel = (): void => {
+      if (this.attempt === attempt) this.stop()
+    }
+    signal?.addEventListener('abort', cancel, { once: true })
+    this.detachAbort = () => signal?.removeEventListener('abort', cancel)
+    try {
+      await awaitSolarOperation(this.openSocket(), attempt.signal)
+      if (attempt.signal.aborted) return
+      await awaitSolarOperation(this.processor.begin(keyHex), attempt.signal)
+      if (attempt.signal.aborted) return
+      if (this.socket?.readyState !== WebSocket.OPEN) {
+        throw new Error('The Victron bridge closed while preparing the solar decoder.')
+      }
+    } catch (error) {
+      if (attempt.signal.aborted) return
+      this.stop()
+      throw error
+    } finally {
+      if (signal?.aborted) throw new DOMException('Solar scan cancelled.', 'AbortError')
+    }
+  }
+
   canResume(): boolean {
     return true
   }
 
-  /** Always, and with nothing remembered: there is no handle in this route to be waiting for. */
   canEverResume(): boolean {
     return true
   }
 
-  resume(keyHex: string): Promise<void> {
-    return this.start(keyHex)
+  resume(keyHex: string, _rememberedDeviceId: string | null = null, signal?: AbortSignal): Promise<void> {
+    return this.connect(keyHex, signal)
   }
 
   stop(): void {
+    this.attempt?.abort()
+    this.attempt = null
+    this.detachAbort?.()
+    this.detachAbort = null
     this.processor.end()
     const socket = this.socket
     this.socket = null
     if (socket) {
-      // Detach before closing so the deliberate teardown does not trip the unexpected-close path.
       socket.onopen = null
       socket.onmessage = null
       socket.onerror = null
@@ -105,14 +106,16 @@ export class BridgeSolarScan implements SolarScan {
       this.socket = socket
 
       socket.onopen = (): void => {
+        if (this.socket !== socket) return
         settled = true
         resolve()
       }
-      socket.onmessage = (event): void => this.handleMessage(event)
+      socket.onmessage = (event): void => {
+        if (this.socket === socket) this.handleMessage(event)
+      }
       socket.onerror = (): void => {
-        if (settled) return
+        if (settled || this.socket !== socket) return
         settled = true
-        this.socket = null
         reject(
           new Error(
             `Could not reach the Victron bridge at ${this.url}. Start the local bridge script, ` +
@@ -121,19 +124,15 @@ export class BridgeSolarScan implements SolarScan {
         )
       }
       socket.onclose = (): void => {
+        if (this.socket !== socket) return
         if (!settled) {
           settled = true
-          this.socket = null
           reject(new Error(`The Victron bridge at ${this.url} closed before the connection opened.`))
           return
         }
-        // Closed mid-session: the helper went away. Fall out of 'live' rather than trust a frozen
-        // reading. The stale clock would demote it in time; surfacing the error says why at once.
-        if (this.socket === socket) {
-          this.processor.end()
-          this.socket = null
-          this.handlers.onError?.(new Error('The Victron bridge stopped. Restart it and connect again.'))
-        }
+        this.processor.end()
+        this.socket = null
+        this.handlers.onError?.(new Error('The Victron bridge stopped. Restart it and connect again.'))
       }
     })
   }
