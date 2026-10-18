@@ -12,7 +12,7 @@ import WarningsView from './components/views/WarningsView.vue'
 import LogView from './components/history/LogView.vue'
 import SessionView from './components/history/SessionView.vue'
 import { useIsDesktop } from './application/breakpoints'
-import { provideHistoryEnvironment, useHistoryBrowser } from './application/history/historyBrowser'
+import { useHistoryBrowser } from './application/history/historyBrowser'
 import type { HistoryStore } from './application/history/port'
 import { route, startRouting } from './application/route'
 import { loadSidebarCollapsed, saveSidebarCollapsed } from './application/sidebarLayout'
@@ -20,20 +20,28 @@ import { applyTheme, loadThemeChoice, resolveTheme, saveThemeChoice, themeFromQu
 import type { Theme } from './application/theme'
 import { attachHistoryStore, useTelemetry } from './application/telemetry'
 import { useMediaQuery } from './application/useMediaQuery'
+import { useArchiveWorkspace } from './application/backup/useArchiveWorkspace'
+import { useGoogleSync } from './application/sync/useGoogleSync'
+import { restoredPreferencesRevision } from './application/backup/preferences'
+import ArchiveSourceBar from './components/backup/ArchiveSourceBar.vue'
 import { fakeRadioController } from './infrastructure/ble/fake/fakeDeps'
-import { downloadJson } from './infrastructure/history/downloadJson'
 import { FAKE_ARCHIVE_NAME } from './infrastructure/history/fakeArchiveName'
 import { DATABASE_NAME } from './infrastructure/history/IdbHistoryStore'
 import { openHistoryStore } from './infrastructure/history/openHistoryStore'
 
 const telemetry = useTelemetry()
 const log = useHistoryBrowser()
+const archives = useArchiveWorkspace()
+const googleSync = useGoogleSync()
+const historyViewKey = computed(() => `${archives.selectedSourceId.value ?? 'local'}:${restoredPreferencesRevision.value}`)
+watch(archives.selectedSourceId, (sourceId) => {
+  const address = new URL(window.location.href)
+  if (sourceId === null) address.searchParams.delete('archive')
+  else address.searchParams.set('archive', sourceId)
+  window.history.replaceState(window.history.state, '', address)
+})
 
-/**
- * `?theme` pins the first render; a click on the toggle clears it, so the query parameter cannot
- * leave the control looking broken. `chosen` stays null until the owner actually picks one, which
- * is what lets the page keep following the machine to light at dusk and back until they do.
- */
+/** A theme query overrides the system preference until the user chooses a theme. */
 const forcedTheme = ref<Theme | null>(themeFromQuery(window.location.search))
 const chosenTheme = ref<Theme | null>(loadThemeChoice())
 const systemPrefersLight = useMediaQuery('(prefers-color-scheme: light)')
@@ -51,51 +59,38 @@ function toggleTheme(): void {
 
 const sessionCount = computed(() => log.archive.value.sessions)
 
-/**
- * Empty only in the branches that never render the session view. Reading the id out here rather
- * than narrowing inside the template keeps the route's shape in TypeScript's hands.
- */
 const sessionId = computed(() => (route.value.name === 'session' ? route.value.id : ''))
 
-/**
- * The route owns the load, not the view that displays it. A loaded session holds the decoded
- * chunks and the hold that keeps pruning off them, and that hold has to outlive a component which
- * unmounts on every navigation — so the owner is whatever survives the route change.
- *
- * Immediate, because a deep link arrives with the id already set: a watcher that only fires on
- * change would leave someone following a shared link on an empty page, with nothing loading and
- * nothing to say about why.
- */
+// The route keeps the viewed session protected from pruning across component remounts.
 watch(
   sessionId,
   (id) => (id === '' ? log.unloadSession() : void log.loadSession(id)),
   { immediate: true },
 )
 
-/**
- * Two independent pieces of shell state, plus the reactive width they branch on. The desktop
- * rail's collapse is a remembered preference; the mobile drawer's open state is a momentary thing,
- * closed again by the next navigation, an Escape, a scrim tap, or a resize back up to desktop.
- * The one header button means "collapse the rail" on desktop and "open the drawer" on mobile.
- */
 const isDesktop = useIsDesktop()
 const collapsed = ref(loadSidebarCollapsed())
 const mobileOpen = ref(false)
 
-/** The two fields the header draws, assembled here so the header never reaches into telemetry. */
 const headerStatus = computed<HeaderStatus>(() => ({
   source: telemetry.source.value,
   worst: telemetry.worstFault.value,
 }))
 
 function onToggleSidebar(): void {
-  if (isDesktop.value) collapsed.value = !collapsed.value
-  else mobileOpen.value = !mobileOpen.value
+  if (isDesktop.value) {
+    collapsed.value = !collapsed.value
+    saveSidebarCollapsed(collapsed.value)
+  } else {
+    mobileOpen.value = !mobileOpen.value
+  }
 }
 
-watch(collapsed, saveSidebarCollapsed)
-// Crossing back up to desktop closes any lingering drawer, so a resize can't leave an off-canvas
-// panel half-owning the layout; navigating closes it for the same reason.
+watch(restoredPreferencesRevision, () => {
+  forcedTheme.value = null
+  chosenTheme.value = loadThemeChoice()
+  collapsed.value = loadSidebarCollapsed()
+})
 watch(isDesktop, (wide) => {
   if (wide) mobileOpen.value = false
 })
@@ -103,11 +98,7 @@ watch(route, () => {
   mobileOpen.value = false
 })
 
-/**
- * The open drawer is modal: lock the page behind it so it cannot scroll under the scrim, and move
- * focus into the panel. Closing hands focus back to the button that opened it — but only when focus
- * was still inside the drawer, so a close triggered by navigation does not yank focus off the page.
- */
+// Restore drawer focus only if navigation has not moved it into the page.
 watch(mobileOpen, async (open) => {
   document.documentElement.style.overflow = open ? 'hidden' : ''
   if (open) {
@@ -129,34 +120,17 @@ const onKeydown = (event: KeyboardEvent): void => {
 let stopRouting: (() => void) | null = null
 let stopArchiveLevers: (() => void) | null = null
 
-/**
- * One store, handed to both halves: the recorder writes through telemetry, the views read through
- * the browser model, and neither reaches into the other.
- *
- * Called again whenever the store is replaced, which under playback is whenever an archive lever
- * moves. Each of those is a store of its own with the lever already read into it, so a page still
- * holding the last one reads and writes the archive it was wired with rather than the one it has.
- */
 function wireArchive(store: HistoryStore): void {
   attachHistoryStore(store)
-  provideHistoryEnvironment({ store, downloadJson })
+  archives.attachLocalStore(store)
 }
 
-// main.ts sets the attribute before the mount so nothing paints on the wrong plane; this keeps it
-// in step afterwards, when the owner toggles or the machine changes its mind.
 watchEffect(() => applyTheme(theme.value))
 
 onMounted(() => {
-  // Restore the last live session from localStorage, so the instruments render on first paint
-  // instead of the empty landing page. Synchronous by necessity: the archive probe below is a
-  // promise, and first paint can never be made to wait on one.
+  googleSync.start()
   telemetry.restoreRemembered()
 
-  // Then hand the pack to the supervisor, which goes back to it whenever this page is in a state
-  // where that can work — the owner has not disarmed it and the radio is on — and keeps trying,
-  // quietly, for as long as that holds. Being behind another window slows it and narrows it to the
-  // half that survives one; it does not stop it. None of it needs a gesture, so the page is free to
-  // do it while the owner watches the instruments, or something else entirely.
   telemetry.startRejoin()
 
   stopRouting = startRouting()
@@ -164,15 +138,18 @@ onMounted(() => {
   const archiveName = import.meta.env.VITE_FAKE_BLE === 'true' ? FAKE_ARCHIVE_NAME : DATABASE_NAME
   void openHistoryStore(archiveName)
     .then((store) => {
-      // The playback controls stand in front of the archive rather than beside it: this is the one
-      // place the page opens a store, so it is the only place a lever can put a browser that keeps
-      // no log, one that fails every call, or one that turns rows away, where both halves meet it.
       const archive =
         import.meta.env.VITE_FAKE_BLE === 'true' ? fakeRadioController().archiveFor(store) : store
       wireArchive(archive)
-      // And they stay subscribed to, because each of those is a store of its own rather than a mood
-      // the one store is in. A page that kept the first would be wired to an archive it no longer
-      // writes to.
+      const browserName = navigator.userAgent.includes('Firefox/')
+        ? 'Firefox'
+        : navigator.userAgent.includes('Edg/')
+          ? 'Edge'
+          : navigator.userAgent.includes('Chrome/') ? 'Chrome' : 'Browser'
+      void archives.initialize(archiveName, archive, `${browserName} on ${navigator.platform || 'this device'}`).then(() => {
+        const selectedSource = new URL(window.location.href).searchParams.get('archive')
+        if (selectedSource !== null) void archives.selectSource(selectedSource)
+      })
       if (import.meta.env.VITE_FAKE_BLE === 'true') {
         stopArchiveLevers = fakeRadioController().onArchiveChange(wireArchive)
       }
@@ -183,11 +160,13 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  googleSync.dispose()
   stopRouting?.()
   stopRouting = null
   telemetry.stopRejoin()
   stopArchiveLevers?.()
   stopArchiveLevers = null
+  archives.dispose()
   window.removeEventListener('keydown', onKeydown)
   document.documentElement.style.overflow = ''
 })
@@ -217,12 +196,13 @@ onBeforeUnmount(() => {
         :inert="(mobileOpen && !isDesktop) || undefined"
         :aria-hidden="mobileOpen && !isDesktop ? 'true' : undefined"
       >
+        <ArchiveSourceBar v-if="['stats', 'warnings', 'log', 'session'].includes(route.name)" />
         <BusView v-if="route.name === 'dashboard'" />
-        <ConnectView v-else-if="route.name === 'connect'" />
-        <StatsView v-else-if="route.name === 'stats'" />
-        <WarningsView v-else-if="route.name === 'warnings'" />
-        <LogView v-else-if="route.name === 'log'" />
-        <SessionView v-else :id="sessionId" />
+        <ConnectView v-else-if="route.name === 'connect'" :key="restoredPreferencesRevision" />
+        <StatsView v-else-if="route.name === 'stats'" :key="historyViewKey" />
+        <WarningsView v-else-if="route.name === 'warnings'" :key="historyViewKey" />
+        <LogView v-else-if="route.name === 'log'" :key="historyViewKey" />
+        <SessionView v-else :key="historyViewKey" :id="sessionId" />
 
         <AppFooter />
       </main>

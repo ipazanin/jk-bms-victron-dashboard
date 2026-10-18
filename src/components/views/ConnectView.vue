@@ -3,6 +3,8 @@ import { computed } from 'vue'
 
 import ConnectPanel from '../ConnectPanel.vue'
 import OfflinePanel from '../OfflinePanel.vue'
+import DataBackupPanel from '../backup/DataBackupPanel.vue'
+import GoogleSyncPanel from '../backup/GoogleSyncPanel.vue'
 import { loadAdvertisementKey } from '../../application/storage'
 import { useTelemetry } from '../../application/telemetry'
 
@@ -27,6 +29,7 @@ const {
 } = telemetry
 
 const initialKey = loadAdvertisementKey()
+const googleSyncAvailable = import.meta.env.VITE_FAKE_BLE !== 'true'
 
 const canReconnect = computed(() => capabilities.canReconnect && lastDevice.value !== null)
 const reconnectName = computed(() => lastDevice.value?.name ?? null)
@@ -69,6 +72,9 @@ const reconnectName = computed(() => lastDevice.value?.name ?? null)
         @start-solar="telemetry.startSolar"
         @stop-solar="telemetry.stopSolar"
       />
+      <DataBackupPanel />
+      <GoogleSyncPanel v-if="googleSyncAvailable" />
+      <p v-else class="copy">Google sync is unavailable for demo recordings.</p>
       <OfflinePanel />
     </div>
   </section>
@@ -103,14 +109,6 @@ const reconnectName = computed(() => lastDevice.value?.name ?? null)
   padding: 1.25rem var(--pad) 2.5rem;
 }
 
-/*
- * ConnectPanel supplies its own padding; `.card` (the global elevated-surface utility in
- * tokens.css) falls through onto its root for the background, edge, radius and shadow, matching
- * the Bus and Stats cards. ConnectPanel's own top border and its BMS/solar divider predate that
- * utility and still draw a 1px --gridline rule; overridden here — at higher specificity than its
- * single-class rule, so this wins regardless of stylesheet order — so the card reads as one
- * elevated surface with breathing room standing in for the old rule, not a redundant line.
- */
 .card.card {
   border-top-color: var(--card-border);
 }

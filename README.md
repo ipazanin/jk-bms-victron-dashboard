@@ -1,12 +1,13 @@
 # Shunt — a JK-BMS + Victron dashboard in your browser
 
 A static, installable web app that talks Bluetooth directly to a **JK-BMS** and a **Victron SmartSolar MPPT**,
-and reconciles them. No account, no backend, no cloud.
+and reconciles them. Recording works locally without an account or backend. Optional Google sync
+keeps a copy in your own Drive and shares saved history between devices.
 
-**[Open it →](https://ipazanin.github.io/jk-bms-victron-dashboard/)** — needs Chrome or Edge and the
-two radios. With no hardware you get the instrument drawn empty, the copy explaining what it will
-show, and nothing else: no numbers, no charge figure, no sample data. The page shows what its own
-radios recorded, and until they have recorded something there is nothing honest to draw.
+**[Open it →](https://ipazanin.github.io/jk-bms-victron-dashboard/)** — live Bluetooth needs Chrome or
+Edge and the two radios. Saved and imported history can be viewed in Firefox and Safari. Without
+hardware or saved data, the instrument starts empty and explains what it will show. No sample
+readings are presented as live measurements.
 
 `npm run check:visual` renders the dashboard and Log from the built app, driving a recorded session
 through the same `localStorage` and IndexedDB the page uses in the field. It generates local
@@ -91,8 +92,8 @@ supported Chromium browser or a specialist browser such as Bluefy; offline viewi
   relays the raw payload to the page over `ws://localhost`, where the same code decodes it with your
   key exactly as a browser scan would. Serve the app locally and open it with `?bridge=1`.
 
-The Log is per-origin and per-browser: a session recorded in Chrome is invisible from Firefox or
-Safari, a different profile, or a different site address. Installing may use a separate storage
+The Log is stored per-origin and per-browser. Use **Connect → Data & backup** to export it from
+Chrome and open it in Firefox, Safari, another profile, or another device. Installing may use a separate storage
 container on some platforms, so check the installed app before relying on existing recordings.
 Private browsing may provide temporary storage or refuse it. The local [bridge](bridge/README.md)
 supplies solar advertisements only; it is not a native replacement for the battery connection.
@@ -100,8 +101,8 @@ supplies solar advertisements only; it is not a native replacement for the batte
 Browser storage can be evicted. Shunt asks for persistent storage without delaying the Log or
 recorder while a permission prompt is unanswered. The Log shows the browser's answer; a grant
 protects against ordinary storage-pressure eviction, not clearing site data. Safari also has
-proactive eviction policies for inactive sites. Export important sessions
-as JSON. See [browser storage policies](https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria).
+proactive eviction policies for inactive sites. Keep a complete Excel archive or individual session
+JSON exports outside the browser. See [browser storage policies](https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria).
 
 The page feature-detects all of this and degrades honestly. With no solar it is still a complete,
 correct battery instrument — it withholds the house-load span rather than faking it to zero.
@@ -152,7 +153,7 @@ Snapshots are saved periodically and synchronously when the page is hidden or le
 checkpoints every ten seconds. An abrupt process kill without lifecycle events can still lose the
 latest uncheckpointed samples (up to 15 seconds of snapshot state or ten seconds of Log samples).
 These are recovery checkpoints, not a guarantee against browser storage refusal, device failure,
-or clearing site data. The existing JSON export is the independent backup. Browsers recommend
+or clearing site data. Excel archives and session JSON exports provide independent backups. Browsers recommend
 [saving on visibility changes](https://developer.chrome.com/docs/web-platform/page-lifecycle-api)
 because unload callbacks are not guaranteed.
 
@@ -165,6 +166,137 @@ Only Shunt's own app caches are cleaned up; readings and the Log are not part of
 The first visit needs internet, and offline support needs HTTPS or localhost. If **Offline copy
 unavailable** appears, check site storage permissions and reload online. Clearing site data removes
 the offline app as well as saved state, so it must be downloaded again.
+
+## Excel archives and device transfers
+
+Open **Connect → Data & backup** to export this browser's complete saved history and preferences.
+Small exports are ordinary `.xlsx` workbooks. Large exports are a ZIP containing numbered Excel
+workbooks. Keep every part together and import the ZIP directly. The transfer works offline after
+the app is cached and does not need Bluetooth.
+
+Archives include sessions, sample chunks, device names, warnings, battery and solar history reads,
+stored totals, theme, sidebar, Stats preferences, the last instrument snapshot and the lifetime
+logbook. Raw samples retain their original integer units. Nested records and long settings use
+the **Field Metadata** worksheet. These are Shunt workbooks with a defined layout, not arbitrary
+spreadsheets. Preserve their sheets, identifiers and metadata when editing. Formulas, missing
+parts, mixed archives and invalid records are rejected before import.
+
+Import first shows a preview. Confirming saves a separate, read-only source that you can select in
+Log, Stats and Warnings. Your current recording stays in this browser's own source. Reimporting
+the same source replaces its saved copy, so the preview shows that replacement explicitly. A
+recording captured while open remains labelled **Open at capture**, with its duration fixed at
+the export time. Imported recordings do not resume and are not combined with local recordings.
+
+**Apply saved settings** copies portable settings to this browser after the radios are
+disconnected. Bluetooth permissions, remembered browser device handles and automatic reconnect
+intent are not transferred. Pair the radios in each browser. The Victron advertisement key is
+excluded from exports unless you opt in, and applying it requires a separate opt-in. An archive
+without a key leaves this browser's existing key unchanged.
+
+An imported copy of this browser's own source can also replace its local history, after an
+explicit confirmation. Both the saved copy and the current history must have no open sessions.
+This restore replaces history only. Apply its settings separately if wanted.
+
+**Export current sources** includes the current browser and saved sources from other browsers.
+To preserve an older saved copy of this same browser, select it and use **Export selected source**
+separately. A bundle contains one snapshot per source. Each source is saved atomically on import.
+If a multi-source import is cancelled or runs out of storage, completed sources remain available
+and the remaining sources stay in the preview.
+
+Exports split at up to 50,000 sample rows and 10,000 metadata records per workbook. Imports accept
+files up to 256 MiB and 10 million samples across at most 100 sources. Processing runs in a
+cancellable worker, but large archives still need substantial memory. Use a desktop browser for
+a full retained history.
+
+## Optional Google sync
+
+In **Connect → Data & backup → Google sync**, enable sync, connect to Google, then create or choose
+a workspace. Use the same Google account and the same configured app on each device. Each workspace
+has a Drive folder containing archive blocks and a Google Sheet with its catalogue and shared
+settings. Shunt requests only access to files it creates or you select, using Google's
+[`drive.file` scope](https://developers.google.com/workspace/drive/api/guides/api-specific-auth).
+It will not adopt an arbitrary spreadsheet.
+
+**Sync now** uploads this browser's retained history and downloads the latest saved sources from
+other devices. Each source stays separate in Log, Stats and Warnings. Imported history does not
+join the active recording. Older cloud snapshots remain available through the saved history list.
+Opening one pauses automatic sync so its history stays on screen. Use **Sync now** or enable
+automatic sync again when you want the latest copy.
+Cloud files contain complete archive records with checksums. Unchanged blocks are reused and a
+snapshot appears in the catalogue only after its blocks have uploaded.
+
+Local sample limits still apply. A recording must sync before the browser prunes or loses it to be
+available in the cloud. New snapshots retain the data currently present locally. Older snapshots
+preserve previously uploaded history, but their samples are not combined into the latest snapshot.
+Sync accepts up to 512 MiB of encoded records per snapshot, with 1 MiB blocks and manifests. Large
+histories need substantial browser memory. Keep independent Excel exports for important recordings.
+
+Shared settings cover theme, sidebar and Stats preferences. When devices change them independently,
+Shunt asks which version to keep. Disconnect radios before applying cloud settings. Bluetooth
+permissions and automatic reconnect intent stay local.
+
+**Include the Victron advertisement key in Google sync** is off by default. Opting in includes the key in uploads and allows
+shared settings to apply it locally. Turning it off prevents subsequent local key uploads and
+applications. It does not erase keys already in cloud snapshots or settings history. Anyone with
+access to those files can read an included key.
+
+Automatic sync checks once a minute while the page is visible, online and connected to Google.
+Each check downloads other devices' new history and exchanges shared settings. While this browser
+is recording, it uploads its own history at most once an hour, and again as soon as the session ends.
+**Sync now** always uploads. Unchanged history and settings add nothing to the workspace.
+Closing or suspending the app stops automatic sync. Access tokens exist only in memory, so reloads and token
+expiry require another **Connect Google** click. Google's
+[token model](https://developers.google.com/identity/oauth2/web/guides/use-token-model) requires a
+user action to renew access. Disconnecting or disabling sync leaves cloud files and local copies
+intact. Deleting a workspace moves its entire Drive folder to Trash, including any files you
+manually added. Local recordings and downloaded copies remain.
+
+Google sync uses browser sign-in and HTTPS requests rather than Bluetooth. It can transfer history
+in Firefox even though Firefox cannot record from the radios. Excel transfer remains the offline
+option. Test Google sign-in on each configured origin before relying on automatic sync.
+
+Workspaces that Shunt created appear under **Available workspaces** on every device signed in to
+the same Google account. **Choose in Google Drive** opens Google's file picker for a workspace the
+list does not show. Use the same Google account on all devices. Sharing a Sheet with another account
+does not grant Shunt access to its workspace folder and history files. In Firefox the picker first asks
+to **Allow cookies** for Google, because Firefox isolates third-party cookies. If the sign-in window
+shows an error page, close it or press **Cancel sync**, then connect again.
+
+### Configure Google sync for your build
+
+Google setup is optional. Without the three build variables below, the app keeps recording and
+exporting locally and shows Google sync setup instructions.
+
+1. In one Google Cloud project, enable **Google Drive API**, **Google Sheets API** and
+   **Google Picker API**. Set the OAuth audience to **External**. `drive.file` is a non-sensitive
+   scope, so a published app needs no verification. While the app is in testing, add each Google
+   account as a test user.
+2. Create an OAuth client of type **Web application** with no redirect URIs. Add every origin that
+   serves the app as an authorized JavaScript origin, for example `http://localhost:5173` and
+   `https://ipazanin.github.io`. Origins have no path, and the port must match exactly. If Vite
+   moves the dev server to another port because 5173 is taken, Google refuses sign-in until that
+   origin is added too. `npm run preview` serves on port 4173, which needs its own entry. This
+   browser token flow needs no client secret. See
+   [Google's client setup](https://developers.google.com/identity/oauth2/web/guides/get-google-api-clientid).
+3. Create an API key restricted to the **Google Picker API** only. Drive and Sheets calls use the
+   signed-in user's token, not the key. Its website restrictions must allow your app origins, such
+   as `http://localhost:5173/*` and `https://ipazanin.github.io/*`, plus `https://docs.google.com/*`
+   for the picker's iframe. Firefox sends only the origin as the referrer, so a pattern with a path
+   such as `/jk-bms-victron-dashboard/*` would not match. Use the same project's numeric project
+   number as the picker's app ID. See
+   [Google's Picker setup](https://developers.google.com/workspace/drive/picker/guides/web-picker-sample).
+4. Copy `.env.example` to `.env.local` and fill in `VITE_GOOGLE_CLIENT_ID`,
+   `VITE_GOOGLE_API_KEY` and `VITE_GOOGLE_PROJECT_NUMBER`. These are public browser configuration
+   values bundled into the app. Do not add a client secret, access token or refresh token.
+5. For GitHub Pages, set repository **Actions variables** with those same three names. The workflow
+   supplies them to both verification and deployment builds. Rebuild after changing them.
+
+Use the same OAuth client and project across your devices and hosted origins so the app can discover
+its existing files. Allow Google popups when connecting. A blocked script, denied permission or
+expired token leaves local recording available. Do not rename the catalogue tabs, change its
+headers or move its Sheet out of the workspace folder. Change shared settings through Shunt in
+normal use. If editing its Sheet directly, preserve existing catalogue rows, revision IDs and
+settings ancestry.
 
 ## Before you connect
 
@@ -239,10 +371,11 @@ It is 32 hex characters. The page verifies it before trusting it: byte 7 of ever
 check byte equal to the key's first byte, so a wrong key is rejected instead of rendering plausible
 garbage.
 
-**Where the key lives.** In your browser's `localStorage`, and nowhere else — alongside the last
-frame each radio sent, and beside the Log in IndexedDB. Shunt downloads its own static app files
-for offline use and checks for updates. It sends no readings, keys or recordings to a backend and
-has no analytics. Fonts are bundled; no font CDN is contacted.
+**Where the key lives.** The active key is in your browser's `localStorage`. Excel exports and Google
+uploads include it only when you opt in. A previously imported or uploaded archive may retain its
+own copy. Shunt downloads its static app files for offline use and checks for updates. Optional
+Google sync sends saved history and chosen settings directly to your Drive. There is no Shunt
+backend or analytics. Fonts are bundled and no font CDN is contacted.
 
 **Why the check byte matters.** Every Victron device on earth advertises under company id `0x02E1`.
 In a marina you will receive your neighbours' broadcasts too. The check byte is what separates your
@@ -253,7 +386,8 @@ the company id, the same broadcast is most likely a neighbour's, and the panel s
 
 ## The Log
 
-Every session is recorded, browsable at `#/log`, and kept in this browser only.
+Every session is recorded, browsable at `#/log`, and kept in this browser. Optional Google sync
+backs it up and makes it available to your other devices.
 
 Recording starts on its own — no button — the moment either radio produces its first sample, and
 ends when both links go idle. A session is one continuous recording period bounded by the radios,
@@ -293,7 +427,7 @@ never the instrument.
 
 ## Safety
 
-The app is **read-only by construction**. The JK protocol uses one characteristic for both reads and
+Radio access is **read-only by construction**. The JK protocol uses one characteristic for both reads and
 settings writes, so `buildCommand()` refuses any opcode that is not `0x96` (cell info) or `0x97`
 (device info). It is not possible for this code to emit a settings frame. There is a unit test for
 exactly that.
@@ -444,7 +578,8 @@ Two things behave differently from `npm run dev`, both deliberate:
   one that costs real effort to recover — the Victron advertisement key. The recording lease is
   suffixed too: it is a Web Lock, scoped by origin and name, and on one shared name a playback run
   would hold the real page off its own archive for as long as it played. Theme and sidebar layout
-  are chrome and stay shared on purpose.
+  are chrome and stay shared on purpose. Google sync is disabled in fake-radio mode, so demo
+  recordings cannot be uploaded into a real cloud workspace.
 
 None of this reaches a deployed build. The recording and the panel's stylesheet both carry a marker
 string, and `npm run build` fails if either appears in `dist/`.
@@ -475,9 +610,9 @@ Support is completely optional.
 ## Credits
 
 Protocol work stands on the shoulders of the [ESPHome JK-BMS component](https://github.com/syssi/esphome-jk-bms)
-and [`victron-ble`](https://github.com/keshavdv/victron-ble). Neither is used at runtime — this page
-ships no third-party JavaScript beyond Vue. The fonts are self-hosted via `@fontsource`, so no CDN
-is ever contacted.
+and [`victron-ble`](https://github.com/keshavdv/victron-ble). Neither protocol library is used at runtime. Vue supplies the UI, SheetJS handles Excel files and
+fflate handles ZIP archives. Fonts are self-hosted via `@fontsource`. Google Identity Services and
+Picker scripts load when you enable Google sync.
 
 ## Licence
 

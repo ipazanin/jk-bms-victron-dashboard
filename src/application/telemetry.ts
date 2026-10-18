@@ -1064,15 +1064,20 @@ export function createTelemetry(deps: TelemetryDeps) {
     return true
   }
 
-  /**
-   * Restores the last live session from localStorage on load, so the instruments render with
-   * the last-seen numbers rather than the empty landing page — even in browsers without Web
-   * Bluetooth. The timestamped trend is restored for review, but observation windows stay empty:
-   * a projection over a window that ended hours ago would assert a rate that no longer applies.
-   */
-  function restoreRemembered(): boolean {
-    if (source.value !== 'none') return false
+  /** Restored observations remain historical and never enter live rate estimates. */
+  function restoreRemembered(replace = false): boolean {
+    if (source.value !== 'none' && !replace) return false
+    if (replace && (bmsState.value !== 'idle' || solarState.value !== 'idle')) return false
     const session = loadRememberedSession()
+    if (replace) {
+      source.value = 'none'
+      resetReadings()
+      rememberedAt.value = null
+      rememberedStatus.value = null
+      rememberedBmsDeviceId = null
+      rememberedTrend = []
+      logbook.value = loadLogbook()
+    }
     if (!session) return false
     observations.clear()
     battery.value = session.battery

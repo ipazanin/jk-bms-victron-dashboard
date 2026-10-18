@@ -1,17 +1,4 @@
 <script setup lang="ts">
-/**
- * One session, in the reading order: claim, proof, evidence, moment, narrative, numbers.
- *
- * The ledger comes first because it is the answer; the coverage tape comes immediately after it
- * because it is what makes the ledger's window sentence checkable rather than a disclaimer; the
- * ribbon is the same claim with time added. Then the scrub readout, which is the thesis made
- * operable — the archive is the dashboard with a time control, so it is the real `ShuntAmmeter`
- * fed from a stored instant rather than a second instrument that happens to look similar.
- *
- * Nothing here re-runs the alarm engine. The entries carry the annunciator's own words as they
- * read at the time, and grading an hours-old spread against today's thresholds would annunciate a
- * past that never happened that way.
- */
 import { computed, ref, watch } from 'vue'
 
 import CoverageTape from './CoverageTape.vue'
@@ -23,6 +10,7 @@ import StatusChip from '../StatusChip.vue'
 import { COMPACT_QUERY } from '../../application/breakpoints'
 import { ampHoursSigned, clockTime, clockTimeWithSeconds, groupedCount } from '../../application/format'
 import { useHistoryBrowser } from '../../application/history/historyBrowser'
+import { useArchiveWorkspace } from '../../application/backup/useArchiveWorkspace'
 import { hashOf, navigate, route } from '../../application/route'
 import { useMediaQuery } from '../../application/useMediaQuery'
 import { deriveHouse } from '../../domain/dcBus'
@@ -30,7 +18,6 @@ import { MAX_SAMPLE_GAP_MS } from '../../domain/history/join'
 import type { PairedSample } from '../../domain/history/join'
 import type { SessionId, TimeWindow } from '../../domain/history/types'
 
-/** Optional because the route already carries it. Bind it when the shell has the id to hand. */
 const props = defineProps<{ id?: SessionId }>()
 
 const MS_PER_SECOND = 1000
@@ -39,14 +26,14 @@ const MS_PER_HOUR = 3_600_000
 const MS_PER_DAY = 86_400_000
 const BYTES_PER_MB = 1_000_000
 
-/** The cross-check agrees within the looser of an absolute floor and a proportional band: 2 Ah is
- *  below what a 1 Hz integral can resolve on a 280 Ah bank, and 10% is what a real day drifts. */
+// The BMS counter and the 1 Hz integral can drift within 2 Ah or 10%.
 const CROSS_CHECK_FLOOR_AH = 2
 const CROSS_CHECK_FRACTION = 0.1
 
 const TABLE_PAGE_ROWS = 240
 
 const browser = useHistoryBrowser()
+const { readOnly } = useArchiveWorkspace()
 const { loaded, loading, missing, failure, account, selection, exportSize, exportState } = browser
 
 const compact = useMediaQuery(COMPACT_QUERY)
@@ -55,12 +42,7 @@ const cursorAt = ref<number | null>(null)
 const confirmingDelete = ref(false)
 const tableStart = ref(0)
 
-/**
- * Which session this is, taken from the route rather than from a prop. Loading and unloading it
- * belongs to whatever owns the route: the decoded samples are tens of megabytes and the hold that
- * keeps pruning off them outlives this component, so a second owner here would fight the first.
- * All this view does with the id is reset what it has scrolled and scrubbed.
- */
+// The route owner loads the session and releases its decoded samples.
 const sessionId = computed<SessionId | null>(
   () => props.id || (route.value.name === 'session' ? route.value.id : null),
 )
@@ -88,11 +70,8 @@ const sessionMs = computed(() => {
   return Math.max(row.packSamples, row.solarSamples) * MS_PER_SECOND
 })
 
-/** Re-integrated over the brush when there is one, which is the whole point of the brush. */
 const ledger = computed(() => account.value?.ledger ?? null)
 
-/** Never the brushed runs: the tape is the control the brush is drawn on, so it has to keep
- *  showing the whole session or a selection could not be widened again. */
 const coverage = computed(() => record.value?.coverage ?? [])
 
 const solarSeen = computed(() => (record.value?.solarSamples ?? 0) > 0)
@@ -113,7 +92,6 @@ const identityLine = computed(() => {
   return `${info.model} fw ${info.softwareVersion}`
 })
 
-/** The window sentence, printed BEFORE the figures rather than as a footnote after them. */
 const windowSentence = computed(() => {
   const folded = ledger.value
   if (folded === null) return ''
@@ -131,22 +109,12 @@ const ledgerHeading = computed(() => {
   return `Ledger · ${clockTime(window.from)} → ${clockTime(window.to)}`
 })
 
-/** How long the pack took more than the panels gave. Null when it never did, which is the only
- *  case where the ledger draws no unmeasured bar and there is nothing to explain. */
 const foreignMs = computed(() => {
   const folded = ledger.value
   return folded === null || folded.foreignAhFloor <= 0 ? null : folded.foreignMs
 })
 
-/**
- * Our integral against the BMS's own coulomb counter, over a deliberately different window: the
- * whole pack-up time, since pack current is known whenever the BMS is up. It reads the stored
- * ledger and never the brushed one — a brush narrows what is counted, and the caption promising
- * the whole session would then be printed over a figure taken from part of it.
- *
- * It uses remainingCapacity rather than stateOfCharge, which quantises at 1%: on a 280 Ah bank
- * that is 2.8 Ah, and a `Δ 0.3 Ah ✓` claim would be beyond what the measurement can support.
- */
+// Remaining capacity avoids the 1% quantization of state of charge.
 const crossCheck = computed(() => {
   const folded = record.value?.ledger ?? null
   if (folded === null) return null
@@ -172,10 +140,6 @@ const crossCheck = computed(() => {
   }
 })
 
-/**
- * The deepest instant of the session, which is what the readout shows with no cursor: it is the
- * one moment a reader would otherwise have to hunt for, and the session already knows it.
- */
 const deepest = computed<PairedSample | null>(() => {
   const rows = loaded.value?.timeline ?? []
   let found: PairedSample | null = null
@@ -205,7 +169,6 @@ const activeHouse = computed(() => {
   return deriveHouse(pack.currentA, solarCurrent, pack.packVoltageV)
 })
 
-/** Shaped once per page rather than in the template, where each cell would re-difference the row. */
 const tableRows = computed(() => {
   const rows = loaded.value?.timeline ?? []
   return rows.slice(tableStart.value, tableStart.value + TABLE_PAGE_ROWS).map((row) => {
@@ -239,7 +202,6 @@ function onScrub(at: number | null): void {
   cursorAt.value = at
 }
 
-/** One stored instant at a time, for a reader who cannot land a fingertip on a second. */
 function stepCursor(direction: -1 | 1): void {
   const rows = loaded.value?.timeline ?? []
   if (rows.length === 0) return
@@ -249,10 +211,6 @@ function stepCursor(direction: -1 | 1): void {
   cursorAt.value = rows[Math.min(rows.length - 1, Math.max(0, index + direction))].at
 }
 
-/**
- * Slides the read window by half its width. The store returns at most a day per read, so a session
- * longer than that is browsed a window at a time rather than hydrated whole.
- */
 function shiftWindow(direction: 'earlier' | 'later'): void {
   const session = sessionWindow.value
   const shown = loaded.value?.window
@@ -268,7 +226,7 @@ function shiftWindow(direction: 'earlier' | 'later'): void {
 
 async function remove(): Promise<void> {
   const id = sessionId.value
-  if (id === null) return
+  if (id === null || readOnly.value) return
   await browser.deleteSession(id)
   navigate({ name: 'log' })
 }
@@ -292,8 +250,6 @@ function indexNear(at: number): number {
   return low
 }
 
-/** Null inside a real hole: the nearest stored row is not a reading about this instant, and the
- *  readout must go blank rather than show a sample from minutes away as though it were now. */
 function sampleAt(at: number): PairedSample | null {
   const rows = loaded.value?.timeline ?? []
   if (rows.length === 0) return null
@@ -317,7 +273,6 @@ function dayWords(at: number): string {
   })
 }
 
-/** `12 h 24 m`, `41 min`, `8 m` — the form that sits inside a sentence. */
 function spacedSpan(elapsedMs: number): string {
   if (elapsedMs < MS_PER_MINUTE) return `${Math.round(elapsedMs / MS_PER_SECOND)} s`
   if (elapsedMs < MS_PER_HOUR) return `${Math.round(elapsedMs / MS_PER_MINUTE)} min`
@@ -328,7 +283,6 @@ function spacedSpan(elapsedMs: number): string {
   return `${hours} h ${minutes} m`
 }
 
-/** `12h 24m`, for the header, where the span sits between two clock times. */
 function tightSpan(elapsedMs: number): string {
   const minutes = Math.round(elapsedMs / MS_PER_MINUTE)
   const hours = Math.floor(minutes / 60)
@@ -371,7 +325,7 @@ function tightSpan(elapsedMs: number): string {
         >
           Download JSON
         </button>
-        <button type="button" class="action" @click="confirmingDelete = true">Delete session</button>
+        <button v-if="!readOnly" type="button" class="action" @click="confirmingDelete = true">Delete session</button>
         <button type="button" class="action" @click="navigate({ name: 'dashboard' })">
           Back to live
         </button>
@@ -380,7 +334,7 @@ function tightSpan(elapsedMs: number): string {
       <p v-if="exportState === 'done'" class="copy" role="status">Downloaded.</p>
       <p v-else-if="exportNote" class="copy">{{ exportNote }}</p>
 
-      <div v-if="confirmingDelete && record" class="confirm">
+      <div v-if="!readOnly && confirmingDelete && record" class="confirm">
         <p class="copy">
           Delete this session? {{ spacedSpan(sessionMs) }}, {{ groupedCount(totalSamples) }} samples.
           This cannot be undone.
@@ -559,9 +513,6 @@ function tightSpan(elapsedMs: number): string {
 </template>
 
 <style scoped>
-/* A vertical stack of elevated cards on the page plane. The header reads as an intro above them;
-   the ledger, coverage tape, ribbon, scrub readout, entries and table are each a card, separated by
-   the stack gap rather than the 1px rules that used to divide them. */
 .session {
   --stack-gap: clamp(0.75rem, 1.5vw, 1.25rem);
   display: flex;

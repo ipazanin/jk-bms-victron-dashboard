@@ -1,0 +1,10 @@
+export type ArchivePreferenceKey =
+  | 'shunt.theme'
+  | 'shunt.sidebar'
+  | 'shunt.statsPreferences'
+  | 'shunt.rememberedSession'
+  | 'shunt.logbook'
+  | 'shunt.lastBmsDevice'
+  | 'shunt.lastSolarController'
+  | 'shunt.rejoinArmed'
+  | 'victron.advertisementKey'

@@ -146,6 +146,30 @@ describe('remembered session restore', () => {
     expect(telemetry.source.value).toBe('none')
     expect(telemetry.battery.value).toBeNull()
   })
+
+  it('applies an imported saved snapshot immediately without treating it as live', () => {
+    saveRememberedSession(session({ battery: battery({ current: -4 }) }))
+    telemetry.restoreRemembered()
+    const imported = session({ battery: battery({ current: -9 }), capturedAt: Date.now() - 86_400_000 })
+    saveRememberedSession(imported)
+
+    expect(telemetry.restoreRemembered(true)).toBe(true)
+    expect(telemetry.source.value).toBe('remembered')
+    expect(telemetry.battery.value?.current).toBe(-9)
+    expect(telemetry.rememberedAt.value).toBe(imported.capturedAt)
+    expect(telemetry.recording.value.sessionId).toBeNull()
+  })
+
+  it('clears the previous remembered view when imported settings have no saved snapshot', () => {
+    saveRememberedSession(session())
+    telemetry.restoreRemembered()
+    localStorage.removeItem(KEY)
+
+    expect(telemetry.restoreRemembered(true)).toBe(false)
+    expect(telemetry.source.value).toBe('none')
+    expect(telemetry.battery.value).toBeNull()
+    expect(telemetry.rememberedAt.value).toBeNull()
+  })
 })
 
 describe('failed connect falls back to the remembered view', () => {

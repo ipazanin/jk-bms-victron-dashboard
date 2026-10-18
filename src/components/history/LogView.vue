@@ -1,16 +1,4 @@
 <script setup lang="ts">
-/**
- * The archive, read from the top.
- *
- * One scrollable column, newest first, grouped by device. No search, no filters, no pagination — a
- * log is read from the top, and a control that hides rows is a control that can hide the row the
- * reader came for.
- *
- * Every unavailable state names its real cause. A generic empty state here would be the page's
- * biggest lie: a browser that cannot talk to Bluetooth at all and a browser whose storage is
- * blocked both show nothing, and the two need entirely different sentences from a reader who is
- * trying to work out whether the boat has a problem or the laptop does.
- */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import DeviceGroup from './DeviceGroup.vue'
@@ -18,32 +6,34 @@ import LogTabs from './LogTabs.vue'
 import StorageLine from './StorageLine.vue'
 import { useHistoryBrowser } from '../../application/history/historyBrowser'
 import { useTelemetry } from '../../application/telemetry'
+import { useArchiveWorkspace } from '../../application/backup/useArchiveWorkspace'
+import { hashOf } from '../../application/route'
 import type { DeviceKey } from '../../domain/history/types'
 
 const MS_PER_HOUR = 3_600_000
 const MS_PER_MINUTE = 60_000
-/** Open sessions grow in the list, and a minute is the finest figure any row prints. */
 const TICK_MS = 30_000
 
 const browser = useHistoryBrowser()
+const { readOnly, selected } = useArchiveWorkspace()
+const connectHref = hashOf({ name: 'connect' })
 const { capabilities } = useTelemetry()
 
-const now = ref(Date.now())
+const currentTime = ref(Date.now())
+const now = computed(() => selected.value?.exportedAt ?? currentTime.value)
 let timer: ReturnType<typeof setInterval> | undefined
 
 onMounted(() => {
   void browser.refresh().catch(() => undefined)
-  timer = setInterval(() => (now.value = Date.now()), TICK_MS)
+  timer = setInterval(() => (currentTime.value = Date.now()), TICK_MS)
 })
 
 onUnmounted(() => {
   if (timer !== undefined) clearInterval(timer)
 })
 
-// Destructured so the template reads them as top-level refs, which `<script setup>` unwraps.
 const { availability, groups, archive, usage, missing, failure } = browser
 
-/** Null while the storage probe has not answered, which is not the same as unavailable. */
 const blocked = computed(() => {
   const answer = availability.value
   if (answer === null || answer.usable) return null
@@ -56,10 +46,9 @@ const totals = computed(() => {
 })
 
 async function rename(key: DeviceKey, label: string | null): Promise<void> {
-  await browser.renameDevice(key, label)
+  if (!readOnly.value) await browser.renameDevice(key, label)
 }
 
-/** `61 h 12 m`. Minutes are padded so totals down the page rule themselves. */
 function spacedTotal(elapsedMs: number): string {
   const hours = Math.floor(elapsedMs / MS_PER_HOUR)
   const minutes = Math.round((elapsedMs % MS_PER_HOUR) / MS_PER_MINUTE)
@@ -73,7 +62,7 @@ function spacedTotal(elapsedMs: number): string {
     <header class="head">
       <h2 class="head-title">Log</h2>
       <p class="copy head-sub">
-        Every session this browser recorded. 1 Hz, exactly what the radios reported.
+        Sessions from {{ selected?.source.label ?? 'this browser' }}. 1 Hz, exactly what the radios reported.
       </p>
       <p v-if="archive.sessions > 0" class="readout totals">{{ totals }}</p>
     </header>
@@ -81,7 +70,7 @@ function spacedTotal(elapsedMs: number): string {
     <LogTabs />
 
     <div class="body">
-      <StorageLine class="card" :usage="usage" :availability="availability" />
+      <StorageLine v-if="!readOnly" class="card" :usage="usage" :availability="availability" />
 
       <p v-if="missing !== null" class="notice copy card" role="status">
         That session was dropped to make room.
@@ -131,7 +120,11 @@ function spacedTotal(elapsedMs: number): string {
         v-if="groups.length === 0 && blocked === null && availability !== null"
         class="card state-card"
       >
-        <template v-if="capabilities.canConnect">
+        <template v-if="readOnly">
+          <p class="state-title">No sessions in this saved copy.</p>
+          <p class="copy state">Device history may still be available in Stats &amp; history.</p>
+        </template>
+        <template v-else-if="capabilities.canConnect">
           <p class="state-title">No sessions yet.</p>
           <p class="copy state">
             Recording starts on its own, the moment the BMS sends its first cell frame.
@@ -140,9 +133,8 @@ function spacedTotal(elapsedMs: number): string {
         <template v-else>
           <p class="state-title">Nothing recorded in this browser.</p>
           <p class="copy state">
-            The log lives in this browser and nowhere else, and this browser cannot talk to the
-            hardware — so nothing was ever recorded here. It also cannot read what Chrome recorded on
-            the same machine.
+            This browser cannot connect directly to the radios. Open an archive exported from another
+            browser in <a :href="connectHref">Data &amp; backup</a> to browse its history here.
           </p>
         </template>
       </div>
@@ -151,8 +143,6 @@ function spacedTotal(elapsedMs: number): string {
 </template>
 
 <style scoped>
-/* A vertical stack of elevated cards on the page plane: the intro sits above, the storage line,
-   state notices and per-device lists are cards separated by the stack gap rather than 1px rules. */
 .log {
   --stack-gap: clamp(0.75rem, 1.5vw, 1.25rem);
   container-type: inline-size;
@@ -180,8 +170,6 @@ function spacedTotal(elapsedMs: number): string {
   color: var(--ink-secondary);
 }
 
-/* The cards go full width of the workspace and each supplies its own padding, so the device list
-   keeps exactly the horizontal room it had before it was carded. */
 .body {
   display: flex;
   flex-direction: column;

@@ -1,32 +1,20 @@
 <script setup lang="ts">
-/**
- * One watch, as a statement and as a place in the day.
- *
- * Line one answers what happened; line two answers when. The clock band runs noon to noon rather
- * than midnight to midnight, so an overnight is one contiguous block through the middle instead of
- * two blocks at opposite edges that the eye has to read right-to-left and then wrap — against a
- * ruler that reads left-to-right and whose halves are different dates.
- *
- * Coverage rides inside the band as structure: bar height and interruption, in ink tokens. Shades
- * of near-black on a near-black surface measure under 1.6:1 and are not a texture at all on a
- * phone in daylight, and coverage is an epistemic state rather than a fourth entity, so it must
- * not take a hue either.
- *
- * The band keeps full width at every breakpoint. A forty-minute alternator run is a few pixels
- * wide at desktop and disappears entirely if the column is allowed to narrow, which would delete
- * the one mark that says the ledger's window is not the whole session.
- */
+
 import { computed } from 'vue'
 
 import { ampHoursSigned, clockTime } from '../../application/format'
+import { useArchiveWorkspace } from '../../application/backup/useArchiveWorkspace'
+
 import type { SessionListing } from '../../application/history/port'
 import { hashOf } from '../../application/route'
 import { clockBandFor, coverageSegments, linearScale } from '../../domain/history/geometry'
 import type { CoverageClass, CoverageRun, SessionRecord } from '../../domain/history/types'
 
+const { readOnly } = useArchiveWorkspace()
+
 const props = defineProps<{
   listing: SessionListing
-  /** The caller's clock, frozen per render pass, so an open session's length is its own concern. */
+
   now: number
 }>()
 
@@ -35,8 +23,6 @@ const MS_PER_MINUTE = 60_000
 const MS_PER_HOUR = 3_600_000
 const MS_PER_DAY = 86_400_000
 
-/** Percent of the band. Below this a run is a hairline nobody can find, which is worse than one
- *  drawn a shade too generously. */
 const MIN_RUN_PERCENT = 0.4
 
 const COVERAGE_NAMES: Readonly<Record<CoverageClass, string>> = {
@@ -61,10 +47,6 @@ const lengthMs = computed(() => {
 
 const band = computed(() => clockBandFor(record.value.startedAt, endedAt.value))
 
-/**
- * The runs, in band coordinates. A pruned head is drawn as no data rather than left blank: the
- * session did start there, and blank would read as a session that began later than it did.
- */
 const segments = computed(() => {
   const window = { from: band.value.from, to: band.value.to }
   const scale = linearScale(window.from, window.to, 0, 100)
@@ -105,7 +87,6 @@ const coverageSentence = computed(() => {
   return parts.length === 0 ? 'No coverage recorded.' : `Coverage: ${parts.join(', ')}.`
 })
 
-/** `Sat 12 Jul`. Weekday and month are the two things that place a watch without a year. */
 function dayWords(at: number): string {
   return new Date(at).toLocaleDateString(undefined, {
     weekday: 'short',
@@ -114,7 +95,6 @@ function dayWords(at: number): string {
   })
 }
 
-/** `12h24m`, `26m` — the tightest form, for the column that has the least room. */
 function compactSpan(elapsedMs: number): string {
   const minutes = Math.round(elapsedMs / MS_PER_MINUTE)
   const hours = Math.floor(minutes / 60)
@@ -122,7 +102,6 @@ function compactSpan(elapsedMs: number): string {
   return `${hours}h${String(minutes % 60).padStart(2, '0')}m`
 }
 
-/** `1 d 4 h 12 m`, `2 h 14 m`, `8 m` — the form that sits inside a sentence. */
 function spacedSpan(elapsedMs: number): string {
   const days = Math.floor(elapsedMs / MS_PER_DAY)
   const hours = Math.floor((elapsedMs % MS_PER_DAY) / MS_PER_HOUR)
@@ -132,7 +111,6 @@ function spacedSpan(elapsedMs: number): string {
   return `${minutes} m`
 }
 
-/** `00:41:12`, for a session that has not finished and so has no length yet. */
 function stopwatch(elapsedMs: number): string {
   const total = Math.max(0, Math.floor(elapsedMs / MS_PER_SECOND))
   const hours = Math.floor(total / 3600)
@@ -157,7 +135,7 @@ function stateOfChargeWords(row: SessionRecord): string {
 
     <span class="cell figure length">
       <span class="cell-label">Length</span>
-      <span v-if="record.state === 'open'" class="live">Recording · {{ stopwatch(lengthMs) }}</span>
+      <span v-if="record.state === 'open'" class="live">{{ readOnly ? 'Open at capture' : 'Recording' }} · {{ stopwatch(lengthMs) }}</span>
       <span v-else>{{ compactSpan(lengthMs) }}</span>
     </span>
 

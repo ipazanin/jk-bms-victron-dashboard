@@ -1,29 +1,4 @@
 <script setup lang="ts">
-/**
- * What the two devices kept for themselves, scoped to a range the reader chooses.
- *
- * Every figure on this page comes off one device's own memory. The BMS keeps a ring — one snapshot
- * an hour, held on the pack until a read brings it here — and the SmartSolar keeps a daily register
- * per day for about a month, fetched over its 306b tunnel. Both merge into per-device ledgers that
- * only ever grow. Sessions are the Log tab's subject and never this one's, so nothing here is folded
- * from a recording and nothing here waits for one.
- *
- * The two halves of the page are not symmetrical, and the asymmetry is the point. A pack record is
- * an instant on a clock face this browser can only bound, so everything above it carries a
- * correction and an uncertainty. A Victron record is a calendar day the controller had already
- * closed, integrated by the charger itself second by second — so it needs no correction, carries no
- * uncertainty, and its energy figures are totals where the pack's are floors.
- *
- * Wall time is derived rather than stored, and it arrives with the uncertainty that produced it. The
- * provenance line above the cards states that once for the whole page, because every record on one
- * ledger shares one correction — a badge per record would repeat the same sentence eight hundred
- * times and read as though the records disagreed.
- *
- * Below the range-scoped cards are the two facts that belong to the pack rather than to a window:
- * the lifetime counters off whatever frame is on the instruments now, and the event logbook from the
- * last time this browser read one. Last of all is the read receipt: what the most recent stored-log
- * read carried, what filing it did, and where the pack's clock stands against this browser's.
- */
 import { computed, onMounted, ref, watch } from 'vue'
 
 import { browserStandardUtcOffsetMinutes } from '../../application/browserZone'
@@ -49,8 +24,11 @@ import { loadStatsPreferences, saveStatsPreferences } from '../../application/hi
 import { bucketUnitFor, windowFor } from '../../application/history/statsRange'
 import type { RangeKind } from '../../application/history/statsRange'
 import { eventWallTime } from '../../application/logbook'
+import type { StoredLogbook } from '../../application/logbook'
+import type { RememberedSession } from '../../application/rememberedSession'
 import { hashOf } from '../../application/route'
 import { useTelemetry } from '../../application/telemetry'
+import { useArchiveWorkspace } from '../../application/backup/useArchiveWorkspace'
 import type { DetailLogOutcome } from '../../domain/bms/DetailLogOutcome'
 import { calendarDateNow } from '../../domain/history/calendarDays'
 import {
@@ -95,27 +73,37 @@ const {
   source,
 } = telemetry
 const browser = useHistoryBrowser()
+const { readOnly, selected, selectedSourceId } = useArchiveWorkspace()
+
+const savedInstruments = computed<RememberedSession | null>(() => {
+  const preference = selected.value?.preferences.find((saved) => saved.key === 'shunt.rememberedSession')
+  if (preference === undefined) return null
+  try {
+    return JSON.parse(preference.value) as RememberedSession
+  } catch {
+    return null
+  }
+})
+
+const sourceLogbook = computed<StoredLogbook | null>(() => {
+  if (!readOnly.value) return logbook.value
+  const preference = selected.value?.preferences.find((saved) => saved.key === 'shunt.logbook')
+  if (preference === undefined) return null
+  try {
+    return JSON.parse(preference.value) as StoredLogbook
+  } catch {
+    return null
+  }
+})
 
 const MS_PER_SECOND = 1000
 const SAMPLING_PERIOD_MS = PACK_SAMPLING_PERIOD_SECONDS * MS_PER_SECOND
-/** Under this the correction is tighter than a printed minute, so the ± is dropped rather than
- *  rounded to zero. The pack timeline uses the same floor for its own bracket. */
 const UNCERTAINTY_FLOOR_MS = 60_000
 
-/**
- * The default is the week, so a freshly read ledger lands as bars on first paint. `now` is frozen
- * and refreshed only when a range is picked or a read lands, never on a timer: a window recomputed
- * every second would reflow the whole page and trip the steadiness check.
- */
 let preferences = loadStatsPreferences()
 const range = ref<RangeKind>(preferences.range)
-const now = ref(Date.now())
+const now = ref(selected.value?.exportedAt ?? Date.now())
 
-/**
- * The two dates behind the Custom range, owned here so the filter stays a pure control. Defaults to
- * the last seven days — the same span the Week preset covers — so switching to Custom moves nothing
- * until the reader picks a date.
- */
 const customWindow = ref<TimeWindow>(
   preferences.custom ?? { from: Date.now() - 6 * 86_400_000, to: Date.now() },
 )
@@ -125,37 +113,29 @@ onMounted(() => {
 })
 
 function selectRange(kind: RangeKind): void {
-  now.value = Date.now()
+  now.value = selected.value?.exportedAt ?? Date.now()
   range.value = kind
   preferences = {
     ...preferences,
     range: kind,
     custom: kind === 'custom' ? customWindow.value : preferences.custom,
   }
-  saveStatsPreferences(preferences)
+  if (!readOnly.value) saveStatsPreferences(preferences)
 }
 
 function selectCustom(window: TimeWindow): void {
   customWindow.value = window
-  now.value = Date.now()
+  now.value = selected.value?.exportedAt ?? Date.now()
   preferences = { ...preferences, custom: window }
-  saveStatsPreferences(preferences)
+  if (!readOnly.value) saveStatsPreferences(preferences)
 }
 
 function selectPack(key: DeviceKey): void {
   packKey.value = key
   preferences = { ...preferences, pack: key }
-  saveStatsPreferences(preferences)
+  if (!readOnly.value) saveStatsPreferences(preferences)
 }
 
-// ── which device ────────────────────────────────────────────────────────────
-
-/**
- * Both radios file their stored history in the same archive, so the one list carries both and each
- * row says which wrote it. They are split here because the two halves of this page fold different
- * row types out of different devices — the pack selector must never offer a controller, and the
- * solar cards must never be handed a pack's ring.
- */
 const ledgers = computed(() => browser.ringLedgers.value)
 const packLedgers = computed(() => ledgers.value.filter((row) => row.kind === 'pack'))
 const solarLedgers = computed(() => ledgers.value.filter((row) => row.kind === 'solar'))
@@ -163,8 +143,12 @@ const solarLedgers = computed(() => ledgers.value.filter((row) => row.kind === '
 const packKey = ref<DeviceKey | null>(null)
 const solarKey = ref<DeviceKey | null>(null)
 
-/** The list arrives most recently read first, which is the default this page wants. A key that no
- *  longer lists — a ledger deleted here or in another tab — falls back to the same rule. */
+watch(selectedSourceId, () => {
+  packKey.value = null
+  solarKey.value = null
+  now.value = selected.value?.exportedAt ?? Date.now()
+})
+
 watch(
   packLedgers,
   (rows) => {
@@ -202,32 +186,23 @@ watch(
   { immediate: true },
 )
 
-/** A read that landed is new data and a new clock measurement, so the frozen window is re-taken. */
 watch(detailLog, () => {
-  now.value = Date.now()
+  now.value = selected.value?.exportedAt ?? Date.now()
 })
 
 watch(solarHistory, () => {
-  now.value = Date.now()
+  now.value = selected.value?.exportedAt ?? Date.now()
 })
-
-// ── the ledger, and the clock that dates it ─────────────────────────────────
 
 const ledger = computed(() => browser.ringLedger.value)
 const records = computed(() => ledger.value?.records ?? [])
 
-/**
- * Null only before a ledger is in hand. The browser's standard offset stands in for the pack's
- * installation zone until the owner confirms one, and the context says which of the two it carries.
- */
 const clock = computed(() => {
   const held = ledger.value
   if (held === null) return null
   return ringClockContextOf(held, browserStandardUtcOffsetMinutes(now.value))
 })
 
-/** The oldest instant this ledger can place, for the All range. Records the clock cannot place are
- *  counted in every total regardless of window, so leaving them out of the span costs nothing. */
 const oldestDatedAt = computed(() => {
   const context = clock.value
   if (context === null) return null
@@ -258,19 +233,11 @@ const track = computed(() =>
   clock.value === null ? null : ringTrack(records.value, clock.value, rangeWindow.value),
 )
 
-/**
- * The step trace is drawn wherever the buckets are days, which is the same span it stays legible
- * over — roughly a month and a half of hourly records. Past that it is thousands of steps in a few
- * hundred pixels and the bars are the honest instrument.
- */
 const showTrace = computed(() => bucketUnit.value === 'day')
-
-// ── the controller's own days ───────────────────────────────────────────────
 
 const solarLedger = computed(() => browser.solarLedger.value)
 const solarDays = computed(() => solarLedger.value?.solarDays ?? [])
 
-/** The oldest day the controller's ledger holds, which is what the All range spans on this side. */
 const oldestSolarDate = computed(() => {
   let oldest: string | null = null
   for (const row of solarDays.value) {
@@ -279,17 +246,6 @@ const oldestSolarDate = computed(() => {
   return oldest
 })
 
-/**
- * The same range the pack's cards use, said in calendar days.
- *
- * A Victron record names a day and never an instant, so the window it is folded over has to be a
- * pair of dates rather than a pair of milliseconds — and the conversion happens once, here, at the
- * boundary where a reader's chosen range meets a device that counts in days.
- *
- * All is the one range that cannot be shared: it spans a ledger, and these are two ledgers with two
- * backlogs. The pack's is bounded by a ring the BMS overwrites; the controller's by thirty-one
- * registers. Reaching for `oldestDatedAt` here would size the solar cards by the wrong device.
- */
 const solarWindow = computed<SolarDayWindow>(() => {
   const window = rangeWindow.value
   const to = calendarDateNow(window.to)
@@ -301,16 +257,12 @@ const solarYieldDays = computed(() => solarYieldPerDay(solarDays.value, solarWin
 const solarStageDays = computed(() => solarChargeStagesPerDay(solarDays.value, solarWindow.value))
 const solarSummary = computed(() => solarRangeSummary(solarDays.value, solarWindow.value))
 
-/** Days on which the charger logged a fault of its own — its error history, not this app's. */
 const solarErrorNote = computed(() => {
   const days = solarSummary.value.daysWithError
   if (days === 0) return null
   return `The charger logged an error of its own on ${days} day${days === 1 ? '' : 's'} in this range. Its codes are in the day records; nothing here interprets them.`
 })
 
-// ── what the page says about its own clock ──────────────────────────────────
-
-/** The stretch the pack's clock is in now. Segments tile seq space, so the last is always the one. */
 const currentSegment = computed(() => clock.value?.segments[clock.value.segments.length - 1] ?? null)
 
 const clockError = computed(() => {
@@ -327,13 +279,14 @@ const clockMidpointMs = computed(() => {
   return error === null ? null : (error.lowMs + error.highMs) / 2
 })
 
-/** One sentence about where every time on this page came from. */
 const provenance = computed(() => {
   const context = clock.value
   const error = clockError.value
   if (context === null) return null
   if (error === null) {
-    return 'No read has placed the pack against your own clock yet, so nothing below is dated. Read the stored log and the correction follows.'
+    return readOnly.value
+      ? 'No saved read places these records against a wall clock. Undated records are included in totals.'
+      : 'No read has placed the pack against your own clock yet, so nothing below is dated. Read the stored log and the correction follows.'
   }
 
   const rewrites = context.calibrations.filter((each) => each.stepSeconds !== 0).length
@@ -363,10 +316,6 @@ const undatedNote = computed(() => {
   return `${undated} record${undated === 1 ? ' falls' : 's fall'} in a stretch whose clock this browser cannot place. ${undated === 1 ? 'It is' : 'They are'} counted in the totals and left out of the day buckets.`
 })
 
-// ── what the fold refused, each on its own line ─────────────────────────────
-
-/** How each refusal is worded. The counter snap is the pack correcting itself and reads as such;
- *  the other two are stretches whose two ends are not an hour apart and are not comparable. */
 const REFUSAL_COPY: Readonly<Record<UnattributedStep, (steps: number, ah: string) => string>> = {
   'counter-snap': (steps, ah) =>
     `The pack reset its own charge counter ${steps === 1 ? 'once' : `${steps} times`} in this range, ${ah} of it. That is the BMS correcting itself at the end of a charge, so it is left out of the figures above.`,
@@ -384,7 +333,6 @@ const refusals = computed(() => {
     .map((kind) => ({ kind, text: REFUSAL_COPY[kind](tallies[kind].steps, ampHours(tallies[kind].ah, 0)) }))
 })
 
-/** How far back this browser's copy goes, and whether the pack or the budget set that edge. */
 const ledgerStart = computed(() => {
   const held = ledger.value
   const context = clock.value
@@ -398,14 +346,11 @@ const ledgerStart = computed(() => {
     : `Kept records start ${when}. Older ones were dropped to stay inside the archive's budget.`
 })
 
-// ── lifetime counters ────────────────────────────────────────────────────────
-
 const connectHref = hashOf({ name: 'connect' })
 
-/** Present whenever a pack is on the instruments — live, remembered or a browsed session. */
 const lifetime = computed(() => {
-  const pack = battery.value
-  const info = device.value
+  const pack = readOnly.value ? savedInstruments.value?.battery ?? null : battery.value
+  const info = readOnly.value ? savedInstruments.value?.device ?? null : device.value
   if (pack === null && info === null) return null
   return {
     cycleCount: pack?.cycleCount ?? null,
@@ -416,8 +361,6 @@ const lifetime = computed(() => {
   }
 })
 
-// ── device logbook ────────────────────────────────────────────────────────────
-
 const stamp = new Intl.DateTimeFormat(undefined, {
   day: 'numeric',
   month: 'short',
@@ -427,9 +370,8 @@ const stamp = new Intl.DateTimeFormat(undefined, {
 
 const dayStamp = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short' })
 
-/** Newest first, each with a real date when the boot instant is known, else elapsed-since-boot. */
 const logbookRows = computed(() => {
-  const stored = logbook.value
+  const stored = sourceLogbook.value
   if (stored === null) return []
   return [...stored.events].reverse().map((event) => {
     const wall = eventWallTime(stored, event)
@@ -442,19 +384,11 @@ const logbookRows = computed(() => {
 })
 
 const logbookAge = computed(() => {
-  const stored = logbook.value
+  const stored = sourceLogbook.value
   if (stored === null) return null
   return stamp.format(stored.fetchedAt)
 })
 
-// ── the read receipt ─────────────────────────────────────────────────────────
-
-/**
- * The pack's counter rendered exactly as the pack holds it — read with UTC getters, no zone
- * applied, so it spells the pack's own zone on standard time. It is shown beside the resolved
- * instant because it is the one figure here that is a fact about the device rather than about the
- * offset the caller supplied.
- */
 const packCounterFace = new Intl.DateTimeFormat('en-GB', {
   timeZone: 'UTC',
   year: 'numeric',
@@ -466,7 +400,6 @@ const packCounterFace = new Intl.DateTimeFormat('en-GB', {
   hourCycle: 'h23',
 })
 
-/** Everything the outcome sentence needs, from either a live transfer or a stored journal row. */
 interface TransportFigures {
   readonly outcome: DetailLogOutcome
   readonly elapsedMs: number
@@ -477,17 +410,9 @@ interface TransportFigures {
   readonly recordCount: number
 }
 
-/**
- * The newest read, preferring the one this tab just took.
- *
- * A transfer dies on navigation and the journal does not, so the card is fed from the ledger
- * whenever there is no live transfer in hand — which is what makes the receipt worth reopening the
- * page for. The per-frame headers and the layout check below need the decoded records and exist
- * only while the transfer does.
- */
 const lastRead = computed<{ readonly at: number | null; readonly figures: TransportFigures } | null>(
   () => {
-    const transfer = detailLog.value
+    const transfer = readOnly.value ? null : detailLog.value
     if (transfer !== null) {
       return {
         at: null,
@@ -537,9 +462,8 @@ function describeOutcome(figures: TransportFigures): string {
   return `${figures.logFrameCount} log frames, ${figures.recordCount} records, ${figures.notificationBytes} bytes in ${seconds} s.`
 }
 
-/** What filing that read did, from this tab's own merge when it has one, else from the journal. */
 const filingSentence = computed(() => {
-  const merged = ringIngest.value
+  const merged = readOnly.value ? null : ringIngest.value
   const journaled = ledger.value?.reads[0]
   const figures =
     merged !== null
@@ -575,17 +499,16 @@ const filingSentence = computed(() => {
   return parts.length === 0 ? null : parts.join(' ')
 })
 
-/** Why a read is not in the archive: the pack could not be named, or the archive refused the write. */
 const filingFailure = computed(() => {
+  if (readOnly.value) return null
   const note = ringFilingNote.value
   if (note !== null) return note
   const failure = ringIngest.value?.failure ?? null
   return failure === null ? null : `The archive could not keep this read: ${failure}.`
 })
 
-/** One line per frame, so a whole burst's chunking can be read off a single run. */
 const frameLines = computed(() => {
-  const transfer = detailLog.value
+  const transfer = readOnly.value ? null : detailLog.value
   if (transfer === null) return []
   return transfer.frames.map((header, position) => ({
     key: position,
@@ -593,20 +516,12 @@ const frameLines = computed(() => {
   }))
 })
 
-/** By the pack's own counter rather than by ring index, which wraps and can be read out of order. */
 const newestRecord = computed(() => {
-  const transfer = detailLog.value
+  const transfer = readOnly.value ? null : detailLog.value
   if (transfer === null || transfer.records.length === 0) return null
   return transfer.records.reduce((newest, record) => (record.packClockMs > newest.packClockMs ? record : newest))
 })
 
-/**
- * How far behind the pack this browser's copy has fallen, and what that costs.
- *
- * Measured off the journal rather than off a record's resolved time: a successful read always
- * carries the ring's head, so the read's own wall clock states the same age without borrowing any
- * of the pack clock's uncertainty to do it.
- */
 const staleness = computed(() => {
   const answered = ledger.value?.reads.find((read) => read.outcome === 'records-read')
   if (answered === undefined) return 'No stored log has been read into this browser yet.'
@@ -614,24 +529,12 @@ const staleness = computed(() => {
   return `Last read ${relativeAge(answered.observedAt, now.value)} — about ${since} record${since === 1 ? '' : 's'} since.`
 })
 
-// ── the controller's read receipt ────────────────────────────────────────────
-
-/**
- * Reading the controller's history costs the live feed, so it is rationed rather than withheld.
- *
- * A sweep opens a GATT connection, and the SmartSolar accepts exactly one BLE client at a time and
- * changes its advertising while connected — so for as long as the tunnel is open, VictronConnect
- * cannot reach the charger and the Instant Readout advertisements the dashboard's live solar figures
- * come from stop arriving. The dashboard spends that hole on its own only when the stored copy is a
- * day behind and this browser still holds a grant for the controller; the button is the same sweep
- * asked for by name, and the copy either side of it says what it costs.
- */
 // `canConnect` only says the API exists. A desktop with its radio switched off passes that and
 // fails at the chooser, so the adapter is asked too — `null` is a browser that will not say, and a
 // button withheld on a maybe would be worse than one that tries. The background sweep rejoins a
 // remembered controller instead of raising a chooser, so this test is the button's alone.
 const canReadSolar = computed(
-  () => capabilities.canConnect && adapterOn.value !== false && !solarHistoryReading.value,
+  () => !readOnly.value && capabilities.canConnect && adapterOn.value !== false && !solarHistoryReading.value,
 )
 
 const solarDisabledReason = computed(() => {
@@ -649,7 +552,6 @@ const solarDisabledReason = computed(() => {
   return null
 })
 
-/** Everything the outcome sentence needs, from either a live sweep or a stored journal row. */
 interface SolarTransportFigures {
   readonly outcome: SolarHistoryFetchOutcome
   readonly elapsedMs: number
@@ -659,15 +561,11 @@ interface SolarTransportFigures {
   readonly daysReceived: number
 }
 
-/**
- * The newest sweep, preferring the one this tab just took. A transfer dies on navigation and the
- * journal does not, which is what makes the receipt worth reopening the page for.
- */
 const solarLastRead = computed<{
   readonly at: number | null
   readonly figures: SolarTransportFigures
 } | null>(() => {
-  const transfer = solarHistory.value
+  const transfer = readOnly.value ? null : solarHistory.value
   if (transfer !== null) {
     return {
       at: null,
@@ -720,9 +618,8 @@ function describeSolarOutcome(figures: SolarTransportFigures): string {
   return `${figures.daysReceived} days and the lifetime totals, ${figures.notificationBytes} bytes in ${seconds} s.`
 }
 
-/** What filing that sweep did, from this tab's own merge when it has one, else from the journal. */
 const solarFilingSentence = computed(() => {
-  const merged = solarHistoryIngest.value
+  const merged = readOnly.value ? null : solarHistoryIngest.value
   const journaled = solarLedger.value?.solarReads[0]
   const figures =
     merged !== null
@@ -759,34 +656,18 @@ const solarFilingSentence = computed(() => {
   return parts.length === 0 ? null : parts.join(' ')
 })
 
-/** Why a sweep is not in the archive: the controller could not be named, or the archive refused. */
 const solarFilingFailure = computed(() => {
+  if (readOnly.value) return null
   const note = solarHistoryFilingNote.value
   if (note !== null) return note
   const failure = solarHistoryIngest.value?.failure ?? null
   return failure === null ? null : `The archive could not keep this sweep: ${failure}.`
 })
 
-/**
- * Whether a sweep can happen without the reader, which is what makes the due sentence honest.
- *
- * The three conditions the background sweep can lose and this page can see: a browser that will
- * list its permitted devices, a controller this one has already been shown, and an owner who has
- * not told the page to stop going back to it — a disarmed loop restores no watch, so the sweep
- * never takes one. Everything else the sweep asks — a reading actually arriving — is about a radio
- * that is reporting, and without one there is no sweep to promise either way.
- */
 const pageSweepsOnItsOwn = computed(
   () => capabilities.canReconnect && lastController.value !== null && rejoinArmed.value,
 )
 
-/**
- * How current this browser's copy is, and what happens next about it.
- *
- * The staleness test is the one the background sweep decides on, asked here for a sentence. Where
- * the page can take that sweep itself the line says so; where it cannot — no grant for a controller,
- * or a browser that will not hand back a remembered device — a due read is the reader's to ask for.
- */
 const solarStaleness = computed(() => {
   const held = solarLedger.value
   const answered = held?.solarReads.find((read) => read.daysReceived > 0)
@@ -805,12 +686,10 @@ const solarStaleness = computed(() => {
   return `Last swept ${relativeAge(answered.observedAt, now.value)}.${missing}${due}`
 })
 
-/** The lifetime counters the totals register carries, from the newest sweep that returned them. */
 const solarTotals = computed(
-  () => solarHistory.value?.totals ?? solarLedger.value?.solarReads.find((read) => read.totals !== null)?.totals ?? null,
+  () => (!readOnly.value ? solarHistory.value?.totals : null) ?? solarLedger.value?.solarReads.find((read) => read.totals !== null)?.totals ?? null,
 )
 
-/** How far back this browser's copy of the controller's backlog goes. */
 const solarHeld = computed(() => {
   const rows = solarDays.value
   if (rows.length === 0) return null
@@ -818,18 +697,18 @@ const solarHeld = computed(() => {
   return { days: rows.length, from: dates[0], to: dates[dates.length - 1] }
 })
 
-// ── the clock panel ──────────────────────────────────────────────────────────
-
 const zoneLine = computed(() => {
   const context = clock.value
   if (context === null) return null
   const browserOffset = browserStandardUtcOffsetMinutes(now.value)
   const read = `Read as ${utcLabel(context.packUtcOffsetMinutes)}.`
   if (!context.offsetIsGuessed) {
+    if (readOnly.value) return `${read} Using the zone saved with this source.`
     return context.packUtcOffsetMinutes === browserOffset
       ? `${read} You confirmed that zone.`
       : `${read} You confirmed that zone; this browser stands at ${utcLabel(browserOffset)}.`
   }
+  if (readOnly.value) return `${read} No confirmed zone was saved. Dates use this browser's standard offset.`
   return `${read} That is this browser's own standard offset, not the pack's — confirm it if the pack lives here, change it if it lives elsewhere.`
 })
 
@@ -857,10 +736,10 @@ const clockIntervalLine = computed(() => {
   return `The pack's clock reads between ${aheadLabel(error.lowMs)} and ${aheadLabel(error.highMs)} ahead of yours, across ${error.observations} read${error.observations === 1 ? '' : 's'}. Another read narrows that.`
 })
 
-/** The measured estimate is only worth pinning while it is an estimate and there is one to pin. */
 const canPin = computed(() => !isPinned.value && clockMidpointMs.value !== null && packKey.value !== null)
 
 async function confirmZone(): Promise<void> {
+  if (readOnly.value) return
   const key = packKey.value
   const context = clock.value
   if (key === null || context === null) return
@@ -871,6 +750,7 @@ async function confirmZone(): Promise<void> {
 }
 
 async function pinMeasured(): Promise<void> {
+  if (readOnly.value) return
   const key = packKey.value
   const context = clock.value
   const midpoint = clockMidpointMs.value
@@ -884,6 +764,7 @@ async function pinMeasured(): Promise<void> {
 }
 
 async function unpin(): Promise<void> {
+  if (readOnly.value) return
   const key = packKey.value
   const context = clock.value
   if (key === null || context === null) return
@@ -892,8 +773,6 @@ async function unpin(): Promise<void> {
     aheadSeconds: null,
   })
 }
-
-// ── this pack's stored rows ──────────────────────────────────────────────────
 
 const confirmingDelete = ref(false)
 
@@ -912,15 +791,13 @@ const held = computed(() => {
 })
 
 async function removeLedger(): Promise<void> {
+  if (readOnly.value) return
   const key = packKey.value
   confirmingDelete.value = false
   if (key === null) return
   await browser.deleteRingLedger(key)
 }
 
-// ── formatting ───────────────────────────────────────────────────────────────
-
-/** A signed clock offset as the reader would say it: '7 h 01 m', '−12 min', '8 s'. */
 function aheadLabel(ms: number): string {
   const total = Math.round(Math.abs(ms) / MS_PER_SECOND)
   const sign = ms < 0 ? '−' : ''
@@ -932,14 +809,12 @@ function aheadLabel(ms: number): string {
   return `${sign}${seconds} s`
 }
 
-/** A half-width, said the way a tolerance is said. */
 function spanLabel(halfWidthMs: number): string {
   if (halfWidthMs < UNCERTAINTY_FLOOR_MS) return 'under a minute'
   const minutes = Math.round(halfWidthMs / 60_000)
   return minutes < 90 ? `${minutes} minutes` : `${(minutes / 60).toFixed(1)} hours`
 }
 
-/** A zone offset written the way a zone is written, so +60 reads as the reader would say it. */
 function utcLabel(offsetMinutes: number): string {
   const sign = offsetMinutes < 0 ? '−' : '+'
   const total = Math.abs(offsetMinutes)
@@ -960,25 +835,24 @@ function utcLabel(offsetMinutes: number): string {
     </header>
 
     <div class="body">
-      <!-- One panel for the whole page when this browser holds nothing from either device. Both
-           keep their history on the device until something reads it, and this says where it is. -->
       <section v-if="ledgers.length === 0" class="card" data-testid="stats-no-ring">
         <header class="card-head">
-          <h3 class="plate">Nothing read from either device yet</h3>
+          <h3 class="plate">{{ readOnly ? "No device history in this saved copy" : "Nothing read from either device yet" }}</h3>
         </header>
-        <p class="copy state">
+        <p v-if="readOnly" class="copy state">Choose another source or browse the sessions in Log.</p>
+        <p v-else class="copy state">
           The pack keeps its own log — about a month of hourly snapshots — and it stays on the pack
           until it is read. <a :href="connectHref">Connect the BMS</a> and read the stored log; every
           read adds whatever is new since the last one.
         </p>
-        <p class="copy state">
+        <p v-if="!readOnly" class="copy state">
           The solar controller keeps a month of daily totals of its own — yield, peak power, and how
           long it spent in each charge stage — and serves them over its own tunnel. Reading them
           takes a moment and interrupts the live solar feed, so the dashboard fetches them by itself
           only once the copy here is a day behind, and only while this browser still remembers the
           controller. Ask for a sweep now if you would rather not wait for that.
         </p>
-        <div class="actions">
+        <div v-if="!readOnly" class="actions">
           <button
             type="button"
             :disabled="bmsState !== 'live' || detailLogReading"
@@ -988,7 +862,7 @@ function utcLabel(offsetMinutes: number): string {
           </button>
           <span v-if="bmsState !== 'live'" class="muted">Connect the BMS first.</span>
         </div>
-        <div class="actions">
+        <div v-if="!readOnly" class="actions">
           <button type="button" :disabled="!canReadSolar" @click="readSolarHistory()">
             {{ solarHistoryReading ? 'Sweeping…' : 'Read solar history' }}
           </button>
@@ -997,8 +871,6 @@ function utcLabel(offsetMinutes: number): string {
       </section>
 
       <template v-else>
-        <!-- One filter row scopes every card below it: which pack, and which window of both
-             devices' history. -->
         <RangeFilter
           :model-value="range"
           :custom="customWindow"
@@ -1009,17 +881,17 @@ function utcLabel(offsetMinutes: number): string {
           @update:pack="selectPack"
         />
 
-        <!-- The pack's half of the page, absent until a ring has been read into this browser. -->
         <section v-if="packLedgers.length === 0" class="card" data-testid="stats-no-ring">
           <header class="card-head">
-            <h3 class="plate">Nothing read from this pack yet</h3>
+            <h3 class="plate">{{ readOnly ? "No pack history in this saved copy" : "Nothing read from this pack yet" }}</h3>
           </header>
-          <p class="copy state">
+          <p v-if="readOnly" class="copy state">This source contains solar history only.</p>
+          <p v-else class="copy state">
             The pack keeps its own log — about a month of hourly snapshots — and it stays on the pack
             until it is read. <a :href="connectHref">Connect the BMS</a> and read the stored log;
             every read adds whatever is new since the last one.
           </p>
-          <div class="actions">
+          <div v-if="!readOnly" class="actions">
             <button
               type="button"
               :disabled="bmsState !== 'live' || detailLogReading"
@@ -1032,7 +904,6 @@ function utcLabel(offsetMinutes: number): string {
         </section>
 
         <template v-else>
-          <!-- One statement for the pack's cards: every record on a ledger shares one correction. -->
           <p v-if="provenance" class="copy provenance">{{ provenance }}</p>
 
           <SummaryTiles v-if="summary" :summary="summary" />
@@ -1055,8 +926,6 @@ function utcLabel(offsetMinutes: number): string {
           <EventsPerDay :days="eventDays" :range="range" />
         </template>
 
-        <!-- The controller's half. Its figures are its own totals rather than our estimates, which
-             is why nothing here repeats the hourly-floor caveat above. -->
         <SolarYieldPerDay :days="solarYieldDays" />
 
         <SolarChargeStages :days="solarStageDays" />
@@ -1064,11 +933,11 @@ function utcLabel(offsetMinutes: number): string {
         <p v-if="solarErrorNote" class="muted caveat-line">{{ solarErrorNote }}</p>
       </template>
 
-      <!-- Lifetime counters, straight off the pack. -->
       <section v-if="lifetime !== null" class="card">
         <header class="card-head">
           <h3 class="plate">Lifetime</h3>
           <p class="muted">Since the pack was commissioned{{ lifetime.model ? ` · ${lifetime.model}` : '' }}</p>
+          <p v-if="readOnly && savedInstruments" class="muted">Saved with this source {{ stamp.format(savedInstruments.capturedAt) }}.</p>
         </header>
         <dl class="lifetime-tiles">
           <div v-if="lifetime.cycleCount !== null" class="chip">
@@ -1090,17 +959,18 @@ function utcLabel(offsetMinutes: number): string {
         </dl>
       </section>
 
-      <!-- The device's own event log. -->
-      <section class="card">
+            <section class="card">
         <header class="card-head">
           <h3 class="plate">Device logbook</h3>
+          <p v-if="readOnly && sourceLogbook" class="muted">Saved with {{ selected?.source.label }}.</p>
           <p v-if="logbookAge !== null" class="muted">
             Read from the pack {{ logbookAge }}. Power cycles and protection events, back to first power-on.
           </p>
         </header>
 
         <p v-if="logbookRows.length === 0" class="copy state">
-          <template v-if="source === 'live'">Waiting for the pack to send its logbook…</template>
+          <template v-if="readOnly">No device logbook was included in this saved copy.</template>
+          <template v-else-if="source === 'live'">Waiting for the pack to send its logbook…</template>
           <template v-else>
             No logbook read yet. <a :href="connectHref">Connect the BMS</a> and it is fetched
             automatically; it then stays here for review.
@@ -1115,17 +985,16 @@ function utcLabel(offsetMinutes: number): string {
         </ul>
       </section>
 
-      <!-- The read receipt: what came back, what filing it did, and where the clock stands. -->
       <section class="card" data-testid="stats-read-receipt">
         <header class="card-head">
           <h3 class="plate">The pack's stored log</h3>
-          <p class="muted">
+          <p v-if="!readOnly" class="muted">
             Fetched by itself when this browser's copy falls a day behind, and any time you ask. What
             comes back is kept, and feeds the cards above.
           </p>
         </header>
 
-        <div class="actions">
+        <div v-if="!readOnly" class="actions">
           <button
             type="button"
             :disabled="bmsState !== 'live' || detailLogReading"
@@ -1140,7 +1009,7 @@ function utcLabel(offsetMinutes: number): string {
           <span v-else class="muted">{{ staleness }}</span>
         </div>
 
-        <p v-if="detailLogError !== null" class="copy failure">{{ detailLogError }}</p>
+        <p v-if="!readOnly && detailLogError !== null" class="copy failure">{{ detailLogError }}</p>
 
         <template v-if="lastRead !== null">
           <p class="copy outcome">
@@ -1174,9 +1043,6 @@ function utcLabel(offsetMinutes: number): string {
             <li v-for="line in frameLines" :key="line.key" class="readout frame">{{ line.text }}</li>
           </ul>
 
-          <!-- The layout check, on screen rather than left to be remembered: the newest stored
-               snapshot beside what the instruments read right now. Wrong offsets or a wrong stride
-               show up here as a voltage and a current that do not match the pack in front of you. -->
           <div v-if="newestRecord !== null" class="compare">
             <p class="muted">
               Newest stored record, ring index {{ newestRecord.index }}. Pack counter reads
@@ -1206,15 +1072,13 @@ function utcLabel(offsetMinutes: number): string {
           </div>
         </template>
 
-        <!-- The clock panel: which zone the counter was read against, every rewrite the ring holds,
-             and where the pack's face sits against this browser's. -->
         <div v-if="clock !== null" class="panel">
           <h4 class="panel-title">The pack's clock</h4>
 
           <p class="copy">{{ zoneLine }}</p>
           <p class="copy">{{ clockIntervalLine }}</p>
 
-          <div class="actions">
+          <div v-if="!readOnly" class="actions">
             <button v-if="clock.offsetIsGuessed" type="button" @click="confirmZone()">
               Confirm this zone
             </button>
@@ -1246,7 +1110,6 @@ function utcLabel(offsetMinutes: number): string {
           </div>
         </div>
 
-        <!-- What this browser is holding for the pack, and the one control that gives it back. -->
         <div v-if="held !== null" class="panel">
           <h4 class="panel-title">Kept here</h4>
           <p class="copy">
@@ -1256,10 +1119,10 @@ function utcLabel(offsetMinutes: number): string {
             >. They are outside the recording budget: pruning a session can never take them, and they
             can never take a session.
           </p>
-          <div class="actions">
+          <div v-if="!readOnly" class="actions">
             <button type="button" @click="confirmingDelete = true">Delete this pack's log</button>
           </div>
-          <div v-if="confirmingDelete" class="actions">
+          <div v-if="!readOnly && confirmingDelete" class="actions">
             <p class="copy">
               Delete every stored record for this pack? The pack keeps its own ring, so a later read
               recovers whatever it still holds — about a month — and nothing older.
@@ -1270,12 +1133,10 @@ function utcLabel(offsetMinutes: number): string {
         </div>
       </section>
 
-      <!-- The controller's own receipt: what the sweep carried, what filing it did, and the
-           lifetime counters that ride along on every totals record. -->
       <section class="card" data-testid="stats-solar-receipt">
         <header class="card-head">
           <h3 class="plate">The controller's stored history</h3>
-          <p class="muted">
+          <p v-if="!readOnly" class="muted">
             About a month of daily totals, kept on the charger and served over its own tunnel. The
             dashboard sweeps for them by itself once the copy here is a day behind and this browser
             still remembers the controller; the button asks for one now. Either way the sweep holds
@@ -1284,7 +1145,7 @@ function utcLabel(offsetMinutes: number): string {
           </p>
         </header>
 
-        <div class="actions">
+        <div v-if="!readOnly" class="actions">
           <button type="button" :disabled="!canReadSolar" @click="readSolarHistory()">
             {{ solarHistoryReading ? 'Sweeping…' : 'Read solar history' }}
           </button>
@@ -1292,7 +1153,7 @@ function utcLabel(offsetMinutes: number): string {
           <span v-else class="muted">{{ solarStaleness }}</span>
         </div>
 
-        <p v-if="solarHistoryError !== null" class="copy failure">{{ solarHistoryError }}</p>
+        <p v-if="!readOnly && solarHistoryError !== null" class="copy failure">{{ solarHistoryError }}</p>
 
         <template v-if="solarLastRead !== null">
           <p class="copy outcome">
@@ -1326,7 +1187,6 @@ function utcLabel(offsetMinutes: number): string {
           </dl>
         </template>
 
-        <!-- The lifetime record, which is the one part of a sweep that is not a day. -->
         <div v-if="solarTotals !== null" class="panel">
           <h4 class="panel-title">Since the charger was commissioned</h4>
           <dl class="lifetime-tiles">
@@ -1391,18 +1251,15 @@ function utcLabel(offsetMinutes: number): string {
   padding: 1.25rem var(--pad) 2.5rem;
 }
 
-/* The one provenance sentence, set apart from the cards it qualifies. */
 .provenance {
   margin: 0;
   color: var(--ink-secondary);
 }
 
-/* A single caveat that belongs to the card above it rather than to a group of them. */
 .caveat-line {
   margin: 0;
 }
 
-/* What the fold refused and why, each on its own line under the tiles it is missing from. */
 .caveats {
   display: flex;
   flex-direction: column;
@@ -1413,7 +1270,6 @@ function utcLabel(offsetMinutes: number): string {
   margin: 0;
 }
 
-/* Cards — the warm container the instruments sit in. */
 .card {
   background: var(--card);
   border: 1px solid var(--card-border);
@@ -1438,7 +1294,6 @@ function utcLabel(offsetMinutes: number): string {
   margin: 0 0 1rem;
 }
 
-/* Inline in a sentence and still a control, so it carries the same --tap floor as every button. */
 .state a {
   display: inline-flex;
   align-items: center;
@@ -1447,7 +1302,6 @@ function utcLabel(offsetMinutes: number): string {
   color: var(--pack-ink);
 }
 
-/* Lifetime — inset chips on the card, a step down from the summary tiles above. */
 .lifetime-tiles {
   display: grid;
   /* 11rem rather than 9: at 9 a 390px phone fits two ~135px columns and every figure in them
@@ -1480,7 +1334,6 @@ function utcLabel(offsetMinutes: number): string {
   color: var(--ink);
 }
 
-/* Logbook */
 .logbook {
   list-style: none;
   margin: 0;
@@ -1515,7 +1368,6 @@ function utcLabel(offsetMinutes: number): string {
   color: var(--ink);
 }
 
-/* The read receipt */
 .actions {
   display: flex;
   flex-wrap: wrap;
@@ -1602,7 +1454,6 @@ function utcLabel(offsetMinutes: number): string {
   margin: 0 0 0.85rem;
 }
 
-/* The clock and storage panels, each a fenced-off section of the receipt. */
 .panel {
   margin-top: 1.25rem;
   padding-top: 1rem;
@@ -1625,7 +1476,6 @@ function utcLabel(offsetMinutes: number): string {
   margin: 0;
 }
 
-/* The one wide child scrolls inside its own box; the page body never scrolls sideways. */
 .table-scroll {
   overflow-x: auto;
 }

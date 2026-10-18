@@ -386,7 +386,7 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
       if (token === listToken) refreshing.value = false
     }
 
-    // A session deep-linked before the probe answered was held rather than reported missing.
+    if (token !== listToken) return
     if (deferredId !== null) await read()
     // The channel never delivers a ring write to the tab that posted it, so the ledgers this tab
     // has open are re-read here whenever anything else about the archive changed too.
@@ -396,6 +396,7 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   }
 
   function loadSession(id: SessionId, window?: TimeWindow): Promise<void> {
+    activeStore()
     const already = loaded.value
     const settled = already !== null && already.record.id === id && !loading.value
     if (settled && window === undefined) return Promise.resolve()
@@ -458,8 +459,8 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
    * from whatever was on screen, and its rows would misrepresent the new one.
    */
   async function loadLedgerInto(slot: LedgerSlot, deviceKey: DeviceKey): Promise<void> {
-    slot.key = deviceKey
     const store = activeStore()
+    slot.key = deviceKey
     if (!store) {
       slot.held.value = null
       return
@@ -486,8 +487,8 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
    * shown for this key stay put until the fresh answer lands.
    */
   async function refreshLedgerInto(slot: LedgerSlot, deviceKey: DeviceKey): Promise<void> {
-    slot.key = deviceKey
     const store = activeStore()
+    slot.key = deviceKey
     if (!store) return
 
     const token = (slot.token += 1)
@@ -520,30 +521,32 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     deviceKey: DeviceKey,
     clock: { readonly utcOffsetMinutes: number | null; readonly aheadSeconds: number | null },
   ): Promise<void> {
-    const store = deps.store()
+    const store = activeStore()
     if (!store) return
 
     try {
       await store.setPackClock(deviceKey, clock)
     } catch (error) {
+      if (store !== deps.store()) return
       failure.value = describeFailure(error)
       return
     }
-    // No BroadcastChannel message reaches this tab for its own write, the same gap `renameDevice`
-    // fills the same way.
+    if (store !== deps.store()) return
     await refresh()
   }
 
   async function deleteRingLedger(deviceKey: DeviceKey): Promise<void> {
-    const store = deps.store()
+    const store = activeStore()
     if (!store) return
 
     try {
       await store.deleteRingLedger(deviceKey)
     } catch (error) {
+      if (store !== deps.store()) return
       failure.value = describeFailure(error)
       return
     }
+    if (store !== deps.store()) return
     for (const slot of [ringSlot, solarSlot]) {
       if (slot.key !== deviceKey) continue
       slot.key = null
@@ -560,41 +563,45 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   }
 
   async function renameDevice(key: DeviceKey, label: string | null): Promise<void> {
-    const store = deps.store()
+    const store = activeStore()
     if (!store) return
 
     const chosen = label?.trim() ?? ''
     try {
       const renamed = await store.renameDevice(key, chosen === '' ? null : chosen)
+      if (store !== deps.store()) return
       if (renamed) relabelLoaded(renamed)
     } catch (error) {
+      if (store !== deps.store()) return
       failure.value = describeFailure(error)
       return
     }
-    // A rename in this tab gets no BroadcastChannel message of its own — the channel does not
-    // deliver to the context that posted — so the list is re-read here.
+    // This tab receives no broadcast for its own writes.
     await refresh()
   }
 
   async function deleteSession(id: SessionId): Promise<void> {
-    const store = deps.store()
+    const store = activeStore()
     if (!store) return
 
     try {
       await store.deleteSession(id)
     } catch (error) {
+      if (store !== deps.store()) return
       failure.value = describeFailure(error)
       return
     }
+    if (store !== deps.store()) return
     if (requestedId === id || loaded.value?.record.id === id) unloadSession()
     await refresh()
   }
 
   async function downloadSession(): Promise<void> {
+    const store = activeStore()
     const session = loaded.value
-    const store = deps.store()
     if (!session || !store) return
 
+    const token = loadToken
     exportState.value = 'working'
     try {
       const pack: PackSample[] = []
@@ -605,10 +612,12 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
         if (chunk.stream !== PACK_STREAM || !isReadableLayout(chunk.layout)) return
         appendAll(pack, decodePackChunk(chunk))
       })
+      if (token !== loadToken) return
       await store.streamChunks(session.record.id, SOLAR_STREAM, ENTIRE_SESSION, (chunk) => {
         if (chunk.stream !== SOLAR_STREAM || !isReadableLayout(chunk.layout)) return
         appendAll(solar, decodeSolarChunk(chunk))
       })
+      if (token !== loadToken) return
 
       deps.download(
         exportFileName(session.label, session.record.startedAt),
@@ -624,6 +633,7 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
       )
       exportState.value = 'done'
     } catch (error) {
+      if (token !== loadToken) return
       failure.value = describeFailure(error)
       exportState.value = 'failed'
     }
@@ -632,11 +642,39 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   function dispose(): void {
     unsubscribe?.()
     unsubscribe = null
+    subscribedTo?.noteViewing?.(null)
     subscribedTo = null
+    clearSourceState()
+    requestedId = null
+    requestedWindow = undefined
+    deferredId = null
+    availability.value = null
+  }
+
+  function clearSourceState(): void {
     listToken += 1
     loadToken += 1
-    ringSlot.token += 1
-    solarSlot.token += 1
+    windowWarningsToken += 1
+    sessions.value = []
+    devices.value = []
+    warnings.value = []
+    ringLedgers.value = []
+    usage.value = null
+    listedAt.value = 0
+    refreshing.value = false
+    loading.value = false
+    loaded.value = null
+    missing.value = null
+    failure.value = null
+    selection.value = null
+    exportState.value = 'idle'
+    windowWarnings.value = null
+    for (const slot of [ringSlot, solarSlot]) {
+      slot.token += 1
+      slot.key = null
+      slot.held.value = null
+      slot.loading.value = false
+    }
   }
 
   async function read(): Promise<void> {
@@ -677,29 +715,19 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     }
   }
 
-  /**
-   * The store, subscribed to the first time the probe offers one. Called from each entry point
-   * rather than from a watcher, so this model needs no reactive effect scope to work.
-   *
-   * What the store says about itself is taken here, on every touch, because it is the store's own
-   * answer and not a fact about which store this is: a connection that stood aside for another tab's
-   * upgrade is the same object saying something different. Free to re-read — an unchanged store
-   * hands back the same object, and assigning that wakes nothing. The subscription is what makes a
-   * change reach the screen unasked: it carries the store's own availability as well as a foreign
-   * tab's write, and `refresh` comes back through here before it reads a row.
-   */
   function activeStore(): HistoryStore | null {
     const store = deps.store()
-    if (store === null) return null
-
-    availability.value = store.availability
+    availability.value = store?.availability ?? null
     if (store === subscribedTo) return store
 
     unsubscribe?.()
+    subscribedTo?.noteViewing?.(null)
+    clearSourceState()
+    deferredId = requestedId
     subscribedTo = store
-    unsubscribe = store.watch(() => {
+    unsubscribe = store?.watch(() => {
       void refresh().catch(() => undefined)
-    })
+    }) ?? null
     return store
   }
 
@@ -879,13 +907,14 @@ function describeFailure(error: unknown): string {
 export interface HistoryEnvironment {
   readonly store: HistoryStore
   readonly downloadJson: (fileName: string, parts: Iterable<string>) => void
+  readonly capturedAt?: number
 }
 
 const environment = shallowRef<HistoryEnvironment | null>(null)
 
 const shared = createHistoryBrowser({
   store: () => environment.value?.store ?? null,
-  now: () => Date.now(),
+  now: () => environment.value?.capturedAt ?? Date.now(),
   download: (fileName, parts) => {
     const wired = environment.value
     if (!wired) throw new Error('The log is not open yet.')

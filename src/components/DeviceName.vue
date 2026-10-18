@@ -1,24 +1,12 @@
 <script setup lang="ts">
-/**
- * Naming a radio, in place.
- *
- * The name is a label this browser keeps beside a device key; it never travels and it never
- * changes what was recorded. So the control is inline rather than a modal — nothing here is
- * consequential enough to interrupt for — and the placeholder is always the derived default, which
- * is what makes "clear the field to go back" visible before the field is committed rather than a
- * rule the user has to be told.
- *
- * Escape cancels and blur commits, and Escape moves focus, so the two would otherwise race: the
- * cancel latch is what stops a dismissed edit from being saved by the blur that follows it.
- */
-import { nextTick, ref } from 'vue'
+import { nextTick, ref, watch } from 'vue'
+import { useArchiveWorkspace } from '../application/backup/useArchiveWorkspace'
+
+const { readOnly } = useArchiveWorkspace()
 
 const props = defineProps<{
-  /** What is printed today: the owner's name if there is one, else the derived default. */
   label: string
-  /** Restored when the field is cleared, and shown as the placeholder throughout. */
   defaultLabel: string
-  /** The noun the hint uses. The two radios are not both packs and the sentence says which. */
   noun?: 'pack' | 'controller'
 }>()
 
@@ -27,9 +15,13 @@ const emit = defineEmits<{ rename: [string | null] }>()
 const editing = ref(false)
 const draft = ref('')
 const field = ref<HTMLInputElement | null>(null)
+// Escape moves focus and triggers blur, so cancellation must suppress that save.
 let cancelled = false
 
+watch(readOnly, () => cancel())
+
 async function begin(): Promise<void> {
+  if (readOnly.value) return
   // An unrenamed device opens empty rather than pre-filled with the default, so accepting the
   // default is Escape and adopting it as a user label is a deliberate retype.
   draft.value = props.label === props.defaultLabel ? '' : props.label
@@ -41,7 +33,7 @@ async function begin(): Promise<void> {
 }
 
 function commit(): void {
-  if (!editing.value || cancelled) return
+  if (readOnly.value || !editing.value || cancelled) return
   editing.value = false
   const chosen = draft.value.trim()
   emit('rename', chosen === '' ? null : chosen)
@@ -54,9 +46,9 @@ function cancel(): void {
 </script>
 
 <template>
-  <button v-if="!editing" type="button" class="rename" @click="begin()">Rename</button>
+  <button v-if="!readOnly && !editing" type="button" class="rename" @click="begin()">Rename</button>
 
-  <form v-else class="editor" @submit.prevent="commit()">
+  <form v-else-if="!readOnly" class="editor" @submit.prevent="commit()">
     <input
       ref="field"
       v-model="draft"
@@ -73,7 +65,7 @@ function cancel(): void {
     <button type="button" class="action" @mousedown.prevent @click="cancel()">Cancel</button>
 
     <p class="copy hint">
-      Named in this browser only. This {{ noun ?? 'pack' }} keeps the name across sessions.
+      This {{ noun ?? 'pack' }} keeps its name across sessions and in exported archives.
       <br />
       Clear the field to go back to {{ defaultLabel }}.
     </p>

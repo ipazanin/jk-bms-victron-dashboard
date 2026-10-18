@@ -18,7 +18,9 @@
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@fontsource/ibm-plex-sans": "^5.2.8",
     "@fontsource/saira-semi-condensed": "^5.2.7",
-    "vue": "^3.5.39"
+    "fflate": "^0.8.2",
+    "vue": "^3.5.39",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",

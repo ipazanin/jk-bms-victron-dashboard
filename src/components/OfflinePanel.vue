@@ -32,13 +32,13 @@ const { state, status, updateReady, installed, canInstall, installing, installFa
     </p>
     <p>
       Bluetooth still needs a supported browser and nearby devices. Firefox and Safari cannot
-      connect directly to the radios. Reloading ends the Bluetooth connection; saved readings stay
+      connect directly to the radios. Reloading ends the Bluetooth connection. Saved readings stay
       marked as remembered until fresh readings arrive. Recording needs the app to remain running.
     </p>
     <p>
-      Your key, readings and Log stay in this browser. Clearing site data removes them and the
-      offline copy. Private browsing may keep them only until the window closes. Download important
-      sessions from the Log as JSON.
+      Your key, readings and Log are stored in this browser. Clearing site data removes them and the
+      offline copy. Private browsing may keep them only until the window closes. Use Data &amp; backup
+      to export complete history and open it in another browser, including Firefox, without Bluetooth.
     </p>
   </section>
 </template>

@@ -11,8 +11,9 @@ const { state, status, updateReady } = useOfflineApp()
       <span v-if="updateReady"> · Update ready. Finish recording, close all Shunt windows, then reopen.</span>
     </p>
     <p class="privacy">
-      Your encryption key and your log stay in this browser. Shunt downloads app files for offline
-      use and checks for updates. No backend, telemetry or analytics.
+      Your encryption key and log are stored in this browser. You choose what to include in
+      exported backups. Shunt downloads app files for offline use and checks for updates.
+      No backend, telemetry or analytics.
     </p>
     <p class="colophon">
       <span>Domain Software Solutions d.o.o</span>

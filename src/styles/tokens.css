@@ -283,6 +283,17 @@ button {
   cursor: pointer;
 }
 
+/* Google Picker places its dialog at the scroll position it opened at and then focuses it, which
+   scrolls a long page away from the dialog. Pinning it to the viewport keeps it in view. */
+.picker-dialog {
+  position: fixed !important;
+  top: 50% !important;
+  left: 50% !important;
+  max-width: 100vw;
+  max-height: 100dvh;
+  transform: translate(-50%, -50%);
+}
+
 :where(button, input, a, [tabindex]):focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
