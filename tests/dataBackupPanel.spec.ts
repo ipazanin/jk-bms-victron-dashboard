@@ -180,10 +180,10 @@ describe('complete archive controls', () => {
     expect(workspace.exportArchives).toHaveBeenLastCalledWith(true, false)
   })
 
-  it('previews the chosen file before offering import', async () => {
+  it.each(['boat.json.gz', 'boat.json'])('previews %s before offering import', async (fileName) => {
     await mount(DataBackupPanel)
     expect(host.querySelector('[data-testid="apply-import"]')).toBeNull()
-    const file = new File(['archive'], 'boat.xlsx')
+    const file = new File(['archive'], fileName)
     const picker = host.querySelector<HTMLInputElement>('input[type="file"]')!
     Object.defineProperty(picker, 'files', { value: [file], configurable: true })
     picker.dispatchEvent(new Event('change'))

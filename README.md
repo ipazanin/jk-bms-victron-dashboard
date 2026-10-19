@@ -101,7 +101,7 @@ supplies solar advertisements only; it is not a native replacement for the batte
 Browser storage can be evicted. Shunt asks for persistent storage without delaying the Log or
 recorder while a permission prompt is unanswered. The Log shows the browser's answer; a grant
 protects against ordinary storage-pressure eviction, not clearing site data. Safari also has
-proactive eviction policies for inactive sites. Keep a complete Excel archive or individual session
+proactive eviction policies for inactive sites. Keep a complete JSON archive or individual session
 JSON exports outside the browser. See [browser storage policies](https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria).
 
 The page feature-detects all of this and degrades honestly. With no solar it is still a complete,
@@ -153,7 +153,7 @@ Snapshots are saved periodically and synchronously when the page is hidden or le
 checkpoints every ten seconds. An abrupt process kill without lifecycle events can still lose the
 latest uncheckpointed samples (up to 15 seconds of snapshot state or ten seconds of Log samples).
 These are recovery checkpoints, not a guarantee against browser storage refusal, device failure,
-or clearing site data. Excel archives and session JSON exports provide independent backups. Browsers recommend
+or clearing site data. JSON archives and session JSON exports provide independent backups. Browsers recommend
 [saving on visibility changes](https://developer.chrome.com/docs/web-platform/page-lifecycle-api)
 because unload callbacks are not guaranteed.
 
@@ -167,19 +167,20 @@ The first visit needs internet, and offline support needs HTTPS or localhost. If
 unavailable** appears, check site storage permissions and reload online. Clearing site data removes
 the offline app as well as saved state, so it must be downloaded again.
 
-## Excel archives and device transfers
+## JSON archives and device transfers
 
 Open **Connect → Data & backup** to export this browser's complete saved history and preferences.
-Small exports are ordinary `.xlsx` workbooks. Large exports are a ZIP containing numbered Excel
-workbooks. Keep every part together and import the ZIP directly. The transfer works offline after
-the app is cached and does not need Bluetooth.
+Exports are compressed JSON files (`.json.gz`). Import accepts these files and uncompressed
+Shunt JSON archives (`.json`). One file can contain one source snapshot or an array of snapshots
+from different sources. The transfer works offline after the app is cached and does not need
+Bluetooth, including in Firefox.
 
 Archives include sessions, sample chunks, device names, warnings, battery and solar history reads,
 stored totals, theme, sidebar, Stats preferences, the last instrument snapshot and the lifetime
-logbook. Raw samples retain their original integer units. Nested records and long settings use
-the **Field Metadata** worksheet. These are Shunt workbooks with a defined layout, not arbitrary
-spreadsheets. Preserve their sheets, identifiers and metadata when editing. Formulas, missing
-parts, mixed archives and invalid records are rejected before import.
+logbook. Raw sample columns retain their original typed arrays and integer units. Import validates
+the complete archive before showing a preview. Malformed records and duplicate source identifiers
+are rejected. Individual-session JSON exports from the Log are a separate format and cannot be
+imported as complete archives. Older Excel and ZIP archives are no longer accepted.
 
 Import first shows a preview. Confirming saves a separate, read-only source that you can select in
 Log, Stats and Warnings. Your current recording stays in this browser's own source. Reimporting
@@ -199,14 +200,14 @@ This restore replaces history only. Apply its settings separately if wanted.
 
 **Export current sources** includes the current browser and saved sources from other browsers.
 To preserve an older saved copy of this same browser, select it and use **Export selected source**
-separately. A bundle contains one snapshot per source. Each source is saved atomically on import.
+separately. A file contains one snapshot per source. Each source is saved atomically on import.
 If a multi-source import is cancelled or runs out of storage, completed sources remain available
 and the remaining sources stay in the preview.
 
-Exports split at up to 50,000 sample rows and 10,000 metadata records per workbook. Imports accept
-files up to 256 MiB and 10 million samples across at most 100 sources. Processing runs in a
-cancellable worker, but large archives still need substantial memory. Use a desktop browser for
-a full retained history.
+Files are limited to 256 MiB, with at most 512 MiB of expanded JSON, 10 million retained samples
+and 100 unique sources across the complete archive. These limits apply to compressed and plain
+JSON files. Processing runs in a cancellable worker, but large archives still need substantial
+memory. Use a desktop browser for a full retained history.
 
 ## Optional Google sync
 
@@ -222,14 +223,20 @@ other devices. Each source stays separate in Log, Stats and Warnings. Imported h
 join the active recording. Older cloud snapshots remain available through the saved history list.
 Opening one pauses automatic sync so its history stays on screen. Use **Sync now** or enable
 automatic sync again when you want the latest copy.
-Cloud files contain complete archive records with checksums. Unchanged blocks are reused and a
-snapshot appears in the catalogue only after its blocks have uploaded.
+Cloud files contain complete archive records with checksums. New history uploads compress their
+JSON blocks with gzip. Unchanged blocks are reused and a snapshot appears in the catalogue only
+after its blocks have uploaded. Existing uncompressed Drive copies remain readable and are left
+in place. Compression reduces new uploads but does not reclaim storage used by existing copies.
+
+Update Shunt on every browser before opening newly compressed cloud copies or importing JSON
+archives. Older app versions cannot read the new formats. When the update notice appears, finish
+recording, close all Shunt tabs and app windows, then reopen.
 
 Local sample limits still apply. A recording must sync before the browser prunes or loses it to be
 available in the cloud. New snapshots retain the data currently present locally. Older snapshots
 preserve previously uploaded history, but their samples are not combined into the latest snapshot.
 Sync accepts up to 512 MiB of encoded records per snapshot, with 1 MiB blocks and manifests. Large
-histories need substantial browser memory. Keep independent Excel exports for important recordings.
+histories need substantial browser memory. Keep independent JSON archives for important recordings.
 
 Shared settings cover theme, sidebar and Stats preferences. When devices change them independently,
 Shunt asks which version to keep. Disconnect radios before applying cloud settings. Bluetooth
@@ -252,7 +259,7 @@ intact. Deleting a workspace moves its entire Drive folder to Trash, including a
 manually added. Local recordings and downloaded copies remain.
 
 Google sync uses browser sign-in and HTTPS requests rather than Bluetooth. It can transfer history
-in Firefox even though Firefox cannot record from the radios. Excel transfer remains the offline
+in Firefox even though Firefox cannot record from the radios. JSON archive transfer remains the offline
 option. Test Google sign-in on each configured origin before relying on automatic sync.
 
 Workspaces that Shunt created appear under **Available workspaces** on every device signed in to
@@ -371,7 +378,7 @@ It is 32 hex characters. The page verifies it before trusting it: byte 7 of ever
 check byte equal to the key's first byte, so a wrong key is rejected instead of rendering plausible
 garbage.
 
-**Where the key lives.** The active key is in your browser's `localStorage`. Excel exports and Google
+**Where the key lives.** The active key is in your browser's `localStorage`. JSON archives and Google
 uploads include it only when you opt in. A previously imported or uploaded archive may retain its
 own copy. Shunt downloads its static app files for offline use and checks for updates. Optional
 Google sync sends saved history and chosen settings directly to your Drive. There is no Shunt
@@ -610,9 +617,10 @@ Support is completely optional.
 ## Credits
 
 Protocol work stands on the shoulders of the [ESPHome JK-BMS component](https://github.com/syssi/esphome-jk-bms)
-and [`victron-ble`](https://github.com/keshavdv/victron-ble). Neither protocol library is used at runtime. Vue supplies the UI, SheetJS handles Excel files and
-fflate handles ZIP archives. Fonts are self-hosted via `@fontsource`. Google Identity Services and
-Picker scripts load when you enable Google sync.
+and [`victron-ble`](https://github.com/keshavdv/victron-ble). Neither protocol library is used at runtime.
+Vue supplies the UI and fflate compresses JSON archives and cloud history blocks with gzip. Fonts
+are self-hosted via `@fontsource`. Google Identity Services and Picker scripts load when you enable
+Google sync.
 
 ## Licence
 

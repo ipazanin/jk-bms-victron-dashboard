@@ -127,7 +127,7 @@ describe('Google sync controls', () => {
     sync.configured.value = false
     await mount()
     expect(host.textContent).toContain('Google sync is not configured for this installation')
-    expect(host.textContent).toContain('Local recording and Excel archives remain available')
+    expect(host.textContent).toContain('Local recording and JSON archives remain available')
     expect(host.querySelector('[data-testid="connect-google"]')).toBeNull()
     expect(sync.connect).not.toHaveBeenCalled()
   })

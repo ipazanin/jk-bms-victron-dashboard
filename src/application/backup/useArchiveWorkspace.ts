@@ -1,6 +1,6 @@
 import { openArchiveRepository } from '../../infrastructure/backup/openArchiveRepository'
 import { downloadArchive } from '../../infrastructure/backup/downloadArchive'
-import { exportArchiveWorkbooks, importArchiveWorkbooks } from '../../infrastructure/backup/excel/archiveWorkbookClient'
+import { exportArchiveFile, importArchiveFile } from '../../infrastructure/backup/json/archiveJsonClient'
 import { downloadJson } from '../../infrastructure/history/downloadJson'
 import { provideHistoryEnvironment, useHistoryBrowser } from '../history/historyBrowser'
 import { route } from '../route'
@@ -23,11 +23,11 @@ const workspace = createArchiveWorkspace({
     useTelemetry().restoreRemembered(true)
   },
   exportFile: async (snapshots, signal) => {
-    const exported = await exportArchiveWorkbooks(snapshots, { signal })
+    const exported = await exportArchiveFile(snapshots, signal)
     signal.throwIfAborted()
     downloadArchive(exported.fileName, exported.blob)
   },
-  importFile: (file, signal) => importArchiveWorkbooks(file, { signal }),
+  importFile: (file, signal) => importArchiveFile(file, signal),
 })
 
 export function useArchiveWorkspace() {

@@ -44,7 +44,7 @@ function deviceLabel(sourceId: string): string {
 
     <template v-if="enabled">
       <p v-if="!configured" role="status">
-        Google sync is not configured for this installation. Its owner must add the Google OAuth client and Picker configuration before connecting. Local recording and Excel archives remain available.
+        Google sync is not configured for this installation. Its owner must add the Google OAuth client and Picker configuration before connecting. Local recording and JSON archives remain available.
       </p>
       <template v-else>
         <div class="actions">

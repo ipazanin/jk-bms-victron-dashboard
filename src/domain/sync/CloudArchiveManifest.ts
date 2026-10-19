@@ -4,7 +4,7 @@ import type { CloudArchiveGroup } from './CloudArchiveGroup'
 
 export interface CloudArchiveManifest {
   readonly format: 'shunt-cloud-archive'
-  readonly version: 1
+  readonly version: 1 | 2
   readonly source: ArchiveSource
   readonly preferences: readonly ArchivePreference[]
   readonly groups: readonly CloudArchiveGroup[]

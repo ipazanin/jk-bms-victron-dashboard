@@ -9,6 +9,9 @@ import type { CloudArchiveRevision } from '../src/domain/sync/CloudArchiveRevisi
 import type { CloudBlock } from '../src/domain/sync/CloudBlock'
 import type { CloudSettingsRevision } from '../src/domain/sync/CloudSettingsRevision'
 import { CLOUD_BLOCK_BYTES } from '../src/domain/sync/limits'
+import { decodeArchiveValue, encodeArchiveValue } from '../src/domain/backup/archiveCodec'
+import type { CloudArchiveManifest } from '../src/domain/sync/CloudArchiveManifest'
+import { validateCloudArchiveManifest } from '../src/domain/sync/manifestValidation'
 import { deviceRecord, packChunk, packSamples, SAMPLE_EPOCH, sessionRecord, warningRecord } from './support/samples'
 
 const workspace = { id: 'sheet', name: 'Boat', folderId: 'folder' }
@@ -71,15 +74,65 @@ describe('immutable cloud archive revisions', () => {
     expect(restored.stores.chunks[0]!.offsetMs).toBeInstanceOf(Uint32Array)
   })
 
-  it('splits an oversized record without truncating Unicode or extra metadata', async () => {
+  it('compresses an oversized record without truncating Unicode or extra metadata', async () => {
     const { remote, signal } = setup()
     const original = snapshot()
     const annotation = '🌊'.repeat(CLOUD_BLOCK_BYTES / 2)
     const expanded: ArchiveSnapshot = { ...original, stores: { ...original.stores, devices: [{ ...original.stores.devices[0]!, annotation } as typeof original.stores.devices[number]] } }
     const revision = await publishArchive(expanded, workspace, remote, signal)
-    expect(remote.uploadBlock.mock.calls.every((call) => call[1].byteLength <= CLOUD_BLOCK_BYTES)).toBe(true)
-    expect(remote.uploadBlock.mock.calls.some((call) => call[1].byteLength === CLOUD_BLOCK_BYTES)).toBe(true)
+    expect(remote.uploadBlock.mock.calls.every((call) => call[1].byteLength < CLOUD_BLOCK_BYTES)).toBe(true)
     expect(await downloadArchive(revision, remote, signal)).toEqual(expanded)
+  })
+
+  it('splits compressed groups across wire blocks and restores them exactly', async () => {
+    const { remote, signal } = setup()
+    const original = snapshot()
+    let seed = 17
+    const characters = new Uint8Array(CLOUD_BLOCK_BYTES * 2)
+    for (let index = 0; index < characters.length; index += 1) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
+      characters[index] = 33 + ((seed >>> 24) % 90)
+    }
+    const annotation = new TextDecoder().decode(characters)
+    const expanded: ArchiveSnapshot = { ...original, stores: { ...original.stores, devices: [{ ...original.stores.devices[0]!, annotation } as typeof original.stores.devices[number]] } }
+    const revision = await publishArchive(expanded, workspace, remote, signal)
+    expect(remote.uploadBlock.mock.calls.some((call) => call[1].byteLength === CLOUD_BLOCK_BYTES)).toBe(true)
+    expect(remote.uploadBlock.mock.calls.every((call) => call[1].byteLength <= CLOUD_BLOCK_BYTES)).toBe(true)
+    expect(await downloadArchive(revision, remote, signal)).toEqual(expanded)
+  })
+
+  it('reads a version 1 archive assembled independently of the current publisher', async () => {
+    const { remote, files, signal } = setup()
+    const original = snapshot()
+    const groups = []
+    for (const [store, rows] of Object.entries(original.stores)) {
+      const bytes = new TextEncoder().encode(encodeArchiveValue(rows))
+      const hash = await sha256(bytes)
+      files.set(store, bytes)
+      groups.push({ store, key: store, blocks: [{ hash, fileId: store, size: bytes.byteLength }] })
+    }
+    const manifest = { format: 'shunt-cloud-archive', version: 1, source: original.source, preferences: original.preferences, groups }
+    const encoded = new TextEncoder().encode(encodeArchiveValue(manifest))
+    files.set('legacy-manifest', encoded)
+    const identity = { ...manifest, groups: groups.map((group) => ({ ...group, blocks: group.blocks.map(({ hash, size }) => ({ hash, size })) })) }
+    const revision: CloudArchiveRevision = {
+      id: 'legacy', source: original.source, exportedAt: original.exportedAt, manifestFileId: 'legacy-manifest',
+      manifestHash: await sha256(encoded), contentHash: await sha256(new TextEncoder().encode(encodeArchiveValue(identity))),
+      sessions: 1, samples: 2, bytes: groups.reduce((total, group) => total + group.blocks[0]!.size, 0),
+    }
+    expect(await downloadArchive(revision, remote, signal)).toEqual(original)
+    expect(remote.uploadBlock).not.toHaveBeenCalled()
+    expect(remote.appendArchive).not.toHaveBeenCalled()
+  })
+
+  it('records decoded bytes in a version 2 manifest and rejects excessive decoded totals', async () => {
+    const { remote, files, signal } = setup()
+    const revision = await publishArchive(snapshot(), workspace, remote, signal)
+    const manifest = decodeArchiveValue(new TextDecoder().decode(files.get(revision.manifestFileId))) as CloudArchiveManifest
+    expect(manifest.version).toBe(2)
+    expect(manifest.groups.reduce((total, group) => total + group.decodedBytes!, 0)).toBe(revision.bytes)
+    expect(() => validateCloudArchiveManifest({ ...manifest, groups: manifest.groups.map((group) => ({ ...group, decodedBytes: 512 * 1024 * 1024 })) })).toThrow('decoded archive')
+    expect(() => validateCloudArchiveManifest({ ...manifest, version: 3 })).toThrow('update the app')
   })
 
   it('does not publish or upload again when only the capture time changed', async () => {
@@ -200,3 +253,8 @@ describe('immutable cloud archive revisions', () => {
     await expect(downloadArchive({ ...revision, samples: 3 }, remote, signal)).rejects.toThrow('totals')
   })
 })
+
+async function sha256(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new Uint8Array(bytes))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}

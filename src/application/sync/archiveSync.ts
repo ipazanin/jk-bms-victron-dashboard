@@ -12,6 +12,7 @@ import { CLOUD_ARCHIVE_BYTES, CLOUD_BLOCK_BYTES } from '../../domain/sync/limits
 import { validateCloudArchiveManifest } from '../../domain/sync/manifestValidation'
 import { validateCloudArchiveRevision, validateCloudCatalog } from '../../domain/sync/syncValidation'
 import type { SyncRemote } from './SyncRemote'
+import { compressArchiveBytes, decompressArchiveBytes } from '../backup/archiveCompression'
 
 export async function publishArchive(
   snapshot: ArchiveSnapshot, workspace: CloudWorkspace, remote: SyncRemote, signal: AbortSignal,
@@ -31,20 +32,25 @@ export async function publishArchive(
   const availableFileIds = new Set(listedBlocks.map((block) => block.fileId))
   const groups: CloudArchiveGroup[] = []
   let bytes = 0
+  let storedBytes = 0
   for (const group of archiveGroups(snapshot.stores)) {
     signal.throwIfAborted()
     bytes += group.bytes.byteLength
     requireArchive(bytes <= CLOUD_ARCHIVE_BYTES, 'cloud archive', 'archive exceeds upload limit')
+    const compressed = compressArchiveBytes(group.bytes)
+    signal.throwIfAborted()
+    storedBytes += compressed.byteLength
+    requireArchive(storedBytes <= CLOUD_ARCHIVE_BYTES, 'cloud archive', 'compressed archive exceeds upload limit')
     const blocks: CloudBlock[] = []
-    for (let offset = 0; offset < group.bytes.byteLength; offset += CLOUD_BLOCK_BYTES) {
+    for (let offset = 0; offset < compressed.byteLength; offset += CLOUD_BLOCK_BYTES) {
       signal.throwIfAborted()
-      const part = group.bytes.subarray(offset, offset + CLOUD_BLOCK_BYTES)
+      const part = compressed.subarray(offset, offset + CLOUD_BLOCK_BYTES)
       blocks.push(await upload(part))
     }
-    groups.push({ store: group.store, key: group.key, blocks })
+    groups.push({ store: group.store, key: group.key, blocks, decodedBytes: group.bytes.byteLength })
   }
   const manifest: CloudArchiveManifest = {
-    format: 'shunt-cloud-archive', version: 1, source: snapshot.source, preferences: snapshot.preferences, groups,
+    format: 'shunt-cloud-archive', version: 2, source: snapshot.source, preferences: snapshot.preferences, groups,
   }
   validateCloudArchiveManifest(manifest)
   const contentHash = await contentHashOf(manifest)
@@ -92,7 +98,7 @@ export async function downloadArchive(
   validateCloudArchiveManifest(manifest)
   requireArchive(manifest.source.id === revision.source.id && manifest.source.label === revision.source.label, 'cloud manifest', 'archive source does not match')
   requireArchive(await contentHashOf(manifest) === revision.contentHash, 'cloud manifest', 'archive content checksum does not match')
-  requireArchive(manifest.groups.reduce((total, group) => total + group.blocks.reduce((sum, block) => sum + block.size, 0), 0) === revision.bytes,
+  requireArchive(manifest.groups.reduce((total, group) => total + (manifest.version === 2 ? group.decodedBytes! : group.blocks.reduce((sum, block) => sum + block.size, 0)), 0) === revision.bytes,
     'cloud catalogue', 'archive byte total does not match')
   const stores = Object.fromEntries(CLOUD_ARCHIVE_STORES.map((store) => [store, []])) as unknown as Record<keyof ArchiveStores, unknown[]>
   let bytes = 0
@@ -108,8 +114,11 @@ export async function downloadArchive(
       combined.set(part, offset)
       offset += part.byteLength
     }
-    bytes += combined.byteLength
-    const rows = decodeArchiveValue(new TextDecoder('utf-8', { fatal: true }).decode(combined))
+    signal.throwIfAborted()
+    const decoded = manifest.version === 2 ? decompressArchiveBytes(combined, group.decodedBytes!) : combined
+    requireArchive(manifest.version === 1 || decoded.byteLength === group.decodedBytes, 'cloud group', 'decoded size does not match')
+    bytes += decoded.byteLength
+    const rows = decodeArchiveValue(new TextDecoder('utf-8', { fatal: true }).decode(decoded))
     requireArchive(Array.isArray(rows), 'cloud block', 'expected archive rows')
     for (const row of rows) stores[group.store].push(row)
   }

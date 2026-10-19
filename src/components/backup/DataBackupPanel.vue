@@ -36,7 +36,7 @@ async function chooseFile(event: Event): Promise<void> {
 
     <fieldset :disabled="!ready || busy">
       <legend>Export</legend>
-      <p>Includes sessions, stored samples, warnings, device history and saved settings. Large archives use a ZIP containing Excel files.</p>
+      <p>Downloads a compressed JSON archive (.json.gz) with sessions, stored samples, warnings, device history and saved settings.</p>
       <label class="check">
         <input v-model="includeExportSecret" type="checkbox" data-testid="export-secret" />
         Include the Victron advertisement key
@@ -57,8 +57,8 @@ async function chooseFile(event: Event): Promise<void> {
     <fieldset :disabled="!ready || busy">
       <legend>Import</legend>
       <label class="file-picker">
-        <span>Choose a Shunt Excel archive or ZIP</span>
-        <input type="file" accept=".xlsx,.zip,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/zip" @change="chooseFile" />
+        <span>Choose a Shunt JSON archive (.json.gz or .json)</span>
+        <input type="file" accept=".json.gz,.json,application/gzip,application/json" @change="chooseFile" />
       </label>
       <ArchiveImportPreview v-if="preview.length > 0" :snapshots="preview" :imported="imported" />
       <div v-if="preview.length > 0" class="actions">

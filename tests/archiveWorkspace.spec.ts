@@ -135,7 +135,7 @@ describe('archive workspace transfers', () => {
   it('previews validated imports without writing history or preferences', async () => {
     const { workspace, repository, dependencies } = await initialized()
     localStorage.setItem('shunt.theme', 'dark')
-    await workspace.previewImport(new File(['workbook'], 'archive.xlsx'))
+    await workspace.previewImport(new File(['archive'], 'archive.json.gz'))
     expect(workspace.preview.value).toEqual([snapshot()])
     expect(repository.importArchive).not.toHaveBeenCalled()
     expect(repository.restoreLocal).not.toHaveBeenCalled()
@@ -144,12 +144,12 @@ describe('archive workspace transfers', () => {
     expect(workspace.selectedSourceId.value).toBeNull()
   })
 
-  it('leaves persistence untouched when the codec rejects any workbook part', async () => {
+  it('leaves persistence untouched when the codec rejects an archive record', async () => {
     const { workspace, repository, dependencies } = await initialized()
-    dependencies.importFile.mockRejectedValue(new Error('Archive sample total does not match its manifest'))
-    await workspace.previewImport(new File(['damaged'], 'archive.zip'))
+    dependencies.importFile.mockRejectedValue(new Error('Invalid archive record'))
+    await workspace.previewImport(new File(['damaged'], 'archive.json.gz'))
     await workspace.applyImport()
-    expect(workspace.failure.value).toContain('sample total')
+    expect(workspace.failure.value).toContain('Invalid archive record')
     expect(workspace.preview.value).toEqual([])
     expect(repository.importArchive).not.toHaveBeenCalled()
     expect(repository.restoreLocal).not.toHaveBeenCalled()
@@ -158,7 +158,7 @@ describe('archive workspace transfers', () => {
   it('imports previewed sources and selects the last source without applying its settings', async () => {
     const { workspace, repository, dependencies } = await initialized()
     localStorage.setItem('shunt.theme', 'dark')
-    await workspace.previewImport(new File(['workbook'], 'archive.xlsx'))
+    await workspace.previewImport(new File(['archive'], 'archive.json.gz'))
     await workspace.applyImport()
     expect(repository.importArchive).toHaveBeenCalledExactlyOnceWith(snapshot())
     expect(workspace.selectedSourceId.value).toBe('foreign-source')
@@ -179,7 +179,7 @@ describe('archive workspace transfers', () => {
       return descriptor(archived)
     })
     repository.listImported.mockResolvedValue([descriptor(first)])
-    await workspace.previewImport(new File(['bundle'], 'archives.zip'))
+    await workspace.previewImport(new File(['bundle'], 'archives.json.gz'))
     await workspace.applyImport()
     expect(repository.importArchive).toHaveBeenCalledTimes(2)
     expect(workspace.imported.value).toEqual([descriptor(first)])
@@ -217,7 +217,7 @@ describe('archive workspace transfers', () => {
     const { workspace, dependencies, repository } = await initialized()
     const parsing = deferred<readonly ArchiveSnapshot[]>()
     dependencies.importFile.mockReturnValue(parsing.promise)
-    const operation = workspace.previewImport(new File(['workbook'], 'archive.xlsx'))
+    const operation = workspace.previewImport(new File(['archive'], 'archive.json.gz'))
     expect(workspace.busy.value).toBe(true)
     await workspace.exportArchives(false, true)
     expect(repository.capture).not.toHaveBeenCalled()
@@ -238,7 +238,7 @@ describe('archive workspace transfers', () => {
     const committing = deferred<ImportedArchive>()
     repository.importArchive.mockReturnValueOnce(committing.promise)
     repository.listImported.mockResolvedValue([descriptor(first)])
-    await workspace.previewImport(new File(['bundle'], 'archives.zip'))
+    await workspace.previewImport(new File(['bundle'], 'archives.json.gz'))
     const importing = workspace.applyImport()
     workspace.cancel()
     committing.resolve(descriptor(first))
@@ -258,7 +258,7 @@ describe('archive workspace transfers', () => {
       listingStarted.resolve()
       return listing.promise
     })
-    await workspace.previewImport(new File(['workbook'], 'archive.xlsx'))
+    await workspace.previewImport(new File(['archive'], 'archive.json.gz'))
     const importing = workspace.applyImport()
     await listingStarted.promise
     workspace.dispose()
