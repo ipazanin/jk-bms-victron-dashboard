@@ -608,15 +608,11 @@ function slideRingOntoToday(ring) {
   }
 }
 
-/**
- * Runs in the page. The schema is built here rather than waited for, so the seed does not depend
- * on the app having opened the database first; it is deliberately the same shape the adapter
- * builds, and a drift between the two shows up as a Log that lists nothing.
- */
+/** Seeds the adapter's schema before app startup. Schema parity is checked in the test suite. */
 async function seedStores(remembered, archive, ring) {
   const DATABASE = 'shunt.log'
-  const VERSION = 5
-  const STORES = ['sessions', 'chunks', 'devices', 'meta', 'warnings', 'ringRecords', 'ringReads']
+  const VERSION = 6
+  const STORES = ['sessions', 'chunks', 'devices', 'meta', 'warnings', 'ringRecords', 'ringReads', 'sessionHours']
 
   // JSON carries no typed arrays. Each column is widened back to the width the archive stores it
   // at, so what the page reads back is byte-for-byte what a recording would have left behind.
@@ -694,6 +690,9 @@ async function seedStores(remembered, archive, ring) {
         keyPath: ['deviceKey', 'observedAt'],
       })
       ringReads.createIndex('byDevice', 'deviceKey')
+      const sessionHours = created.createObjectStore('sessionHours', { keyPath: ['sessionId', 'hourStart'] })
+      sessionHours.createIndex('bySession', 'sessionId')
+      sessionHours.createIndex('byTime', 'hourStart')
     }
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)

@@ -323,6 +323,7 @@ export interface SessionRecord {
   /** Set when this session continues one a crashed tab left open. Displayed, never merged. */
   readonly continues: SessionId | null
 
+  readonly hourlyBasis?: 'recorded' | 'reconstructed'
   readonly coverage: readonly CoverageRun[]
   readonly ledger: SessionLedger
   readonly entries: readonly SessionEntry[]
@@ -368,6 +369,7 @@ export interface HistoryMeta {
   readonly key: 'totals'
   /** Invariant: exactly the sum of sealedSamples over every surviving session row. */
   readonly totalSamples: number
+  readonly rawBytes?: number
   readonly schema: number
   readonly createdAt: number
   readonly lastPrunedAt: number | null

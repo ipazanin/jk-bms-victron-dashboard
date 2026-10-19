@@ -36,7 +36,8 @@ async function chooseFile(event: Event): Promise<void> {
 
     <fieldset :disabled="!ready || busy">
       <legend>Export</legend>
-      <p>Downloads a compressed JSON archive (.json.gz) with sessions, stored samples, warnings, device history and saved settings.</p>
+      <p>Downloads a compressed JSON archive (.json.gz) with retained raw samples, hourly summaries, important moments, warnings, device history and saved settings.</p>
+      <p class="hint">Detailed samples stay on the browser that records them. Export this browser to back them up before its local allowance fills.</p>
       <label class="check">
         <input v-model="includeExportSecret" type="checkbox" data-testid="export-secret" />
         Include the Victron advertisement key
@@ -82,6 +83,7 @@ async function chooseFile(event: Event): Promise<void> {
     <fieldset v-if="ownSavedCopy" :disabled="busy">
       <legend>Restore this browser's history</legend>
       <p>Replace this browser's complete history with the selected saved copy. All recordings must be stopped, and the saved copy must contain only closed sessions.</p>
+      <p class="hint">A compact Drive copy contains hourly history. Restoring it also removes any detailed samples currently retained in this browser.</p>
       <label class="check">
         <input v-model="confirmRestore" type="checkbox" />
         Replace this browser's current history with this saved copy

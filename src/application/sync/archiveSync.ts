@@ -2,87 +2,89 @@ import { decodeArchiveValue, encodeArchiveValue, validateArchiveSnapshot } from 
 import type { ArchiveSnapshot } from '../../domain/backup/ArchiveSnapshot'
 import type { ArchiveStores } from '../../domain/backup/ArchiveStores'
 import { requireArchive } from '../../domain/backup/validation'
-import { archiveGroups, CLOUD_ARCHIVE_STORES } from '../../domain/sync/archiveGroups'
-import type { CloudArchiveGroup } from '../../domain/sync/CloudArchiveGroup'
+import { CLOUD_ARCHIVE_STORES } from '../../domain/sync/cloudArchiveStores'
 import type { CloudArchiveManifest } from '../../domain/sync/CloudArchiveManifest'
 import type { CloudArchiveRevision } from '../../domain/sync/CloudArchiveRevision'
-import type { CloudBlock } from '../../domain/sync/CloudBlock'
+import type { CloudSnapshotRevision } from '../../domain/sync/CloudSnapshotRevision'
 import type { CloudWorkspace } from '../../domain/sync/CloudWorkspace'
-import { CLOUD_ARCHIVE_BYTES, CLOUD_BLOCK_BYTES } from '../../domain/sync/limits'
+import { CLOUD_ARCHIVE_BYTES, CLOUD_BLOCK_BYTES, CLOUD_SNAPSHOT_BYTES, CLOUD_SOURCE_COPIES } from '../../domain/sync/limits'
 import { validateCloudArchiveManifest } from '../../domain/sync/manifestValidation'
 import { validateCloudArchiveRevision, validateCloudCatalog } from '../../domain/sync/syncValidation'
 import type { SyncRemote } from './SyncRemote'
 import { compressArchiveBytes, decompressArchiveBytes } from '../backup/archiveCompression'
+import { compactCloudArchive } from './compactCloudArchive'
 
 export async function publishArchive(
   snapshot: ArchiveSnapshot, workspace: CloudWorkspace, remote: SyncRemote, signal: AbortSignal,
   onProgress?: (message: string) => void,
-): Promise<CloudArchiveRevision> {
+): Promise<CloudSnapshotRevision> {
   signal.throwIfAborted()
-  validateArchiveSnapshot(snapshot)
+  if (workspace.version !== 2) throw new Error('This legacy workspace is read-only. Create a compact workspace to upload new history.')
+  requireArchive(snapshot.version === 2, 'cloud snapshot', 'prepare hourly history before uploading a legacy archive')
+  const compact = compactCloudArchive(snapshot)
+  const contentHash = await snapshotContentHash(compact)
   const catalog = await remote.readCatalog(workspace, signal)
   validateCloudCatalog(catalog)
-  const listedBlocks = await remote.listBlocks(workspace, signal)
-  const available = new Map<string, CloudBlock>()
-  for (const block of listedBlocks) {
-    const key = `${block.hash}:${block.size}`
-    const existing = available.get(key)
-    if (!existing || block.fileId < existing.fileId) available.set(key, block)
-  }
-  const availableFileIds = new Set(listedBlocks.map((block) => block.fileId))
-  const groups: CloudArchiveGroup[] = []
-  let bytes = 0
-  let storedBytes = 0
-  for (const group of archiveGroups(snapshot.stores)) {
-    signal.throwIfAborted()
-    bytes += group.bytes.byteLength
-    requireArchive(bytes <= CLOUD_ARCHIVE_BYTES, 'cloud archive', 'archive exceeds upload limit')
-    const compressed = compressArchiveBytes(group.bytes)
-    signal.throwIfAborted()
-    storedBytes += compressed.byteLength
-    requireArchive(storedBytes <= CLOUD_ARCHIVE_BYTES, 'cloud archive', 'compressed archive exceeds upload limit')
-    const blocks: CloudBlock[] = []
-    for (let offset = 0; offset < compressed.byteLength; offset += CLOUD_BLOCK_BYTES) {
-      signal.throwIfAborted()
-      const part = compressed.subarray(offset, offset + CLOUD_BLOCK_BYTES)
-      blocks.push(await upload(part))
+  const latest = catalog.archives.filter((revision) => revision.source.id === compact.source.id).at(-1)
+  if (latest?.storage === 'snapshot' && latest.contentHash === contentHash) return latest
+  const pending = (await remote.listPendingSnapshots(workspace, compact.source.id, signal))
+    .filter((revision) => revision.contentHash === contentHash).at(-1)
+  if (pending && (latest?.storage !== 'snapshot' || pending.createdAt > latest.createdAt)) {
+    let verified = false
+    try {
+      await downloadArchive(pending, remote, signal, onProgress)
+      verified = true
+    } catch (error) {
+      if (signal.aborted) throw error
     }
-    groups.push({ store: group.store, key: group.key, blocks, decodedBytes: group.bytes.byteLength })
+    if (verified) {
+      signal.throwIfAborted()
+      await remote.completeSnapshot(workspace, pending, signal)
+      return pending
+    }
   }
-  const manifest: CloudArchiveManifest = {
-    format: 'shunt-cloud-archive', version: 2, source: snapshot.source, preferences: snapshot.preferences, groups,
-  }
-  validateCloudArchiveManifest(manifest)
-  const contentHash = await contentHashOf(manifest)
-  const latest = catalog.archives.filter((revision) => revision.source.id === snapshot.source.id).at(-1)
-  const encoded = new TextEncoder().encode(encodeArchiveValue(manifest))
-  requireArchive(encoded.byteLength <= CLOUD_BLOCK_BYTES, 'cloud manifest', 'manifest exceeds 1 MiB')
-  if (latest?.contentHash === contentHash && latest.manifestHash === await hashBytes(encoded)
-    && availableFileIds.has(latest.manifestFileId)) return latest
-  const manifestBlock = await upload(encoded)
-  const revision: CloudArchiveRevision = {
-    id: crypto.randomUUID(), source: snapshot.source, exportedAt: snapshot.exportedAt,
-    manifestFileId: manifestBlock.fileId, manifestHash: manifestBlock.hash, contentHash,
-    sessions: snapshot.stores.sessions.length,
-    samples: snapshot.stores.chunks.reduce((total, chunk) => total + chunk.length, 0), bytes,
-  }
-  validateCloudArchiveRevision(revision)
+  const encoded = new TextEncoder().encode(encodeArchiveValue(compact))
+  requireArchive(encoded.byteLength <= CLOUD_ARCHIVE_BYTES, 'cloud snapshot', 'archive exceeds upload limit')
+  const compressed = compressArchiveBytes(encoded)
+  requireArchive(compressed.byteLength <= CLOUD_SNAPSHOT_BYTES, 'cloud snapshot', 'compressed archive exceeds upload limit')
+  const snapshotHash = await hashBytes(compressed)
   signal.throwIfAborted()
-  onProgress?.('Publishing the archive catalogue entry…')
-  await remote.appendArchive(workspace, revision, signal)
+  onProgress?.(`Uploading ${Math.ceil(compressed.byteLength / 1024)} KiB of compact history…`)
+  signal.throwIfAborted()
+  const revision = await remote.uploadSnapshot(workspace, compressed, {
+    storage: 'snapshot', id: crypto.randomUUID(), source: compact.source, exportedAt: compact.exportedAt,
+    snapshotHash, contentHash, sessions: compact.stores.sessions.length,
+    samples: 0, hours: compact.stores.hours!.length, bytes: encoded.byteLength, storedBytes: compressed.byteLength,
+  }, signal)
+  requireArchive(revision.contentHash === contentHash && revision.snapshotHash === snapshotHash && revision.storedBytes === compressed.byteLength,
+    'cloud snapshot', 'upload receipt does not match the archive')
+  onProgress?.('Verifying the saved compact history…')
+  await downloadArchive(revision, remote, signal, onProgress)
+  signal.throwIfAborted()
+  await remote.completeSnapshot(workspace, revision, signal)
   return revision
+}
 
-  async function upload(part: Uint8Array): Promise<CloudBlock> {
-    const hash = await hashBytes(part)
-    const existing = available.get(`${hash}:${part.byteLength}`)
-    if (existing !== undefined) return existing
+export async function retireSourceCopies(
+  sourceId: string, workspace: CloudWorkspace, remote: SyncRemote, signal: AbortSignal,
+): Promise<void> {
+  if (workspace.version !== 2) return
+  const catalog = await remote.readCatalog(workspace, signal)
+  validateCloudCatalog(catalog)
+  const copies = catalog.archives.filter((revision): revision is CloudSnapshotRevision => {
+    return revision.storage === 'snapshot' && revision.source.id === sourceId
+  })
+  for (const revision of copies.slice(0, Math.max(0, copies.length - CLOUD_SOURCE_COPIES))) {
     signal.throwIfAborted()
-    onProgress?.(`Uploading ${Math.ceil(part.byteLength / 1024)} KiB of archive data…`)
+    await remote.deleteSnapshot(workspace, revision, sourceId, signal)
+  }
+  const latest = copies.at(-1)
+  if (!latest) return
+  const pending = await remote.listPendingSnapshots(workspace, sourceId, signal)
+  for (const revision of pending) {
+    if (revision.source.id !== sourceId || revision.createdAt >= latest.createdAt) continue
     signal.throwIfAborted()
-    const uploaded = await remote.uploadBlock(workspace, part, hash, signal)
-    requireArchive(uploaded.hash === hash && uploaded.size === part.byteLength && uploaded.fileId.length > 0, 'cloud block', 'upload receipt does not match the content')
-    available.set(`${hash}:${part.byteLength}`, uploaded)
-    return uploaded
+    await remote.deleteSnapshot(workspace, revision, sourceId, signal, 'pending')
   }
 }
 
@@ -92,6 +94,21 @@ export async function downloadArchive(
 ): Promise<ArchiveSnapshot> {
   validateCloudArchiveRevision(revision)
   signal.throwIfAborted()
+  if (revision.storage === 'snapshot') {
+    const compressed = await remote.downloadBlock(revision.snapshotFileId, revision.storedBytes, signal)
+    requireArchive(compressed.byteLength === revision.storedBytes && await hashBytes(compressed) === revision.snapshotHash, 'cloud snapshot', 'archive checksum does not match')
+    const decoded = decompressArchiveBytes(compressed, revision.bytes)
+    requireArchive(decoded.byteLength === revision.bytes, 'cloud snapshot', 'decoded size does not match')
+    const snapshot = decodeArchiveValue(new TextDecoder('utf-8', { fatal: true }).decode(decoded))
+    validateArchiveSnapshot(snapshot)
+    requireArchive(snapshot.version === 2 && snapshot.stores.chunks.length === 0, 'cloud snapshot', 'expected compact history without raw recordings')
+    requireArchive(snapshot.source.id === revision.source.id && snapshot.source.label === revision.source.label
+      && snapshot.exportedAt === revision.exportedAt, 'cloud snapshot', 'archive source or capture time does not match')
+    requireArchive(snapshot.stores.sessions.length === revision.sessions && snapshot.stores.hours!.length === revision.hours,
+      'cloud snapshot', 'archive totals do not match')
+    requireArchive(await snapshotContentHash(snapshot) === revision.contentHash, 'cloud snapshot', 'archive content checksum does not match')
+    return snapshot
+  }
   const encoded = await remote.downloadBlock(revision.manifestFileId, CLOUD_BLOCK_BYTES, signal)
   requireArchive(encoded.byteLength <= CLOUD_BLOCK_BYTES && await hashBytes(encoded) === revision.manifestHash, 'cloud manifest', 'manifest checksum does not match')
   const manifest = decodeArchiveValue(new TextDecoder('utf-8', { fatal: true }).decode(encoded))
@@ -144,4 +161,9 @@ async function contentHashOf(manifest: CloudArchiveManifest): Promise<string> {
 async function hashBytes(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new Uint8Array(bytes))
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function snapshotContentHash(snapshot: ArchiveSnapshot): Promise<string> {
+  const { exportedAt: _exportedAt, ...content } = snapshot
+  return hashBytes(new TextEncoder().encode(encodeArchiveValue(content)))
 }

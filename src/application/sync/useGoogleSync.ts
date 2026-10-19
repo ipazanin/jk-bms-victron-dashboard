@@ -23,7 +23,7 @@ const sync = createGoogleSyncController({
   createWorkspace: createGoogleWorkspace,
   chooseWorkspace: pickGoogleWorkspace,
   trashWorkspace: trashGoogleWorkspace,
-  capture: (includeSecret) => useArchiveWorkspace().captureForSync(includeSecret),
+  capture: (includeSecret, detail) => useArchiveWorkspace().captureForSync(includeSecret, detail),
   sourceId: () => useArchiveWorkspace().source.value?.id ?? null,
   importArchive: (snapshot, select) => useArchiveWorkspace().saveSyncedArchive(snapshot, select),
   imported: () => useArchiveWorkspace().imported.value,

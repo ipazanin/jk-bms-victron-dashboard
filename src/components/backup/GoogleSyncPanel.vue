@@ -13,6 +13,7 @@ const labelDraft = ref(sourceLabel.value)
 const deletionName = ref('')
 const mayDelete = computed(() => workspace.value !== null && deletionName.value === workspace.value.name)
 const newestRevisions = computed(() => [...revisions.value].reverse())
+const legacyWorkspace = computed(() => workspace.value !== null && workspace.value.version !== 2)
 
 watch(sourceLabel, (label) => { labelDraft.value = label })
 watch(workspace, () => { deletionName.value = '' })
@@ -33,7 +34,7 @@ function deviceLabel(sourceId: string): string {
   <section class="sync-panel card" aria-labelledby="google-sync-heading" data-testid="google-sync-panel">
     <header>
       <h3 id="google-sync-heading">Google sync</h3>
-      <p>Keep history in Google Drive and share settings through a Google Sheet. Recording always starts in this browser. Cloud and archive access also work in Firefox without Bluetooth.</p>
+      <p>Keep hourly history and selected moments in Google Drive and share settings through a Google Sheet. Raw recordings stay in this browser. Cloud and archive access also work in Firefox without Bluetooth.</p>
     </header>
 
     <label class="check">
@@ -66,6 +67,7 @@ function deviceLabel(sourceId: string): string {
             <legend>Sync workspace</legend>
             <p v-if="workspace">Using <strong>{{ workspace.name }}</strong>. Each browser keeps its own history source in this workspace.</p>
             <p v-else>Create a workspace, or choose the existing one used by your other devices.</p>
+            <p v-if="legacyWorkspace" role="status">This legacy workspace is read-only. You can open its saved copies here. Create a compact workspace for new uploads, then check the new copies before removing the old workspace.</p>
             <label v-if="workspaces.length > 0" class="field">
               <span>Available workspaces</span>
               <select :value="workspace?.id ?? ''" @change="chooseListedWorkspace">
@@ -77,7 +79,7 @@ function deviceLabel(sourceId: string): string {
               <button type="button" @click="sync.chooseWorkspace()">Choose in Google Drive</button>
             </div>
             <details>
-              <summary>Create a new workspace</summary>
+              <summary>Create a compact workspace</summary>
               <form class="create-workspace" @submit.prevent="sync.createWorkspace(workspaceName.trim())">
                 <label class="field">
                   <span>Workspace name</span>
@@ -88,7 +90,7 @@ function deviceLabel(sourceId: string): string {
             </details>
           </fieldset>
 
-          <fieldset v-if="workspace" :disabled="busy">
+          <fieldset v-if="workspace && !legacyWorkspace" :disabled="busy">
             <legend>This browser</legend>
             <form class="label-form" @submit.prevent="sync.setSourceLabel(labelDraft.trim())">
               <label class="field">
@@ -104,9 +106,10 @@ function deviceLabel(sourceId: string): string {
             <p class="hint">The key lets someone read your controller's advertisements. Anyone with access to this workspace could read a saved key. Turning this off does not remove keys from older cloud copies.</p>
             <label class="check">
               <input :checked="autoSync" type="checkbox" data-testid="automatic-sync" @change="sync.setAutoSync(($event.target as HTMLInputElement).checked)" />
-              Sync automatically every minute while this page is open and visible
+              Sync automatically while this page is open and visible
             </label>
             <p class="hint">Theme, sidebar and Stats preferences are shared. Bluetooth permissions stay in each browser. Remembered readings and device logbooks stay with their history source.</p>
+            <p class="hint">Settings and other devices are checked every minute. This browser uploads hourly while recording, when recording ends, or when you choose Sync now.</p>
             <div class="actions">
               <button type="button" data-testid="sync-now" @click="sync.syncNow()">Sync now</button>
               <span v-if="lastSyncAt !== null">Last synced {{ new Date(lastSyncAt).toLocaleString() }}</span>
@@ -114,7 +117,7 @@ function deviceLabel(sourceId: string): string {
             </div>
           </fieldset>
 
-          <fieldset v-if="conflicts.length > 0" :disabled="busy" class="conflict">
+          <fieldset v-if="conflicts.length > 0 && !legacyWorkspace" :disabled="busy" class="conflict">
             <legend>Choose shared settings</legend>
             <p role="alert">{{ conflictReason ?? 'Settings changed on more than one device. Choose which settings to share.' }}</p>
             <p>This choice applies to settings only. Disconnect the radios before applying cloud settings.</p>
@@ -134,7 +137,11 @@ function deviceLabel(sourceId: string): string {
 
           <fieldset v-if="workspace && revisions.length > 0" :disabled="busy">
             <legend>Saved cloud history</legend>
-            <p>Sync adds the latest copies from other devices as separate, read-only sources. Older copies stay here even after local history is pruned. Opening a copy never replaces this browser's recordings.</p>
+            <p v-if="legacyWorkspace">These saved copies remain unchanged. Opening a copy never replaces this browser's recordings.</p>
+            <template v-else>
+              <p>Sync adds the latest copies from other devices as separate, read-only sources. Each browser keeps its latest three complete cloud copies and permanently removes its older copies after a successful upload.</p>
+              <p class="hint">Copies contain up to two years of hourly history, selected moments, warnings and device history. Raw recordings stay local. Interrupted uploads that cannot be reused may remain in Drive.</p>
+            </template>
             <details>
               <summary>Browse {{ revisions.length }} saved {{ revisions.length === 1 ? 'copy' : 'copies' }}</summary>
               <ul class="revision-list">
@@ -142,7 +149,8 @@ function deviceLabel(sourceId: string): string {
                   <div>
                     <strong>{{ revision.source.label }}</strong>
                     <span>Captured {{ new Date(revision.exportedAt).toLocaleString() }}</span>
-                    <span>{{ revision.sessions.toLocaleString() }} {{ revision.sessions === 1 ? 'session' : 'sessions' }} · {{ revision.samples.toLocaleString() }} samples</span>
+                    <span v-if="revision.storage === 'snapshot'">{{ revision.sessions.toLocaleString() }} {{ revision.sessions === 1 ? 'session' : 'sessions' }} · {{ revision.hours.toLocaleString() }} hourly summaries</span>
+                    <span v-else>{{ revision.sessions.toLocaleString() }} {{ revision.sessions === 1 ? 'session' : 'sessions' }} · {{ revision.samples.toLocaleString() }} samples</span>
                   </div>
                   <button type="button" @click="sync.openRevision(revision.id)">Open saved history</button>
                 </li>

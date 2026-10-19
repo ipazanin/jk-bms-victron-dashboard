@@ -6,7 +6,7 @@ import type { ImportedArchive } from './ImportedArchive'
 
 export interface ArchiveRepository {
   readonly source: ArchiveSource
-  capture(preferences: readonly ArchivePreference[]): Promise<ArchiveSnapshot>
+  capture(preferences: readonly ArchivePreference[], detail?: 'complete' | 'hourly'): Promise<ArchiveSnapshot>
   listImported(): Promise<readonly ImportedArchive[]>
   importArchive(snapshot: ArchiveSnapshot): Promise<ImportedArchive>
   readImported(sourceId: string): Promise<ArchiveSnapshot>

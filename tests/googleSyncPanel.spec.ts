@@ -93,14 +93,15 @@ function button(label: string): HTMLButtonElement {
 function connectWorkspace(): void {
   sync.enabled.value = true
   sync.connected.value = true
-  sync.workspace.value = { id: 'sheet', name: 'Boat history', folderId: 'folder' }
+  sync.workspace.value = { id: 'sheet', name: 'Boat history', folderId: 'folder', version: 2 }
 }
 
 function archiveRevision(): CloudArchiveRevision {
   return {
+    storage: 'snapshot',
     id: 'archive-revision', source: { id: 'remote', label: 'Cabin laptop' },
-    exportedAt: Date.UTC(2026, 9, 18), manifestFileId: 'manifest', manifestHash: 'hash',
-    contentHash: 'content', sessions: 12, samples: 8000, bytes: 1200,
+    exportedAt: Date.UTC(2026, 9, 18), createdAt: Date.UTC(2026, 9, 18), snapshotFileId: 'snapshot', snapshotHash: 'hash',
+    contentHash: 'content', sessions: 12, samples: 0, hours: 168, bytes: 1200, storedBytes: 300,
   }
 }
 
@@ -176,9 +177,27 @@ describe('Google sync controls', () => {
     await mount()
     expect(host.textContent).toContain('Cabin laptop')
     expect(host.textContent).toContain('12 sessions')
-    expect(host.textContent).toContain('Older copies stay here even after local history is pruned')
+    expect(host.textContent).toContain('168 hourly summaries')
+    expect(host.textContent).toContain('permanently removes its older copies')
+    expect(host.textContent).toContain('Raw recordings stay local')
     button('Open saved history').click()
     expect(sync.openRevision).toHaveBeenCalledWith('archive-revision')
+  })
+
+  it('keeps legacy copies openable and guides creation without offering uploads', async () => {
+    connectWorkspace()
+    sync.workspace.value = { ...sync.workspace.value!, version: 1 }
+    sync.revisions.value = [{
+      id: 'legacy', source: { id: 'phone', label: 'Phone' }, exportedAt: Date.UTC(2026, 9, 18),
+      manifestFileId: 'manifest', manifestHash: 'hash', contentHash: 'content', sessions: 1, samples: 8000, bytes: 1200,
+    }]
+    await mount()
+    expect(host.textContent).toContain('This legacy workspace is read-only')
+    expect(host.textContent).toContain('Create a compact workspace')
+    expect(host.textContent).toContain('8,000 samples')
+    expect(host.querySelector('[data-testid="sync-now"]')).toBeNull()
+    button('Open saved history').click()
+    expect(sync.openRevision).toHaveBeenCalledWith('legacy')
   })
 
   it('lists saved cloud copies newest first', async () => {

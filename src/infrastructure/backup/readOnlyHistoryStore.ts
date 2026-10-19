@@ -31,5 +31,6 @@ export function readOnlyHistoryStore(store: HistoryStore): HistoryStore {
     setPackClock: refuse,
     deleteRingLedger: refuse,
     recover: refuse,
+    compactSession: refuse,
   }
 }

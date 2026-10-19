@@ -1,28 +1,8 @@
-/**
- * The archive, as the views read it.
- *
- * Everything in this module is a read. The recorder writes and never shares memory with what is
- * shown here, so the Log is a statement about what is on disk rather than about what this tab
- * happens to remember — which is the only way a second tab's recording can appear in this one.
- *
- * The store arrives late and may never arrive at all. Probing IndexedDB is asynchronous, first
- * paint must not wait for it, and a browser in private mode answers with a store that refuses
- * every write. So each accessor tolerates a null store, and a session deep-linked before the
- * database was even open is loaded once the probe answers rather than reported as missing.
- *
- * Chunks are hydrated into samples exactly once, when a session is loaded. The port hands over
- * typed arrays because that is what makes the transfer out of IndexedDB cheap; the ribbon, the
- * ledger and the table all want sample objects, and decoding them again on every redraw is the
- * expensive mistake this shape exists to prevent.
- */
-
 import { computed, ref, shallowRef } from 'vue'
 import type { ComputedRef, Ref, ShallowRef } from 'vue'
 
-import { MAX_TOTAL_SAMPLES, PRUNE_TARGET_RATIO } from '../../domain/history/budget'
 import { decodePackChunk, decodeSolarChunk, isReadableLayout } from '../../domain/history/columns'
 import {
-  estimateExportBytes,
   exportFileName,
   exportSessionParts,
 } from '../../domain/history/exportDocument'
@@ -31,6 +11,7 @@ import { MAX_PAIRING_AGE_MS, pairSamples } from '../../domain/history/join'
 import type { PairedSample } from '../../domain/history/join'
 import { recomputeAccount, recomputeLedger } from '../../domain/history/ledger'
 import type { SessionAccount } from '../../domain/history/ledger'
+import type { SessionHour } from '../../domain/history/SessionHour'
 import { PACK_STREAM, SAMPLE_INTERVAL_MS, SOLAR_STREAM } from '../../domain/history/types'
 import type {
   DeviceKey,
@@ -50,29 +31,20 @@ import type {
   StoredRingLedger,
   StoredSession,
 } from './port'
-/**
- * The warnings list reads this many at most, most recent first. It feeds both the standalone log
- * and the dashboard's ledger, so it is one read and one cap rather than two lists that could
- * disagree about what the archive holds.
- *
- * It bounds the read, not the archive: warnings are bounded per session and die with the session
- * that filed them, so what is reachable here is whatever the sample budget has not yet pruned.
- */
+import { renderWindowFor } from './port'
+
 const WARNING_LIST_LIMIT = 1000
 
-/** The export is deliberately never windowed: a file holding part of a session would read as all
- *  of it, and on iOS it is the only copy anybody keeps. */
 const ENTIRE_SESSION: TimeWindow = { from: 0, to: Number.MAX_SAFE_INTEGER }
 
 export type ExportState = 'idle' | 'working' | 'done' | 'failed'
 
-/** One device and everything it recorded, which is the unit the Log is read in. */
 export interface SessionGroup {
   readonly key: DeviceKey
-  /** Null when the archive holds sessions for a device row that pruning or a rename outlived. */
+
   readonly device: DeviceRecord | null
   readonly label: string
-  /** Newest first. */
+
   readonly sessions: readonly SessionListing[]
   readonly recordedMs: number
 }
@@ -80,25 +52,18 @@ export interface SessionGroup {
 export interface ArchiveSummary {
   readonly sessions: number
   readonly recordedMs: number
-  /** Null on an empty archive. Drives the landing page's "back to 3 March". */
+
   readonly oldestStartedAt: number | null
 }
 
 export interface ArchiveUsage {
   readonly totalSamples: number
   readonly sessions: number
-  readonly capacitySamples: number
-  readonly usedRatio: number
-  /** At the pruning target, so the warning appears before the first eviction rather than after. */
-  readonly nearCapacity: boolean
-  /** On its own line: the ring budget cannot evict, or be evicted by, the sample budget above. */
+  readonly rawBytes?: number
+  readonly rawCapacityBytes?: number
   readonly ringRecords: number
 }
 
-/**
- * One session, decoded. The sample arrays and the paired timeline are built once at load and are
- * then shared by every band of the session view, so scrubbing and resizing cost nothing.
- */
 export interface LoadedSession {
   readonly record: SessionRecord
   readonly packDevice: DeviceRecord | null
@@ -107,37 +72,22 @@ export interface LoadedSession {
   readonly pack: readonly PackSample[]
   readonly solar: readonly SolarSample[]
   readonly timeline: readonly PairedSample[]
-  /** What was actually read, which is not the session's own span when the read was clamped. */
+  readonly hours: readonly SessionHour[]
+
   readonly window: TimeWindow
+  readonly rawWindow: TimeWindow
   readonly windowClamped: boolean
-  /** Chunks in a layout this build does not read, older or newer. Skipped, never deleted, always
-   *  declared — the store hands them over precisely so they can be counted here. */
+
   readonly unreadableChunks: number
 }
 
-export interface ExportSize {
-  readonly rows: number
-  readonly bytes: number
-}
-
-/**
- * Every ref here is exposed read-only by type rather than through Vue's `readonly()`. That helper
- * is deep: wrapping the loaded session would hand out a proxy that re-wraps every sample object on
- * every access, on arrays tens of thousands of rows long.
- */
+/** Deep Vue proxies would repeatedly wrap thousands of decoded sample objects. */
 export interface HistoryBrowser {
-  /**
-   * Null until the storage probe answers — which is not the same as unavailable.
-   *
-   * Held rather than derived from the store. A connection that stands aside for another tab's
-   * upgrade, or one whose writes start aborting, revises what it can do without becoming a different
-   * object, so anything computed off the store reference would answer what the archive was at first
-   * paint for the rest of the tab's life.
-   */
+
   readonly availability: Readonly<Ref<HistoryAvailability | null>>
   readonly sessions: Readonly<Ref<readonly SessionListing[]>>
   readonly devices: Readonly<Ref<readonly DeviceRecord[]>>
-  /** Warnings across every session, most recent first, refreshed with the session list. */
+
   readonly warnings: Readonly<Ref<readonly WarningRecord[]>>
   readonly groups: ComputedRef<readonly SessionGroup[]>
   readonly archive: ComputedRef<ArchiveSummary>
@@ -145,62 +95,47 @@ export interface HistoryBrowser {
   readonly refreshing: Readonly<Ref<boolean>>
   readonly loading: Readonly<Ref<boolean>>
   readonly loaded: Readonly<Ref<LoadedSession | null>>
-  /** The id of a link that resolved to nothing, so the list can say the session was dropped. */
+
   readonly missing: Readonly<Ref<SessionId | null>>
-  /** What the store said when a read failed. Null when nothing has failed. */
+
   readonly failure: Readonly<Ref<string | null>>
   readonly selection: Readonly<Ref<TimeWindow | null>>
-  /** The stored account, or the account re-integrated over the brush selection. Re-integration
-   *  walks every sample in the selection, so a drag should settle before it lands in `select`. */
+  readonly selectedHour: ComputedRef<SessionHour | null>
+
   readonly account: ComputedRef<SessionAccount | null>
-  readonly exportSize: ComputedRef<ExportSize | null>
   readonly exportState: Readonly<Ref<ExportState>>
-  /**
-   * Every warning inside the last range window read, or null until that read resolves. Kept apart
-   * from the capped `warnings` list so a Stats range tally counts the whole window rather than the
-   * most recent few — the view falls back to `warnings` only while this is null.
-   */
+
   readonly windowWarnings: Readonly<Ref<readonly WarningRecord[] | null>>
-  /** Every device this browser has read stored history from, most recently read first. Refreshed
-   *  with the session list, so a foreign tab's read moves it here without a dedicated
-   *  subscription. Packs and controllers are both in it; `kind` says which. */
+
   readonly ringLedgers: Readonly<Ref<readonly RingLedgerSummary[]>>
-  /** The pack ledger currently on screen, or null before it is asked for. */
+
   readonly ringLedger: Readonly<Ref<StoredRingLedger | null>>
   readonly ringLoading: Readonly<Ref<boolean>>
-  /**
-   * The controller's ledger currently on screen, held apart from the pack's rather than sharing
-   * one slot. The Stats page shows both at once and a device key belongs to one radio or the
-   * other, so a single slot would make the two halves of that page evict each other.
-   */
+
   readonly solarLedger: Readonly<Ref<StoredRingLedger | null>>
   readonly solarLoading: Readonly<Ref<boolean>>
 
   refresh(): Promise<void>
   loadSession(id: SessionId, window?: TimeWindow): Promise<void>
   unloadSession(): void
-  /** Reads every warning inside `window`, uncapped, for an honest range tally. Latest wins. */
+
   loadWindowWarnings(window: TimeWindow): Promise<void>
-  /** Reads one pack's whole ledger and holds it as `ringLedger`. Latest wins by token, the same as
-   *  `loadWindowWarnings`, so switching packs quickly supersedes a read still in flight. */
+
   loadRingLedger(deviceKey: DeviceKey): Promise<void>
-  /** The same read into the solar slot. */
+
   loadSolarLedger(deviceKey: DeviceKey): Promise<void>
-  /**
-   * Re-reads the ledger this tab just wrote to, in place. Filing a snapshot posts no
-   * BroadcastChannel message this tab receives — the channel never delivers to its own poster —
-   * so the writer re-reads its own write explicitly, the same way `renameDevice` does.
-   */
+
   refreshRingLedger(deviceKey: DeviceKey): Promise<void>
-  /** The same re-read into the solar slot, for a controller's history sweep. */
+
   refreshSolarLedger(deviceKey: DeviceKey): Promise<void>
-  /** Read-and-write in one step, shaped like `renameDevice`. */
+
   setPackClock(
     deviceKey: DeviceKey,
     clock: { readonly utcOffsetMinutes: number | null; readonly aheadSeconds: number | null },
   ): Promise<void>
   deleteRingLedger(deviceKey: DeviceKey): Promise<void>
   select(window: TimeWindow | null): void
+  selectHour(hourStart: number | null): void
   renameDevice(key: DeviceKey, label: string | null): Promise<void>
   deleteSession(id: SessionId): Promise<void>
   downloadSession(): Promise<void>
@@ -208,23 +143,13 @@ export interface HistoryBrowser {
 }
 
 export interface HistoryBrowserDeps {
-  /** Called on every access rather than captured: the probe resolves after this model is built,
-   *  and a captured null would leave the Log empty for the life of the tab. */
+
   readonly store: () => HistoryStore | null
   readonly now: () => number
-  /** Turning a document into a file is the infrastructure's job. It is handed the parts rather
-   *  than a string so the whole export is never held twice. */
+
   readonly download: (fileName: string, parts: Iterable<string>) => void
 }
 
-/**
- * How long a session ran, in milliseconds.
- *
- * A clock stepped backwards mid-session can leave `endedAt` before `startedAt`, so a span that is
- * not positive falls back to the sample count — one row a second is the recorder's own gate, and no
- * clock adjustment can corrupt a count. An open session is measured against the caller's clock, so
- * a live row in the list grows if the caller re-reads it.
- */
 export function sessionDurationMs(record: SessionRecord, now: number): number {
   const endedAt = record.endedAt ?? (record.state === 'open' ? now : record.heartbeatAt)
   const span = endedAt - record.startedAt
@@ -232,19 +157,11 @@ export function sessionDurationMs(record: SessionRecord, now: number): number {
   return Math.max(record.packSamples, record.solarSamples) * SAMPLE_INTERVAL_MS
 }
 
-/**
- * One device's ledger as a screen holds it: the rows, whether a read is in flight, and the key it
- * is tracking so a foreign tab's write can be re-read against the right one.
- *
- * Two of these exist. The Stats page shows a pack's stored log and the controller's stored history
- * on the same screen, and a device key belongs to one radio or the other, so a single slot would
- * make the two evict each other on every refresh.
- */
 interface LedgerSlot {
   readonly held: ShallowRef<StoredRingLedger | null>
   readonly loading: Ref<boolean>
   key: DeviceKey | null
-  /** Latest read wins; a bump also abandons whatever is in flight. */
+
   token: number
 }
 
@@ -268,19 +185,18 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   const missing = ref<SessionId | null>(null)
   const failure = ref<string | null>(null)
   const selection = shallowRef<TimeWindow | null>(null)
+  const selectedHourStart = ref<number | null>(null)
   const exportState = ref<ExportState>('idle')
   const windowWarnings = shallowRef<readonly WarningRecord[] | null>(null)
   const ringLedgers = shallowRef<readonly RingLedgerSummary[]>([])
   const ringSlot = emptyLedgerSlot()
   const solarSlot = emptyLedgerSlot()
-  /** Frozen at each refresh so the durations below are a pure function of reactive state; a
-   *  component that wants a live figure calls sessionDurationMs with its own ticking clock. */
+
   const listedAt = ref(0)
 
   let requestedId: SessionId | null = null
   let requestedWindow: TimeWindow | undefined
-  /** A request the probe was not ready for, replayed once a store exists. Never a request that
-   *  was attempted and answered — a session that is genuinely gone must not be asked for again. */
+
   let deferredId: SessionId | null = null
   let listToken = 0
   let loadToken = 0
@@ -311,8 +227,6 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
       })
     }
 
-    // The group holding the newest session leads, so reopening the page after a watch puts that
-    // watch at the top rather than wherever its device first appeared.
     built.sort(
       (left, right) => right.sessions[0].record.startedAt - left.sessions[0].record.startedAt,
     )
@@ -333,29 +247,23 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     return { sessions: rows.length, recordedMs, oldestStartedAt }
   })
 
+  const selectedHour = computed(() =>
+    loaded.value?.hours.find((hour) => hour.hourStart === selectedHourStart.value) ?? null,
+  )
+
   const account = computed<SessionAccount | null>(() => {
     const session = loaded.value
     if (session === null) return null
+    if (selectedHour.value !== null) return { ledger: selectedHour.value.ledger, coverage: [] }
 
     const window = selection.value
     if (window === null) return { ledger: session.record.ledger, coverage: session.record.coverage }
 
-    // A selection is re-integrated from the samples rather than scaled out of the stored ledger:
-    // the identity holds over a window, and prorating an account across one is not the same thing.
     return recomputeAccount(
       within(session.pack, window),
       within(session.solar, window),
       MAX_PAIRING_AGE_MS,
     )
-  })
-
-  const exportSize = computed<ExportSize | null>(() => {
-    const record = loaded.value?.record
-    if (!record) return null
-    return {
-      rows: record.packSamples + record.solarSamples,
-      bytes: estimateExportBytes(record.packSamples, record.solarSamples),
-    }
   })
 
   async function refresh(): Promise<void> {
@@ -377,7 +285,7 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
       devices.value = known
       warnings.value = warned
       ringLedgers.value = ledgers
-      usage.value = usageOf(totals.totalSamples, totals.sessions, totals.ringRecords)
+      usage.value = totals
       listedAt.value = deps.now()
       failure.value = null
     } catch (error) {
@@ -388,8 +296,6 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
 
     if (token !== listToken) return
     if (deferredId !== null) await read()
-    // The channel never delivers a ring write to the tab that posted it, so the ledgers this tab
-    // has open are re-read here whenever anything else about the archive changed too.
     for (const slot of [ringSlot, solarSlot]) {
       if (slot.key !== null) await refreshLedgerInto(slot, slot.key)
     }
@@ -404,10 +310,12 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     if (already?.record.id !== id) {
       loaded.value = null
       selection.value = null
+      selectedHourStart.value = null
       exportState.value = 'idle'
     }
     requestedId = id
     requestedWindow = window
+    if (window !== undefined) select(null)
     missing.value = null
     return read()
   }
@@ -420,18 +328,12 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     loading.value = false
     loaded.value = null
     selection.value = null
+    selectedHourStart.value = null
     missing.value = null
     exportState.value = 'idle'
-    // Nothing is on screen, so pruning is free to reclaim whatever it was holding back.
     deps.store()?.noteViewing?.(null)
   }
 
-  /**
-   * Reads every warning inside the window, uncapped, so a range tally counts the whole window
-   * rather than the most recent few the standalone log caps at. Isolated: latest wins by token,
-   * and it never touches the shared `warnings` list or `failure` line. Reset
-   * to null before the read so the capped list stands in until this window's own answer lands.
-   */
   async function loadWindowWarnings(window: TimeWindow): Promise<void> {
     const store = activeStore()
     if (!store) {
@@ -446,18 +348,10 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
       if (token !== windowWarningsToken) return
       windowWarnings.value = found
     } catch {
-      // A windowed read that failed is honestly no windowed tally; the view falls back to the
-      // capped list. Kept off the shared failure line so a Stats read cannot alarm the Log.
       if (token === windowWarningsToken) windowWarnings.value = null
     }
   }
 
-  /**
-   * Reads one device's whole ledger into a slot. Latest wins by token, exactly as
-   * `loadWindowWarnings` does, so switching packs in the selector supersedes a read still in flight
-   * rather than letting a stale one land. Reset to null before the read: this is a different key
-   * from whatever was on screen, and its rows would misrepresent the new one.
-   */
   async function loadLedgerInto(slot: LedgerSlot, deviceKey: DeviceKey): Promise<void> {
     const store = activeStore()
     slot.key = deviceKey
@@ -474,18 +368,12 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
       if (token !== slot.token) return
       slot.held.value = found
     } catch {
-      // A ledger that could not be read is honestly none held. Kept off the shared failure line
-      // for the same reason as loadWindowWarnings: a Stats read must not alarm the Log.
       if (token === slot.token) slot.held.value = null
     } finally {
       if (token === slot.token) slot.loading.value = false
     }
   }
 
-  /**
-   * Re-reads a ledger already on screen, in place. Never clears the slot first — the rows already
-   * shown for this key stay put until the fresh answer lands.
-   */
   async function refreshLedgerInto(slot: LedgerSlot, deviceKey: DeviceKey): Promise<void> {
     const store = activeStore()
     slot.key = deviceKey
@@ -497,7 +385,6 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
       if (token !== slot.token) return
       slot.held.value = found
     } catch {
-      // As above: a failed re-read leaves whatever was already shown rather than blanking it.
     }
   }
 
@@ -557,9 +444,14 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
   }
 
   function select(window: TimeWindow | null): void {
-    // A drag that never moved selects nothing rather than an empty window, which would print a
-    // ledger of zeros where the session's own figures were.
     selection.value = window === null || window.to <= window.from ? null : window
+    selectedHourStart.value = null
+  }
+
+  function selectHour(hourStart: number | null): void {
+    const hour = loaded.value?.hours.find((candidate) => candidate.hourStart === hourStart)
+    selectedHourStart.value = hour?.hourStart ?? null
+    selection.value = hour === undefined ? null : { from: hour.from, to: hour.to }
   }
 
   async function renameDevice(key: DeviceKey, label: string | null): Promise<void> {
@@ -576,7 +468,6 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
       failure.value = describeFailure(error)
       return
     }
-    // This tab receives no broadcast for its own writes.
     await refresh()
   }
 
@@ -606,8 +497,6 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     try {
       const pack: PackSample[] = []
       const solar: SolarSample[] = []
-      // Streamed rather than taken from the loaded session: what is loaded may be a clamped
-      // window, and the file has to be the whole recording.
       await store.streamChunks(session.record.id, PACK_STREAM, ENTIRE_SESSION, (chunk) => {
         if (chunk.stream !== PACK_STREAM || !isReadableLayout(chunk.layout)) return
         appendAll(pack, decodePackChunk(chunk))
@@ -619,13 +508,17 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
       })
       if (token !== loadToken) return
 
+      const rawComplete = pack.length === session.record.packSamples && solar.length === session.record.solarSamples &&
+        session.record.retainedFrom === null && session.record.droppedChunks === 0
       deps.download(
         exportFileName(session.label, session.record.startedAt),
         exportSessionParts({
           record: session.record,
           packDevice: session.packDevice,
           solarDevice: session.solarDevice,
-          recomputedLedger: recomputeLedger(pack, solar, MAX_PAIRING_AGE_MS),
+          recomputedLedger: rawComplete ? recomputeLedger(pack, solar, MAX_PAIRING_AGE_MS) : null,
+          hours: session.hours,
+          rawCoverage: pack.length + solar.length === 0 ? 'none' : rawComplete ? 'complete' : 'partial',
           pack,
           solar,
           generatedAt: deps.now(),
@@ -667,6 +560,7 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     missing.value = null
     failure.value = null
     selection.value = null
+    selectedHourStart.value = null
     exportState.value = 'idle'
     windowWarnings.value = null
     for (const slot of [ringSlot, solarSlot]) {
@@ -683,14 +577,10 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
 
     const store = activeStore()
     if (!store) {
-      // The probe has not answered. Reporting the session missing here would be a guess about a
-      // database nobody has opened yet, so the request waits instead.
       deferredId = id
       return
     }
     deferredId = null
-    // Declared before the read, so a prune fired by another tab's checkpoint mid-read cannot take
-    // the session out from under it.
     store.noteViewing?.(id)
 
     const token = (loadToken += 1)
@@ -703,7 +593,7 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
         missing.value = id
         return
       }
-      loaded.value = hydrate(stored)
+      loaded.value = hydrate(stored, requestedWindow)
       missing.value = null
       failure.value = null
     } catch (error) {
@@ -739,24 +629,11 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     const solarDevice = session.solarDevice?.key === renamed.key ? renamed : session.solarDevice
     if (packDevice === session.packDevice && solarDevice === session.solarDevice) return
 
-    // Patched rather than re-read: the name is a string and the session behind it is megabytes of
-    // samples that did not change.
     loaded.value = {
       ...session,
       packDevice,
       solarDevice,
       label: deviceLabel(packDevice ?? solarDevice, session.label),
-    }
-  }
-
-  function usageOf(totalSamples: number, sessionCount: number, ringRecords: number): ArchiveUsage {
-    return {
-      totalSamples,
-      sessions: sessionCount,
-      capacitySamples: MAX_TOTAL_SAMPLES,
-      usedRatio: totalSamples / MAX_TOTAL_SAMPLES,
-      nearCapacity: totalSamples >= MAX_TOTAL_SAMPLES * PRUNE_TARGET_RATIO,
-      ringRecords,
     }
   }
 
@@ -774,8 +651,8 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     missing,
     failure,
     selection,
+    selectedHour,
     account,
-    exportSize,
     exportState,
     windowWarnings,
     ringLedgers,
@@ -794,6 +671,7 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
     setPackClock,
     deleteRingLedger,
     select,
+    selectHour,
     renameDevice,
     deleteSession,
     downloadSession,
@@ -804,15 +682,10 @@ export function createHistoryBrowser(deps: HistoryBrowserDeps): HistoryBrowser {
 interface DecodedStreams {
   readonly pack: PackSample[]
   readonly solar: SolarSample[]
-  /** Chunks this build cannot read, skipped and counted rather than guessed at. */
+
   readonly unreadableChunks: number
 }
 
-/**
- * Chunks to samples. Chunks arrive in seq order and rows inside one are ascending, so the
- * concatenation is already the timeline. Shared by the session loader and the window-power loader
- * so both decode a stored session by exactly one rule.
- */
 function decodeStored(stored: StoredSession): DecodedStreams {
   const pack: PackSample[] = []
   const solar: SolarSample[] = []
@@ -830,7 +703,7 @@ function decodeStored(stored: StoredSession): DecodedStreams {
   return { pack, solar, unreadableChunks }
 }
 
-function hydrate(stored: StoredSession): LoadedSession {
+function hydrate(stored: StoredSession, requestedWindow?: TimeWindow): LoadedSession {
   const { pack, solar, unreadableChunks } = decodeStored(stored)
 
   const device = stored.packDevice ?? stored.solarDevice
@@ -842,17 +715,17 @@ function hydrate(stored: StoredSession): LoadedSession {
     pack,
     solar,
     timeline: pairSamples(pack, solar, MAX_PAIRING_AGE_MS),
+    hours: stored.hours ?? [],
     window: windowOf(stored.record, pack, solar),
+    rawWindow: renderWindowFor({
+      from: stored.record.startedAt,
+      to: stored.record.endedAt ?? stored.record.heartbeatAt,
+    }, requestedWindow).window,
     windowClamped: stored.windowClamped,
     unreadableChunks,
   }
 }
 
-/**
- * What the loaded rows actually span, which is what every axis is drawn against. The session's own
- * stamps are the fallback and not the answer: a clamped read holds a slice, and a pruned head
- * starts later than the session did.
- */
 function windowOf(
   record: SessionRecord,
   pack: readonly PackSample[],
@@ -860,7 +733,6 @@ function windowOf(
 ): TimeWindow {
   const first = firstStamp(pack, solar) ?? record.retainedFrom ?? record.startedAt
   const last = lastStamp(pack, solar) ?? record.endedAt ?? record.heartbeatAt
-  // A single sample, or none, still needs a window with width, or every scale divides by zero.
   return { from: first, to: last > first ? last : first + SAMPLE_INTERVAL_MS }
 }
 
@@ -885,8 +757,7 @@ function within<TSample extends { readonly at: number }>(
   return samples.filter((sample) => sample.at >= window.from && sample.at <= window.to)
 }
 
-/** A spread would pass one argument per row: measured on this engine, 125,000 arguments throws
- *  RangeError, and a browsed session is not bounded by ten minutes. */
+/** Large sessions exceed the JavaScript argument limit when spread into push. */
 function appendAll<TSample>(target: TSample[], samples: readonly TSample[]): void {
   for (const sample of samples) target.push(sample)
 }
@@ -896,14 +767,6 @@ function describeFailure(error: unknown): string {
   return message || 'The log could not be read.'
 }
 
-/**
- * The shared read model, and the one call that wires it to the browser.
- *
- * The environment is handed over in one piece after the storage probe answers, rather than
- * imported here, because both halves of it are adapters: the store is IndexedDB and the download
- * is an object URL. The application layer states what it needs and the composition root supplies
- * it, which is also what lets a test drive this with a Map and a spy.
- */
 export interface HistoryEnvironment {
   readonly store: HistoryStore
   readonly downloadJson: (fileName: string, parts: Iterable<string>) => void

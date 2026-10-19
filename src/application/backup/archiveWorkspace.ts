@@ -170,9 +170,9 @@ export function createArchiveWorkspace(dependencies: ArchiveWorkspaceDependencie
     })
   }
 
-  async function captureForSync(includeSecret: boolean): Promise<ArchiveSnapshot> {
+  async function captureForSync(includeSecret: boolean, detail: 'complete' | 'hourly' = 'hourly'): Promise<ArchiveSnapshot> {
     if (busy.value) throw new Error('Finish the current archive operation before syncing.')
-    return requireRepository().capture(captureArchivePreferences(includeSecret))
+    return requireRepository().capture(captureArchivePreferences(includeSecret), detail)
   }
 
   async function saveSyncedArchive(snapshot: ArchiveSnapshot, select = false): Promise<void> {

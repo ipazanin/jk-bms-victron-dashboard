@@ -1,25 +1,4 @@
-/**
- * The seam the archive is reached through, and the store that exists when there is no archive.
- *
- * Everything above this line — the recorder, the archive view, the export — is written against
- * this interface and never against IndexedDB. That is what lets the recorder's whole state
- * machine be exercised with a Map behind it, in a browser environment that has no database at
- * all, and it is why the interface has to be complete: a caller that reaches around the port for
- * one thing it cannot express here takes that one thing out of every test above it.
- *
- * Two rules shape the surface.
- *
- * A store executes plans and never makes them. What to evict is decided by a pure function over
- * session rows; the store is handed the plan and carries it out in the same transaction as the
- * write that overran the budget. So the eviction policy is testable with no database, and the
- * adapter holds no policy to disagree with.
- *
- * Nothing here throws for being unavailable. A browser with no IndexedDB, or one that refused to
- * open the database, gets a store whose every method answers honestly and stores nothing. Honest
- * degradation is a value rather than a branch: the application layer has one availability check,
- * where it prints the reason, instead of a null test at every call site.
- */
-
+import type { SessionHour } from '../../domain/history/SessionHour'
 import type { BatterySnapshot, BmsSettings, DeviceInfo } from '../../domain/bms/types'
 import type { RingMergeOutcome } from '../../domain/history/RingMergeOutcome'
 import type { RingSnapshot } from '../../domain/history/RingSnapshot'
@@ -44,17 +23,10 @@ import type {
 } from '../../domain/history/types'
 import type { SolarReading } from '../../domain/solar/types'
 
-/**
- * The whole ledger of one pack, as the archive hands it over.
- *
- * Declared in the domain because `ringClockContextOf` takes it and every member of it is a domain
- * shape; re-exported here because the port is the seam every caller above reaches it through, and a
- * second import path for one type is a second place for the two to drift.
- */
 export type { StoredRingLedger }
 
 export type HistoryUnavailableReason =
-  /** The API is absent: Safari private browsing, and several in-app browsers. */
+
   | 'no-indexeddb'
   /** open() rejected. */
   | 'open-denied'
@@ -68,9 +40,9 @@ export type HistoryUnavailableReason =
 export interface HistoryAvailability {
   readonly usable: boolean
   readonly reason: HistoryUnavailableReason | null
-  /** navigator.storage.persist(); null when the browser will not say, which is common. */
+
   readonly persisted: boolean | null
-  /** navigator.storage.estimate(); one display line, and never an input to pruning. */
+
   readonly estimatedBytes: number | null
   readonly quotaBytes: number | null
 }
@@ -79,59 +51,29 @@ export interface CommitOutcome {
   readonly stored: boolean
   readonly totalSamples: number
   readonly prunedSessionIds: readonly SessionId[]
-  /** Wall clock of the first row that survived a truncation, or null when nothing was cut. */
+
   readonly truncatedFrom: number | null
   readonly failure: HistoryUnavailableReason | null
 }
 
-/**
- * What one stored-log read did to the pack's ledger.
- *
- * The fold's own five figures, widened with the four only a store can answer: whether the write
- * happened at all, what the ledger holds afterwards, what the budget took, and the reason when the
- * archive was unusable. Keeping the two apart is what lets the fold stay a pure function over bytes
- * with no notion of storage, availability or budget.
- *
- * A read that carried no record still ingests: the journal row is the evidence, and a pack that
- * stopped answering 0xA7 is exactly what a stored history of attempts reveals.
- */
 export interface RingIngestOutcome extends RingMergeOutcome {
   readonly stored: boolean
-  /** Rows this pack's ledger holds after the write. */
+
   readonly totalRecords: number
-  /** Rows the prune this write ran gave up — from this ledger, and from any dropped whole. */
+
   readonly prunedRecords: number
   readonly failure: HistoryUnavailableReason | null
 }
 
-/**
- * What one history sweep did to the controller's ledger.
- *
- * The fold's own five figures, widened with the four only a store can answer — the same split, for
- * the same reason, as `RingIngestOutcome`: the fold stays a pure function over records with no
- * notion of storage, availability or budget.
- */
 export interface SolarHistoryIngestOutcome extends SolarMergeOutcome {
   readonly stored: boolean
-  /** Days this controller's ledger holds after the write. */
+
   readonly totalDays: number
-  /** Rows the prune this write ran gave up — from this ledger, and from any dropped whole. */
+
   readonly prunedRecords: number
   readonly failure: HistoryUnavailableReason | null
 }
 
-/**
- * The list row for the device selector: one line per ledger, carrying no record.
- *
- * The two counters are the pack's own clock face and not wall time, so this row is honest without
- * a clock context behind it. A ledger holding no record — a device read once that answered nothing —
- * still lists, with zeroes, so the receipt for that read is reachable.
- *
- * `kind` is derived from the rows themselves rather than from the device row, which a ledger can
- * outlive: what wrote a row is a property of the row, and it is the one thing a caller must know
- * before it decides which fold to reach for. A controller's ledger reports zero for both clock
- * counters, because it keeps no clock face at all.
- */
 export interface RingLedgerSummary {
   readonly deviceKey: DeviceKey
   readonly kind: DeviceRecord['kind']
@@ -142,13 +84,6 @@ export interface RingLedgerSummary {
   readonly newestPackClockSeconds: number
 }
 
-/**
- * The fields the recorder owns, merged over the stored row on every commit.
- *
- * `sealedSamples` is deliberately absent. It counts rows in sealed chunks and the store is the
- * only party that knows which chunks it holds sealed, so letting a writer assert it would let two
- * tabs disagree about the archive's total with nothing able to arbitrate.
- */
 export interface SessionPatch {
   readonly heartbeatAt: number
   readonly packSamples: number
@@ -173,12 +108,11 @@ export interface SessionClosure extends SessionPatch {
   readonly endReason: SessionEndReason
 }
 
-/** The list row. Carries no chunk, so the archive list costs one index scan at any size. */
 export interface SessionListing {
   readonly record: SessionRecord
-  /** The device the session groups under, or null when its row has not been written yet. */
+
   readonly device: DeviceRecord | null
-  /** What to print: the owner's name for the device, else the derived one, else the fallback. */
+
   readonly label: string
 }
 
@@ -186,22 +120,14 @@ export interface StoredSession {
   readonly record: SessionRecord
   readonly packDevice: DeviceRecord | null
   readonly solarDevice: DeviceRecord | null
-  /** Chunks, not samples. Hydrating two million objects to fill two thousand pixels is the cost
-   *  the columnar layout exists to avoid, so the thinning happens after this. */
+
   readonly pack: readonly PackChunk[]
   readonly solar: readonly SolarChunk[]
-  /** True when the span asked for was wider than one read may return. */
+
   readonly windowClamped: boolean
+  readonly hours?: readonly SessionHour[]
 }
 
-/**
- * The widest span a single read may cover.
- *
- * The session view's clock band is a noon-to-noon day, so nothing it draws is wider than this,
- * and a read returning more would hydrate chunks no pixel could show. A longer session is
- * returned from its latest data backwards with `windowClamped` set, so the view can say it is
- * looking at a window onto the session rather than at the whole of it.
- */
 export const MAX_RENDER_WINDOW_MS = 24 * 60 * 60_000
 
 export interface RenderWindow {
@@ -209,18 +135,10 @@ export interface RenderWindow {
   readonly clamped: boolean
 }
 
-/**
- * The span a read actually covers: what was asked for, intersected with what the session holds,
- * cut to `MAX_RENDER_WINDOW_MS` from its late end.
- *
- * It belongs to the port rather than to either implementation because both have to answer
- * identically — the same session read through a Map and through IndexedDB must draw the same
- * ribbon, and a clamp invented twice is a clamp that will eventually differ.
- */
 export function renderWindowFor(available: TimeWindow, requested?: TimeWindow): RenderWindow {
   const from = requested === undefined ? available.from : Math.max(available.from, requested.from)
   const requestedTo = requested === undefined ? available.to : Math.min(available.to, requested.to)
-  // An intersection with nothing in it is an empty window, never an inverted one.
+
   const to = Math.max(from, requestedTo)
 
   if (to - from <= MAX_RENDER_WINDOW_MS) return { window: { from, to }, clamped: false }
@@ -228,50 +146,29 @@ export function renderWindowFor(available: TimeWindow, requested?: TimeWindow): 
 }
 
 export interface HistoryStore {
-  /**
-   * What this store can answer, which is not settled for its lifetime. A connection asked to stand
-   * aside for another tab's upgrade, or one whose writes have started aborting, revises this and
-   * says so on `watch` — the store keeps its identity through both, so nothing derived from that
-   * identity would ever notice.
-   */
   readonly availability: HistoryAvailability
 
   openSession(record: SessionRecord): Promise<void>
-  /**
-   * Writes the chunk, merges the session patch, moves the archive counter — for a seal only —
-   * and executes the prune plan, all as one indivisible write.
-   *
-   * A chunk whose session was never opened is refused rather than stored: a session row invented
-   * here would carry none of the fields only the recorder knows, and would be indistinguishable
-   * from a real one afterwards.
-   */
-  commitChunk(chunk: HistoryChunk, patch: SessionPatch): Promise<CommitOutcome>
-  /** Folds the unsealed tails into the counted totals, exactly once, and closes the row. */
+
+  commitChunk(chunk: HistoryChunk, patch: SessionPatch, hours?: readonly SessionHour[]): Promise<CommitOutcome>
+
+  compactSession?(id: SessionId): Promise<void>
   closeSession(id: SessionId, closure: SessionClosure): Promise<void>
-  /** Row and chunks die together. An orphan chunk is unreachable and holds budget forever. */
+
   deleteSession(id: SessionId): Promise<void>
 
-  /**
-   * Appends one warning episode. Out of the sample budget — warnings are bounded per session and
-   * die with it, so they never trip pruning and pruning never counts them.
-   */
   appendWarning(record: WarningRecord): Promise<void>
-  /** Every warning of one session, in the order they fired. */
+
   warningsOf(id: SessionId): Promise<readonly WarningRecord[]>
-  /** Warnings across every session, most recent first, for the standalone log. */
+
   listWarnings(limit?: number): Promise<readonly WarningRecord[]>
-  /**
-   * Every warning whose `at` lies inside the window, across every session. Read straight off the
-   * time index and uncapped, so a wide range's tally counts the whole window rather than only the
-   * most recent few the standalone log holds.
-   */
+
   warningsInWindow(window: TimeWindow): Promise<readonly WarningRecord[]>
 
-  /** Newest first. */
   listSessions(limit?: number): Promise<readonly SessionListing[]>
   listDevices(): Promise<readonly DeviceRecord[]>
   readSession(id: SessionId, window?: TimeWindow): Promise<StoredSession | null>
-  /** Streams chunks one at a time, so peak memory is one chunk rather than one session. */
+
   streamChunks(
     id: SessionId,
     stream: StreamName,
@@ -279,54 +176,18 @@ export interface HistoryStore {
     visit: (chunk: HistoryChunk) => void,
   ): Promise<void>
 
-  /**
-   * Merges a derived device row over the stored one. It never clears a name the owner chose:
-   * `userLabel` belongs to `renameDevice` alone, so a reconnect cannot undo a rename.
-   */
   upsertDevice(record: DeviceRecord): Promise<DeviceRecord>
-  /**
-   * Read and write as one indivisible step, so two tabs cannot interleave into a lost update.
-   * An empty label restores the derived default rather than blanking the device.
-   */
+
   renameDevice(key: DeviceKey, label: string | null): Promise<DeviceRecord | null>
 
-  /**
-   * Folds one stored-log read into the pack's own ledger and journals it, as one write. Idempotent:
-   * a read filed twice appends nothing the second time, because the fold recognises what it already
-   * holds. Never throws — a refused write comes back as `stored: false` with its reason.
-   *
-   * Ring rows sit outside the sample budget entirely. This moves neither `HistoryMeta.totalSamples`
-   * nor any session's `sealedSamples`, and session pruning never sees a ring row. The two budgets
-   * cannot evict each other, which is the whole reason the ledger is its own store rather than a
-   * session dressed up as one.
-   */
   appendRingSnapshot(snapshot: RingSnapshot): Promise<RingIngestOutcome>
-  /**
-   * Folds one history sweep into the controller's own ledger and journals it, as one write, into the
-   * same two stores a pack's ring lives in. Idempotent for the same reason and by a different route:
-   * a Victron day carries a sequence number, so a sweep filed twice recognises every day it already
-   * holds without comparing a byte.
-   *
-   * Reusing the ring stores is what keeps the two device histories on one budget, one prune plan and
-   * one sweep. A device key belongs to a pack or to a controller and never to both, so the two never
-   * meet inside a ledger; the row's own format is what says which fold may read it.
-   */
+
   appendSolarHistory(snapshot: SolarHistorySnapshot): Promise<SolarHistoryIngestOutcome>
-  /**
-   * One device's whole ledger, seq-ascending, with its journal and device row. Null when this browser
-   * has neither stored a record for the key nor journalled a read against it.
-   *
-   * Whole rather than windowed: wall time is derived through a correction that can change, so an
-   * index over wall time would freeze today's correction into the archive.
-   */
+
   readRingLedger(deviceKey: DeviceKey): Promise<StoredRingLedger | null>
-  /** Every device this browser has read stored history from, most recently read first. */
+
   listRingLedgers(): Promise<readonly RingLedgerSummary[]>
-  /**
-   * Read-and-write in one transaction, shaped like renameDevice, so two tabs cannot interleave into
-   * a lost update. Null when no device row exists — a ledger can outlive one, and there is nothing
-   * to hang the owner's answer on until the pack is seen again.
-   */
+
   setPackClock(
     deviceKey: DeviceKey,
     clock: {
@@ -334,53 +195,25 @@ export interface HistoryStore {
       readonly aheadSeconds: number | null
     },
   ): Promise<DeviceRecord | null>
-  /** Rows and journal die together. The device row survives: it is the label, and the owner's. */
+
   deleteRingLedger(deviceKey: DeviceKey): Promise<void>
 
-  /**
-   * Runs once on open. Closes sessions a killed tab left open, deletes the ones that recorded
-   * nothing, and sweeps chunks whose session row is gone. Never destructive to a session that
-   * still holds rows — a merely frozen tab must find its work intact when it thaws.
-   */
   recover(now: number): Promise<{ readonly closed: number; readonly orphansRemoved: number }>
-  /** Ring rows are reported on their own line because they are on their own budget. */
+
   usage(): Promise<{
     readonly totalSamples: number
     readonly sessions: number
     readonly ringRecords: number
+    readonly rawBytes?: number
+    readonly rawCapacityBytes?: number
   }>
-  /**
-   * Fires when what this store can answer changed: another tab wrote to the archive, or this store
-   * stopped being usable. Returns an unsubscribe. Nothing is handed over — the archive is the shared
-   * state and a receiver re-reads what it needs from it, `availability` included.
-   *
-   * A store never notifies its own writer. News of another tab is carried by BroadcastChannel, which
-   * does not deliver to the object that posted, and a view refreshing itself off its own writes would
-   * reload the list under the user on every checkpoint. Its own availability is the one thing it must
-   * announce locally, for that same reason: the tab that stands down is the one tab a broadcast of
-   * its own can never reach.
-   */
+
   watch(onChanged: () => void): () => void
   close(): void
 
-  /**
-   * The session on screen, which pruning must not evict from under the reader.
-   *
-   * Optional because a store with no budget has nothing to protect, and because protection is
-   * ultimately derived from stored fields — a second tab cannot be told what this one is reading,
-   * so a reader whose session is pruned elsewhere still has to survive `readSession → null`.
-   */
   noteViewing?(id: SessionId | null): void
 }
 
-/**
- * The store for a browser that cannot keep an archive. Never throws, never returns null for a
- * shape that has one, and stores nothing.
- *
- * Every read answers as an empty archive, which is true, and every write reports the reason it
- * did not happen, which is the sentence the storage line prints. Nothing above has to ask whether
- * it holds a store.
- */
 export function unavailableHistoryStore(reason: HistoryUnavailableReason): HistoryStore {
   const availability: HistoryAvailability = {
     usable: false,
@@ -410,7 +243,7 @@ export function unavailableHistoryStore(reason: HistoryUnavailableReason): Histo
     listDevices: async () => [],
     readSession: async () => null,
     streamChunks: async () => undefined,
-    // The row it was handed, so a caller may still name the device on screen for this page load.
+
     upsertDevice: async (record: DeviceRecord) => record,
     renameDevice: async () => null,
     appendRingSnapshot: async () => ({

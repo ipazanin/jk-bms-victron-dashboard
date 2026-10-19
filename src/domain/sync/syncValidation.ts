@@ -1,9 +1,9 @@
 import { archivePreference } from '../backup/preferenceValidation'
-import { bounded, count, identity, list, record, requireArchive, shape, timestamp } from '../backup/validation'
+import { bounded, choice, count, identity, list, optional, record, requireArchive, shape, timestamp } from '../backup/validation'
 import type { CloudArchiveRevision } from './CloudArchiveRevision'
 import type { CloudCatalog } from './CloudCatalog'
 import type { CloudSettingsRevision } from './CloudSettingsRevision'
-import { CLOUD_ARCHIVE_BYTES, CLOUD_CATALOG_REVISIONS } from './limits'
+import { CLOUD_ARCHIVE_BYTES, CLOUD_CATALOG_REVISIONS, CLOUD_SNAPSHOT_BYTES } from './limits'
 import { sharedPreferences } from './sharedSettings'
 
 export function cloudIdentity(input: unknown, path: string): void {
@@ -16,7 +16,17 @@ export function cloudHash(input: unknown, path: string): void {
 }
 
 export function validateCloudArchiveRevision(input: unknown): asserts input is CloudArchiveRevision {
+  if (record(input, 'cloud archive').storage === 'snapshot') {
+    shape({
+      storage: choice('snapshot'), id: cloudIdentity, source: shape({ id: cloudIdentity, label: cloudIdentity }, true),
+      exportedAt: timestamp, createdAt: timestamp, snapshotFileId: cloudIdentity, snapshotHash: cloudHash, contentHash: cloudHash,
+      sessions: count, samples: choice(0), hours: count, bytes: bounded(1, CLOUD_ARCHIVE_BYTES, true),
+      storedBytes: bounded(1, CLOUD_SNAPSHOT_BYTES, true),
+    }, true)(input, 'cloud snapshot')
+    return
+  }
   shape({
+    storage: optional(choice('blocks')),
     id: cloudIdentity, source: shape({ id: cloudIdentity, label: cloudIdentity }, true), exportedAt: timestamp,
     manifestFileId: cloudIdentity, manifestHash: cloudHash, contentHash: cloudHash,
     sessions: count, samples: count, bytes: bounded(0, CLOUD_ARCHIVE_BYTES, true),
@@ -37,7 +47,7 @@ export function validateCloudCatalog(input: unknown): asserts input is CloudCata
   for (const key of ['archives', 'settings'] as const) {
     requireArchive(Array.isArray(catalog[key]) && catalog[key].length <= CLOUD_CATALOG_REVISIONS, `cloud catalogue.${key}`, 'too many revisions or invalid list')
   }
-  shape({ archives: list(validateCloudArchiveRevision), settings: list(validateCloudSettingsRevision) }, true)(input, 'cloud catalogue')
+  shape({ archives: list(validateCloudArchiveRevision), settings: list(validateCloudSettingsRevision), unreadableArchives: optional(count) }, true)(input, 'cloud catalogue')
   const valid = input as CloudCatalog
   for (const revisions of [valid.archives, valid.settings]) {
     requireArchive(new Set(revisions.map((revision) => revision.id)).size === revisions.length, 'cloud catalogue', 'duplicate revision')

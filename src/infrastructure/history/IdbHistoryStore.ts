@@ -1,39 +1,10 @@
-/**
- * The Log on disk. The only IndexedDB adapter in the project.
- *
- * It executes plans and never makes them: what to drop is decided by `planPrune`, what a chunk
- * holds is decided by the column layout, and what a session means is decided by the ledger. This
- * file's whole job is that those decisions land atomically. A session write is one transaction
- * scoped to every session store, because IndexedDB serialises overlapping-scope readwrite
- * transactions across connections on the same origin — which makes commit-plus-prune atomic against
- * a second tab for free, where a read-modify-write split across an await would not be.
- *
- * That same serialisation is why a ring merge is scoped to `RING_STORES` and never to
- * `EVERY_STORE`. The two scopes overlap in nothing but the device row, so an 800-row merge can
- * neither queue behind nor abort a live recording's chunk commit — and the ring keeps no counter in
- * the meta row precisely because a counter there would drag `META` into the scope and put the merge
- * back in the recorder's path.
- *
- * Two counters carry the archive's integrity and both move under one rule: `sealedSamples` on a
- * session and `totalSamples` in the meta row change only when a chunk seals, and only on the
- * transition. A tail rewritten every ten seconds is therefore free, and a commit retried after an
- * ambiguous failure cannot count its rows twice.
- */
-
-import { isReadableLayout } from '../../domain/history/columns'
+import { isReadableLayout, sampleBytes } from '../../domain/history/columns'
 import { deviceLabel } from '../../domain/history/identity'
-import {
-  MAX_SESSIONS,
-  MAX_TOTAL_SAMPLES,
-  PRUNE_TARGET_RATIO,
-  planPrune,
-} from '../../domain/history/budget'
-import type {
-  ChunkExtent,
-  PruneCandidate,
-  PruneProtection,
-  PruneTruncation,
-} from '../../domain/history/budget'
+import { MAX_SESSIONS, MAX_SESSION_HOURS, COMPACT_RETENTION_MS, planRawPrune, retainedCoverage } from '../../domain/history/budget'
+import type { RawChunkExtent } from '../../domain/history/budget'
+import type { SessionHour } from '../../domain/history/SessionHour'
+import { compactSessionInTransaction } from './compactSession'
+import { localRawCapacityBytes } from '../../application/history/localCapacity'
 import { MAX_RING_READS_PER_DEVICE, planRingPrune } from '../../domain/history/ringBudget'
 import type { RingDeviceExtent, RingEviction } from '../../domain/history/ringBudget'
 import { ALIGNMENT_TAIL_RECORDS, foldRingSnapshot } from '../../domain/history/ringLedger'
@@ -93,20 +64,20 @@ import type { ArchiveChannel } from './archiveChannel'
 import { classifyWriteFailure, cursorEach, requestAsPromise, runTransaction } from './idb'
 
 export const DATABASE_NAME = 'shunt.log'
-export const DATABASE_VERSION = 5
+export const DATABASE_VERSION = 6
 
 const SESSIONS = 'sessions'
 const CHUNKS = 'chunks'
+const HOURS = 'sessionHours'
 const DEVICES = 'devices'
-/** The archive's own totals live here. Named outside because no port method moves them. */
+
 export const META = 'meta'
 const WARNINGS = 'warnings'
 const RING_RECORDS = 'ringRecords'
 const RING_READS = 'ringReads'
 
-/** Everything a session write touches. The ring stores are deliberately not among them. */
-const EVERY_STORE = [SESSIONS, CHUNKS, DEVICES, META, WARNINGS]
-/** Everything a ring write touches, and nothing a recording does but the device row. */
+const EVERY_STORE = [SESSIONS, CHUNKS, DEVICES, META, WARNINGS, HOURS]
+
 const RING_STORES = [RING_RECORDS, RING_READS, DEVICES]
 
 const BY_STARTED_AT = 'byStartedAt'
@@ -116,37 +87,23 @@ const BY_SESSION = 'bySession'
 const BY_LAST_SEEN = 'byLastSeen'
 const BY_TIME = 'byTime'
 
-/** The meta store's one row, named outside for the same reason the store is. */
 export const TOTALS_KEY = 'totals'
 
-/**
- * The domain's own target, read here for one purpose only: deciding whether a second and much more
- * expensive planning pass is worth its I/O. What gets dropped is still decided in `planPrune`.
- */
-const PRUNE_TARGET = Math.floor(MAX_TOTAL_SAMPLES * PRUNE_TARGET_RATIO)
-
-/** Higher than any sequence a session can reach, as the open end of a one-session key range. */
 const HIGHEST_SEQ = Number.MAX_SAFE_INTEGER
-
-const NO_CHUNKS: readonly ChunkExtent[] = []
 
 interface PruneExecution {
   readonly evicted: readonly SessionId[]
   readonly freedSamples: number
+  readonly freedBytes: number
   readonly truncatedFrom: number | null
 }
 
-const NOTHING_PRUNED: PruneExecution = { evicted: [], freedSamples: 0, truncatedFrom: null }
-
-/**
- * Builds the stores and indexes for a database at `oldVersion`.
- *
- * An upgrade transaction blocks every tab on the origin, and the chunk store is tens of megabytes,
- * so an upgrade may only add — never rewrite a chunk. A change to what a chunk holds rides on
- * `CHUNK_LAYOUT_VERSION` instead: a chunk keeps the layout it was stamped with, and a build that
- * reads a different one lists it untouched rather than migrating it.
- */
 export function applySchema(database: IDBDatabase, oldVersion: number): void {
+  if (!database.objectStoreNames.contains(HOURS)) {
+    const hours = database.createObjectStore(HOURS, { keyPath: ['sessionId', 'hourStart'] })
+    hours.createIndex(BY_SESSION, 'sessionId')
+    hours.createIndex(BY_TIME, 'hourStart')
+  }
   if (oldVersion < 1) {
     const sessions = database.createObjectStore(SESSIONS, { keyPath: 'id' })
     sessions.createIndex(BY_STARTED_AT, 'startedAt')
@@ -162,31 +119,17 @@ export function applySchema(database: IDBDatabase, oldVersion: number): void {
     database.createObjectStore(META, { keyPath: 'key' })
   }
   if (oldVersion < 2) {
-    // Keyed [sessionId, seq] so one session's warnings are a contiguous range that dies with it;
-    // indexed by time for the standalone log, which reads them most-recent-first across sessions.
     const warnings = database.createObjectStore(WARNINGS, { keyPath: ['sessionId', 'seq'] })
     warnings.createIndex(BY_TIME, 'at')
   }
   if (oldVersion < 3) {
-    // Keyed by the order rows were first seen in, so one device's ledger is a contiguous ascending
-    // range and a row's key never changes. Indexed by device as well, so a whole-ledger delete
-    // cursors the index rather than a constructed compound range — the same reason evictSession does.
-    //
-    // Both radios file here. What wrote a row is a field on the row rather than a store of its own:
-    // a device key belongs to one radio, so the two never meet inside a ledger, and one store keeps
-    // them on one budget, one prune plan and one sweep.
     const records = database.createObjectStore(RING_RECORDS, { keyPath: ['deviceKey', 'seq'] })
     records.createIndex(BY_DEVICE, 'deviceKey')
 
-    // Two stores rather than one: the ledger grows without bound and is folded over, while the
-    // journal is a bounded audit trail that is never merged and never charted.
     const reads = database.createObjectStore(RING_READS, { keyPath: ['deviceKey', 'observedAt'] })
     reads.createIndex(BY_DEVICE, 'deviceKey')
   }
-  // A version number proves an upgrade ran, not that it built what this code now builds — a
-  // database can carry a bumped version from code that no longer exists. So every upgrade ends by
-  // re-verifying the stores this schema owns and building whichever are missing, whatever the
-  // version pair that got it here.
+
   if (!database.objectStoreNames.contains(RING_RECORDS)) {
     const records = database.createObjectStore(RING_RECORDS, { keyPath: ['deviceKey', 'seq'] })
     records.createIndex(BY_DEVICE, 'deviceKey')
@@ -200,28 +143,25 @@ export function applySchema(database: IDBDatabase, oldVersion: number): void {
 export class IdbHistoryStore implements HistoryStore {
   private readonly database: IDBDatabase
   private readonly channel: ArchiveChannel
-  /**
-   * Everyone watching this store, held here as well as on the channel. Measured: BroadcastChannel
-   * delivers to every other channel object of that name and never to the one that posted, so the
-   * tab whose own connection stood down is precisely the tab its own post cannot reach.
-   */
+
   private readonly watchers = new Set<() => void>()
   private state: HistoryAvailability
-  /** The session on screen in this tab, if the view said so. Pruning never evicts it. */
+
   private viewedSessionId: SessionId | null
-  /** The last counter this connection saw, so a refused write can still report an honest total. */
+
   private knownTotal: number
   private connected: boolean
+  private readonly rawCapacityBytes: () => number
 
-  constructor(database: IDBDatabase, availability: HistoryAvailability, channel: ArchiveChannel) {
+  constructor(database: IDBDatabase, availability: HistoryAvailability, channel: ArchiveChannel, rawCapacityBytes: () => number = localRawCapacityBytes) {
     this.database = database
+    this.rawCapacityBytes = rawCapacityBytes
     this.channel = channel
     this.state = availability
     this.viewedSessionId = null
     this.knownTotal = 0
     this.connected = true
-    // Another tab is upgrading the schema. Holding this connection open deadlocks it — the upgrade
-    // never runs and the new tab hangs with no error — so this one steps aside.
+
     database.onversionchange = () => this.standDown()
   }
 
@@ -243,17 +183,15 @@ export class IdbHistoryStore implements HistoryStore {
     this.channel.post('session-opened')
   }
 
-  async commitChunk(chunk: HistoryChunk, patch: SessionPatch): Promise<CommitOutcome> {
+  async commitChunk(chunk: HistoryChunk, patch: SessionPatch, hours: readonly SessionHour[] = []): Promise<CommitOutcome> {
     try {
-      return this.announce(await this.writeChunk(chunk, patch))
+      return this.announce(await this.writeChunk(chunk, patch, hours))
     } catch (error) {
       if (classifyWriteFailure(error) !== 'quota') return this.refusedCommit(null)
-      // The disk refused this, not the budget. Pruning to the sample budget is the only eviction
-      // policy there is, so when the archive is already inside it nothing is freed and the retry
-      // fails the same way — which is the honest answer. The owner deletes a session.
+
       await this.pruneToBudget(patch.heartbeatAt).catch(() => undefined)
       try {
-        return this.announce(await this.writeChunk(chunk, patch))
+        return this.announce(await this.writeChunk(chunk, patch, hours))
       } catch (retried) {
         if (classifyWriteFailure(retried) !== 'quota') return this.refusedCommit(null)
         this.reportUnusable('quota-exhausted')
@@ -273,12 +211,12 @@ export class IdbHistoryStore implements HistoryStore {
       const closed: SessionRecord = {
         ...stored,
         ...closure,
+        coverage: retainedCoverage(closure.coverage, stored.retainedFrom),
         state: 'closed',
         sealedSamples: stored.sealedSamples + folded.samples,
       }
       await requestAsPromise(sessions.put(closed))
-      // A second close finds no open chunk and folds nothing, which is what makes finish()
-      // idempotent all the way down to the counter.
+
       const meta = await this.readMeta(transaction, closure.endedAt)
       await this.writeTotal(transaction, meta, meta.totalSamples + folded.samples, null)
     })
@@ -288,10 +226,15 @@ export class IdbHistoryStore implements HistoryStore {
   async deleteSession(id: SessionId, now: number = Date.now()): Promise<void> {
     if (!this.connected) return
     await runTransaction(this.database, EVERY_STORE, 'readwrite', async (transaction) => {
+      const metaBefore = await this.readMeta(transaction, now)
+      const bytesBefore = await this.rawBytesIn(transaction, metaBefore)
+      let removedBytes = 0
+      await cursorEach(transaction.objectStore(CHUNKS).index(BY_SESSION).openCursor(id), (cursor) => {
+        const chunk = cursor.value as HistoryChunk
+        removedBytes += chunk.length * sampleBytes(chunk.stream)
+      })
       const freed = await this.evictSession(transaction, id)
-      if (freed === 0) return
-      const meta = await this.readMeta(transaction, now)
-      await this.writeTotal(transaction, meta, meta.totalSamples - freed, now)
+      await this.writeTotal(transaction, { ...metaBefore, rawBytes: bytesBefore - removedBytes }, metaBefore.totalSamples - freed, now)
     })
     this.channel.post('pruned')
   }
@@ -304,14 +247,6 @@ export class IdbHistoryStore implements HistoryStore {
     this.announceWarning()
   }
 
-  /**
-   * A filed warning reaches the tab that filed it as well as the others.
-   *
-   * Every other write announces only when it changes what a reader already holds — a chunk commit
-   * that pruned nothing changes no list anybody is looking at. A warning is different: it IS a new
-   * row in a list on screen, and the tab that wrote it is precisely the one BroadcastChannel cannot
-   * deliver to, so the local watchers are called directly alongside the post.
-   */
   private announceWarning(): void {
     this.channel.post('warning-filed')
     for (const watcher of [...this.watchers]) watcher()
@@ -346,8 +281,7 @@ export class IdbHistoryStore implements HistoryStore {
     if (!this.connected) return []
     return runTransaction(this.database, [WARNINGS], 'readonly', async (transaction) => {
       const records: WarningRecord[] = []
-      // Bounded to [from, to] on the time index, so the read costs the window rather than the whole
-      // log and is never capped: a month's tally counts every warning it holds. Ascending.
+
       const range = IDBKeyRange.bound(window.from, window.to)
       await cursorEach(transaction.objectStore(WARNINGS).index(BY_TIME).openCursor(range), (cursor) => {
         records.push(cursor.value as WarningRecord)
@@ -394,16 +328,14 @@ export class IdbHistoryStore implements HistoryStore {
 
   async readSession(id: SessionId, window?: TimeWindow): Promise<StoredSession | null> {
     if (!this.connected) return null
-    return runTransaction(this.database, [SESSIONS, CHUNKS, DEVICES], 'readonly', async (tx) => {
+    return runTransaction(this.database, [SESSIONS, CHUNKS, DEVICES, HOURS], 'readonly', async (tx) => {
       const record = await requestAsPromise<SessionRecord | undefined>(
         tx.objectStore(SESSIONS).get(id),
       )
       if (record === undefined) return null
 
-      // What the session actually holds starts where its retained data starts, which after a
-      // truncation is not where the session began.
       const available = {
-        from: record.retainedFrom ?? record.startedAt,
+        from: record.startedAt,
         to: record.endedAt ?? record.heartbeatAt,
       }
       const held = renderWindowFor(available, window)
@@ -412,10 +344,7 @@ export class IdbHistoryStore implements HistoryStore {
       const chunks = tx.objectStore(CHUNKS).index(BY_SESSION).openCursor(IDBKeyRange.only(id))
       await cursorEach(chunks, (cursor) => {
         const chunk = cursor.value as HistoryChunk
-        // A chunk in a layout this build does not read is handed over rather than dropped, and is
-        // not windowed either — its offsets are a column like any other, so this build cannot place
-        // it in time. The reader counts it and decodes nothing from it, which is what stops a
-        // session full of rows from being reported as empty.
+
         if (isReadableLayout(chunk.layout) && !overlapsWindow(chunk, held.window)) return
         if (chunk.stream === PACK_STREAM) pack.push(chunk)
         else solar.push(chunk)
@@ -429,6 +358,7 @@ export class IdbHistoryStore implements HistoryStore {
         pack: pack.sort(bySeq),
         solar: solar.sort(bySeq),
         windowClamped: held.clamped,
+        hours: await requestAsPromise<SessionHour[]>(tx.objectStore(HOURS).index(BY_SESSION).getAll(id)),
       }
     })
   }
@@ -441,13 +371,10 @@ export class IdbHistoryStore implements HistoryStore {
   ): Promise<void> {
     if (!this.connected) return
     await runTransaction(this.database, [CHUNKS], 'readonly', async (transaction) => {
-      // The primary key is [sessionId, stream, seq], so this range is one stream of one session in
-      // sequence order, and the cursor holds one chunk at a time rather than a session's worth.
       const range = IDBKeyRange.bound([id, stream], [id, stream, HIGHEST_SEQ])
       await cursorEach(transaction.objectStore(CHUNKS).openCursor(range), (cursor) => {
         const chunk = cursor.value as HistoryChunk
-        // Unlike readSession, an unreadable chunk stops here: this feeds the export, which writes
-        // decoded rows and has no row it could write from a layout it cannot decode.
+
         if (!isReadableLayout(chunk.layout)) return
         if (!overlapsWindow(chunk, window)) return
         visit(chunk)
@@ -472,14 +399,13 @@ export class IdbHistoryStore implements HistoryStore {
       this.database,
       [DEVICES],
       'readwrite',
-      // The read and the write are one transaction, so two tabs renaming at once cannot interleave
-      // into a lost update.
+
       async (transaction) => {
         const devices = transaction.objectStore(DEVICES)
         const stored = await requestAsPromise<DeviceRecord | undefined>(devices.get(key))
         if (stored === undefined) return null
         const chosen = label?.trim() ?? ''
-        // An empty field restores the derived name rather than blanking the device.
+
         const updated: DeviceRecord = { ...stored, userLabel: chosen === '' ? null : chosen }
         await requestAsPromise(devices.put(updated))
         return updated
@@ -489,8 +415,6 @@ export class IdbHistoryStore implements HistoryStore {
     return renamed
   }
 
-  // ── what the devices themselves recorded ───────────────────────────────────
-
   async appendRingSnapshot(snapshot: RingSnapshot): Promise<RingIngestOutcome> {
     if (!this.connected) return refusedIngest(this.state.reason)
     try {
@@ -498,10 +422,6 @@ export class IdbHistoryStore implements HistoryStore {
       this.channel.post('ring-read')
       return ingested
     } catch (error) {
-      // No retry, and no room made. A ring write may not evict sessions — the two budgets cannot
-      // reach each other, which is the whole reason the ledger is its own store — and its own prune
-      // has already run inside the transaction that failed, so a second attempt would free exactly
-      // nothing. The read stays on screen, unfiled, carrying the reason.
       return refusedIngest(classifyWriteFailure(error) === 'quota' ? 'quota-exhausted' : null)
     }
   }
@@ -513,9 +433,6 @@ export class IdbHistoryStore implements HistoryStore {
       this.channel.post('ring-read')
       return ingested
     } catch (error) {
-      // No retry and no room made, for the reason a refused ring merge gets neither: the two budgets
-      // cannot reach each other, and this write's own prune has already run inside the transaction
-      // that failed.
       return refusedSolarIngest(classifyWriteFailure(error) === 'quota' ? 'quota-exhausted' : null)
     }
   }
@@ -525,15 +442,13 @@ export class IdbHistoryStore implements HistoryStore {
     return runTransaction(this.database, RING_STORES, 'readonly', async (transaction) => {
       const rows = await this.readRingRows(transaction, deviceKey)
       const journal = await this.readRingJournal(transaction, deviceKey)
-      // A read that answered nothing still has a journal row, and that row is the only evidence
-      // there is about it — so a ledger holding no record is still a ledger.
+
       if (rows.length === 0 && journal.length === 0) return null
 
       const device = await requestAsPromise<DeviceRecord | undefined>(
         transaction.objectStore(DEVICES).get(deviceKey),
       )
-      // Separated by what each row says it is, never by what the device key looks like: the format
-      // is on the row, and a key is a string somebody chose.
+
       return {
         deviceKey,
         records: packRecordsIn(rows),
@@ -563,9 +478,7 @@ export class IdbHistoryStore implements HistoryStore {
           label: deviceLabel(device ?? null),
           records: await this.countRingRecords(transaction, deviceKey),
           lastReadAt: newestRead?.observedAt ?? 0,
-          // The pack's own clock face, not wall time, so this row is honest with no correction
-          // behind it. A ledger holding no pack record answers zero rather than inventing a face,
-          // and a controller's ledger answers zero because it keeps no clock face at all.
+
           oldestPackClockSeconds: packClockFaceOf(oldest),
           newestPackClockSeconds: packClockFaceOf(newest),
         })
@@ -586,13 +499,12 @@ export class IdbHistoryStore implements HistoryStore {
       this.database,
       [DEVICES],
       'readwrite',
-      // Read and write as one transaction, exactly as renameDevice does, so two tabs answering at
-      // once cannot interleave into a lost update.
+
       async (transaction) => {
         const devices = transaction.objectStore(DEVICES)
         const stored = await requestAsPromise<DeviceRecord | undefined>(devices.get(deviceKey))
         if (stored === undefined) return null
-        // Written verbatim, null included: the owner may take an answer back, and nothing else may.
+
         const updated: DeviceRecord = {
           ...stored,
           packUtcOffsetMinutes: clock.utcOffsetMinutes,
@@ -609,25 +521,11 @@ export class IdbHistoryStore implements HistoryStore {
   async deleteRingLedger(deviceKey: DeviceKey): Promise<void> {
     if (!this.connected) return
     await runTransaction(this.database, RING_STORES, 'readwrite', async (transaction) => {
-      // Rows and journal die together; the device row survives, because it is the label and it
-      // carries the owner's answers about this pack's clock.
       await this.dropRingLedger(transaction, deviceKey)
     })
     this.channel.post('ring-read')
   }
 
-  /**
-   * The sweep that runs once, on open, before anything else touches the archive.
-   *
-   * It is never destructive to data: a session left open by a killed tab is closed, not deleted,
-   * and its unsealed tail is folded into the counters at that moment so the ledger stays exact. A
-   * tab that was merely frozen and thaws later finds its own row closed and opens a new session
-   * continuing it rather than resurrecting this one.
-   *
-   * The counter is re-derived from the surviving session rows in the same pass. It is the one place
-   * that can happen cheaply, and a crash mid-write is exactly what would otherwise leave the budget
-   * permanently wrong.
-   */
   async recover(now: number): Promise<{ readonly closed: number; readonly orphansRemoved: number }> {
     if (!this.connected) return { closed: 0, orphansRemoved: 0 }
     const swept = await runTransaction(
@@ -655,8 +553,8 @@ export class IdbHistoryStore implements HistoryStore {
           const folded = await this.sealOpenChunks(transaction, record.id)
           const sealedSamples = record.sealedSamples + folded.samples
           closed += 1
-          if (sealedSamples === 0) {
-            // A row that recorded nothing is noise, not history. It still counts as closed out.
+          const hasHours = await requestAsPromise<number>(transaction.objectStore(HOURS).index(BY_SESSION).count(record.id)) > 0
+          if (sealedSamples === 0 && record.packSamples + record.solarSamples === 0 && !hasHours) {
             await this.evictSession(transaction, record.id)
             surviving.delete(record.id)
             continue
@@ -674,28 +572,30 @@ export class IdbHistoryStore implements HistoryStore {
 
         let orphansRemoved = 0
         const chunks = transaction.objectStore(CHUNKS)
-        // A key cursor, so the sweep costs one pass over the chunk keys and never deserializes a
-        // column. An orphan is unreachable and would hold its share of the budget forever.
+
         await cursorEach(chunks.index(BY_SESSION).openKeyCursor(), (cursor) => {
           if (surviving.has(cursor.key as SessionId)) return
           chunks.delete(cursor.primaryKey)
           orphansRemoved += 1
         })
 
-        // Warnings whose session row is gone — a crash between two writes of a delete — go too.
         const warnings = transaction.objectStore(WARNINGS)
         await cursorEach(warnings.openKeyCursor(), (cursor) => {
           const [sessionId] = cursor.primaryKey as [SessionId, number]
           if (!surviving.has(sessionId)) warnings.delete(cursor.primaryKey)
         })
 
+        await cursorEach(transaction.objectStore(HOURS).index(BY_SESSION).openKeyCursor(), (cursor) => {
+          if (!surviving.has(cursor.key as string)) transaction.objectStore(HOURS).delete(cursor.primaryKey)
+        })
         const meta = await this.readMeta(transaction, now)
-        await this.writeTotal(transaction, meta, totalSamples, null)
+        const rawBytes = await this.rawBytesIn(transaction, meta, true)
+        const pruned = await this.prune(transaction, rawBytes, now)
+        await this.writeTotal(transaction, { ...meta, rawBytes: rawBytes - pruned.freedBytes }, totalSamples - pruned.freedSamples, pruned.freedSamples > 0 ? now : null)
         return { closed, orphansRemoved }
       },
     )
-    // Its own ring-scoped transaction, so the recovery write stays out of the ring stores and the
-    // ring sweep stays out of the recorder's way.
+
     const strandedJournals = await this.sweepRingJournals()
     if (swept.closed > 0) this.channel.post('session-closed')
     return { ...swept, orphansRemoved: swept.orphansRemoved + strandedJournals }
@@ -705,22 +605,23 @@ export class IdbHistoryStore implements HistoryStore {
     readonly totalSamples: number
     readonly sessions: number
     readonly ringRecords: number
+    readonly rawBytes: number
+    readonly rawCapacityBytes: number
   }> {
-    if (!this.connected) return { totalSamples: this.knownTotal, sessions: 0, ringRecords: 0 }
+    if (!this.connected) return { totalSamples: this.knownTotal, sessions: 0, ringRecords: 0, rawBytes: 0, rawCapacityBytes: this.rawCapacityBytes() }
     return runTransaction(
       this.database,
-      [SESSIONS, META, RING_RECORDS],
+      [SESSIONS, META, RING_RECORDS, CHUNKS],
       'readonly',
       async (transaction) => {
         const meta = await this.readMeta(transaction, 0)
         const sessions = await requestAsPromise<number>(transaction.objectStore(SESSIONS).count())
-        // Its own line, because ring rows are on their own budget: `planPrune` never sees one and
-        // no ring write ever moved the counter this reads.
+
         const ringRecords = await requestAsPromise<number>(
           transaction.objectStore(RING_RECORDS).count(),
         )
         this.knownTotal = meta.totalSamples
-        return { totalSamples: meta.totalSamples, sessions, ringRecords }
+        return { totalSamples: meta.totalSamples, sessions, ringRecords, rawBytes: await this.rawBytesIn(transaction, meta), rawCapacityBytes: this.rawCapacityBytes() }
       },
     )
   }
@@ -734,13 +635,6 @@ export class IdbHistoryStore implements HistoryStore {
     }
   }
 
-  /**
-   * Protection for the session on screen, which only this tab knows about.
-   *
-   * A second tab's pruning cannot see it and derives its protection from stored heartbeats alone,
-   * so a reader still has to survive `readSession → null`. This narrows the window; it does not
-   * close it.
-   */
   noteViewing(id: SessionId | null): void {
     this.viewedSessionId = id
   }
@@ -752,9 +646,8 @@ export class IdbHistoryStore implements HistoryStore {
     this.channel.close()
   }
 
-  // ── writing a chunk ────────────────────────────────────────────────────────
-
-  private async writeChunk(chunk: HistoryChunk, patch: SessionPatch): Promise<CommitOutcome> {
+  // Summaries and raw retention share one transaction across writers.
+  private async writeChunk(chunk: HistoryChunk, patch: SessionPatch, hours: readonly SessionHour[]): Promise<CommitOutcome> {
     if (!this.connected) return this.refusedCommit(null)
     return runTransaction(this.database, EVERY_STORE, 'readwrite', async (transaction) => {
       const sessions = transaction.objectStore(SESSIONS)
@@ -762,32 +655,39 @@ export class IdbHistoryStore implements HistoryStore {
       const stored = await requestAsPromise<SessionRecord | undefined>(
         sessions.get(chunk.sessionId),
       )
-      // No row means the session was never opened, or another tab deleted it underneath. Writing
-      // the chunk anyway would leave an orphan holding budget with nothing to reach it by.
-      if (stored === undefined) return this.refusedCommit(null)
+
+      if (stored === undefined || stored.state !== 'open') return this.refusedCommit(null)
 
       const existing = await requestAsPromise<HistoryChunk | undefined>(
         chunks.get([chunk.sessionId, chunk.stream, chunk.seq]),
       )
-      // The counter moves on the seal transition, never on the write. A tail rewritten every
-      // checkpoint costs nothing, and a commit retried after an ambiguous failure — one that in
-      // fact landed — cannot count its rows a second time.
+
       const sealedGain = chunk.sealed && existing?.sealed !== true ? chunk.length : 0
 
+      const meta = await this.readMeta(transaction, patch.heartbeatAt)
+      const rawBytes = await this.rawBytesIn(transaction, meta)
+        + chunk.length * sampleBytes(chunk.stream)
+        - (existing?.length ?? 0) * sampleBytes(chunk.stream)
+      for (const hour of hours) {
+        if (hour.sessionId !== chunk.sessionId) throw new Error('Hourly summary belongs to another session')
+        await requestAsPromise(transaction.objectStore(HOURS).put(hour))
+      }
       await requestAsPromise(chunks.put(chunk))
+      const { hourlyBasis, ...storedFields } = stored
       const merged: SessionRecord = {
-        ...stored,
+        ...storedFields,
         ...patch,
+        ...(hours.length > 0 || hourlyBasis === 'recorded' ? { hourlyBasis: 'recorded' as const } : {}),
         sealedSamples: stored.sealedSamples + sealedGain,
+        coverage: retainedCoverage(patch.coverage, stored.retainedFrom),
       }
       await requestAsPromise(sessions.put(merged))
 
-      const meta = await this.readMeta(transaction, patch.heartbeatAt)
       const afterSeal = meta.totalSamples + sealedGain
-      const pruned = await this.prune(transaction, afterSeal, patch.heartbeatAt)
+      const pruned = await this.prune(transaction, rawBytes, patch.heartbeatAt)
       const totalSamples = afterSeal - pruned.freedSamples
       const prunedAt = pruned.freedSamples > 0 ? patch.heartbeatAt : null
-      await this.writeTotal(transaction, meta, totalSamples, prunedAt)
+      await this.writeTotal(transaction, { ...meta, rawBytes: rawBytes - pruned.freedBytes }, totalSamples, prunedAt)
 
       return {
         stored: true,
@@ -799,7 +699,6 @@ export class IdbHistoryStore implements HistoryStore {
     })
   }
 
-  /** Announced only once the transaction has committed, so no tab is told about a rolled-back cut. */
   private announce(outcome: CommitOutcome): CommitOutcome {
     const cut = outcome.prunedSessionIds.length > 0 || outcome.truncatedFrom !== null
     if (cut) this.channel.post('pruned')
@@ -816,76 +715,133 @@ export class IdbHistoryStore implements HistoryStore {
     }
   }
 
-  // ── pruning ────────────────────────────────────────────────────────────────
-
   private async pruneToBudget(now: number): Promise<void> {
-    const freed = await runTransaction(
-      this.database,
-      EVERY_STORE,
-      'readwrite',
-      async (transaction) => {
-        const meta = await this.readMeta(transaction, now)
-        const pruned = await this.prune(transaction, meta.totalSamples, now)
-        if (pruned.freedSamples === 0) return 0
-        await this.writeTotal(transaction, meta, meta.totalSamples - pruned.freedSamples, now)
-        return pruned.freedSamples
-      },
-    )
-    if (freed > 0) this.channel.post('pruned')
+    await runTransaction(this.database, EVERY_STORE, 'readwrite', async (transaction) => {
+      const meta = await this.readMeta(transaction, now)
+      const rawBytes = await this.rawBytesIn(transaction, meta)
+      const pruned = await this.prune(transaction, rawBytes, now)
+      await this.writeTotal(transaction, { ...meta, rawBytes: rawBytes - pruned.freedBytes }, meta.totalSamples - pruned.freedSamples, now)
+    })
   }
 
-  private async prune(
-    transaction: IDBTransaction,
-    totalSamples: number,
-    now: number,
-  ): Promise<PruneExecution> {
-    const sessions = transaction.objectStore(SESSIONS)
-    const sessionCount = await requestAsPromise<number>(sessions.count())
-    if (totalSamples <= MAX_TOTAL_SAMPLES && sessionCount <= MAX_SESSIONS) return NOTHING_PRUNED
-
+  private async prune(transaction: IDBTransaction, rawBytes: number, now: number): Promise<PruneExecution> {
     const rows = await this.readSessionRows(transaction)
-    const protection: PruneProtection = {
-      now,
-      heartbeatStaleMs: HEARTBEAT_STALE_MS,
-      viewedSessionId: this.viewedSessionId,
-    }
-
-    // Eviction needs nothing from the chunks, and discovering that by reading every chunk header
-    // would cost a pass over the entire archive on a commit that happens every few minutes. So the
-    // plan is made twice: once over the session rows alone, and again — only when the first could
-    // not free enough — over the handful of sessions that survived it, which by then are exactly
-    // the protected ones. Both passes see the same rows, so both reach the same eviction list.
-    const plan = planPrune(
-      rows.map((row) => candidateOf(row, NO_CHUNKS)),
-      totalSamples,
-      protection,
-    )
+    const capacity = this.rawCapacityBytes()
     let freedSamples = 0
-    for (const id of plan.evict) freedSamples += await this.evictSession(transaction, id)
-    if (plan.projectedTotal <= PRUNE_TARGET) {
-      return { evicted: plan.evict, freedSamples, truncatedFrom: null }
+    let freedBytes = 0
+    let truncatedFrom: number | null = null
+    if (rawBytes > capacity) {
+      const chunks = transaction.objectStore(CHUNKS)
+      const extents: RawChunkExtent[] = []
+      await cursorEach(chunks.openCursor(), (cursor) => {
+        const chunk = cursor.value as HistoryChunk
+        if (isReadableLayout(chunk.layout)) extents.push(chunk)
+      })
+      const plan = planRawPrune(extents, rawBytes, capacity)
+      const compacted = new Set<string>()
+      for (const reference of plan) {
+        if (!compacted.has(reference.sessionId)) {
+          await compactSessionInTransaction(transaction, reference.sessionId)
+          compacted.add(reference.sessionId)
+        }
+        const key = [reference.sessionId, reference.stream, reference.seq]
+        const chunk = await requestAsPromise<HistoryChunk>(chunks.get(key))
+        if (!await this.chunkHasSummary(transaction, chunk)) continue
+        await requestAsPromise(chunks.delete(key))
+        freedSamples += chunk.length
+        freedBytes += chunk.length * sampleBytes(chunk.stream)
+      }
+      for (const sessionId of compacted) {
+        const record = await requestAsPromise<SessionRecord>(transaction.objectStore(SESSIONS).get(sessionId))
+        let remainingSamples = 0
+        let firstAt: number | null = null
+        await cursorEach(chunks.index(BY_SESSION).openCursor(sessionId), (cursor) => {
+          const chunk = cursor.value as HistoryChunk
+          if (chunk.sealed) remainingSamples += chunk.length
+          firstAt = firstAt === null ? chunk.baseAt : Math.min(firstAt, chunk.baseAt)
+        })
+        const retainedFrom = firstAt ?? record.endedAt ?? record.heartbeatAt
+        await requestAsPromise(transaction.objectStore(SESSIONS).put({ ...record, sealedSamples: remainingSamples, retainedFrom, coverage: retainedCoverage(record.coverage, retainedFrom) }))
+        truncatedFrom = retainedFrom
+      }
     }
-
-    const evicted = new Set<SessionId>(plan.evict)
-    const survivors: PruneCandidate[] = []
-    for (const row of rows) {
-      if (evicted.has(row.id)) continue
-      survivors.push(candidateOf(row, await this.chunkExtentsOf(transaction, row.id)))
+    const hours = transaction.objectStore(HOURS)
+    let hourCount = await requestAsPromise<number>(hours.count())
+    const oldHours: { sessionId: string; hourStart: number }[] = []
+    await cursorEach(hours.index(BY_TIME).openKeyCursor(), (cursor) => {
+      if (hourCount <= MAX_SESSION_HOURS && (cursor.key as number) >= now - COMPACT_RETENTION_MS) return false
+      const [sessionId, hourStart] = cursor.primaryKey as [string, number]
+      oldHours.push({ sessionId, hourStart })
+    })
+    const rawSpans = new Map<SessionId, TimeWindow[]>()
+    for (const hour of oldHours) {
+      if (hourCount <= MAX_SESSION_HOURS && hour.hourStart >= now - COMPACT_RETENTION_MS) break
+      let spans = rawSpans.get(hour.sessionId)
+      if (spans === undefined) {
+        spans = []
+        await cursorEach(transaction.objectStore(CHUNKS).index(BY_SESSION).openCursor(hour.sessionId), (cursor) => {
+          const chunk = cursor.value as HistoryChunk
+          spans!.push(isReadableLayout(chunk.layout)
+            ? { from: chunk.baseAt, to: lastSampleTimeOf(chunk) ?? chunk.baseAt }
+            : { from: 0, to: Number.MAX_SAFE_INTEGER })
+        })
+        rawSpans.set(hour.sessionId, spans)
+      }
+      if (spans.some((span) => span.from < hour.hourStart + 3_600_000 && span.to >= hour.hourStart)) continue
+      await requestAsPromise(hours.delete([hour.sessionId, hour.hourStart]))
+      hourCount -= 1
     }
-    const refined = planPrune(survivors, plan.projectedTotal, protection)
-    if (refined.truncate === null) return { evicted: plan.evict, freedSamples, truncatedFrom: null }
-
-    freedSamples += await this.truncateSession(transaction, refined.truncate)
-    return { evicted: plan.evict, freedSamples, truncatedFrom: refined.truncate.retainedFrom }
+    const evicted: SessionId[] = []
+    let sessionCount = rows.length
+    for (const record of rows) {
+      if (sessionCount <= MAX_SESSIONS && hourCount <= MAX_SESSION_HOURS) break
+      if (record.state === 'open' || record.id === this.viewedSessionId || now - record.heartbeatAt < HEARTBEAT_STALE_MS) continue
+      const sessionHours = await requestAsPromise<number>(hours.index(BY_SESSION).count(record.id))
+      if (sessionCount <= MAX_SESSIONS && sessionHours === 0) continue
+      await cursorEach(transaction.objectStore(CHUNKS).index(BY_SESSION).openCursor(record.id), (cursor) => {
+        const chunk = cursor.value as HistoryChunk
+        freedBytes += chunk.length * sampleBytes(chunk.stream)
+      })
+      freedSamples += await this.evictSession(transaction, record.id)
+      evicted.push(record.id)
+      sessionCount -= 1
+      hourCount -= sessionHours
+    }
+    return { evicted, freedSamples, freedBytes, truncatedFrom }
   }
 
-  /** Drops a session whole: its row, every chunk, and every warning, or none. Returns what it freed. */
+  async compactSession(id: SessionId): Promise<void> {
+    if (!this.connected) return
+    await runTransaction(this.database, EVERY_STORE, 'readwrite', (transaction) => compactSessionInTransaction(transaction, id))
+  }
+
+  private async chunkHasSummary(transaction: IDBTransaction, chunk: HistoryChunk): Promise<boolean> {
+    const byHour = new Map<number, SessionHour | undefined>()
+    for (let index = 0; index < chunk.length; index += 1) {
+      const at = chunk.baseAt + chunk.offsetMs[index]!
+      const hourStart = Math.floor(at / 3_600_000) * 3_600_000
+      if (!byHour.has(hourStart)) byHour.set(hourStart, await requestAsPromise<SessionHour | undefined>(transaction.objectStore(HOURS).get([chunk.sessionId, hourStart])))
+      const hour = byHour.get(hourStart)
+      if (hour === undefined || hour.from > at || hour.to < at) return false
+    }
+    return true
+  }
+
+  private async rawBytesIn(transaction: IDBTransaction, meta: HistoryMeta, recount = false): Promise<number> {
+    if (!recount && meta.rawBytes !== undefined) return meta.rawBytes
+    let bytes = 0
+    await cursorEach(transaction.objectStore(CHUNKS).openCursor(), (cursor) => {
+      const chunk = cursor.value as HistoryChunk
+      bytes += chunk.length * sampleBytes(chunk.stream)
+    })
+    return bytes
+  }
+
   private async evictSession(transaction: IDBTransaction, id: SessionId): Promise<number> {
     const sessions = transaction.objectStore(SESSIONS)
     const chunks = transaction.objectStore(CHUNKS)
     const stored = await requestAsPromise<SessionRecord | undefined>(sessions.get(id))
-    // Cursored through the index, never through a constructed compound key range: a chunk the range
-    // missed would outlive its session row, and an unreachable chunk holds budget forever.
+
     await cursorEach(chunks.index(BY_SESSION).openKeyCursor(IDBKeyRange.only(id)), (cursor) => {
       chunks.delete(cursor.primaryKey)
     })
@@ -893,44 +849,12 @@ export class IdbHistoryStore implements HistoryStore {
     await cursorEach(warnings.openKeyCursor(IDBKeyRange.bound([id], [id, HIGHEST_SEQ])), (cursor) => {
       warnings.delete(cursor.primaryKey)
     })
+    await cursorEach(transaction.objectStore(HOURS).index(BY_SESSION).openKeyCursor(id), (cursor) => {
+      transaction.objectStore(HOURS).delete(cursor.primaryKey)
+    })
     await requestAsPromise(sessions.delete(id))
     return stored?.sealedSamples ?? 0
   }
-
-  /** Cuts the head off one session, which keeps its row and has to say where its data now starts. */
-  private async truncateSession(
-    transaction: IDBTransaction,
-    truncation: PruneTruncation,
-  ): Promise<number> {
-    const sessions = transaction.objectStore(SESSIONS)
-    const chunks = transaction.objectStore(CHUNKS)
-    let droppedPack = 0
-    let droppedSolar = 0
-    for (const reference of truncation.dropChunks) {
-      await requestAsPromise(
-        chunks.delete([truncation.sessionId, reference.stream, reference.seq]),
-      )
-      if (reference.stream === PACK_STREAM) droppedPack += 1
-      else droppedSolar += 1
-    }
-
-    const stored = await requestAsPromise<SessionRecord | undefined>(
-      sessions.get(truncation.sessionId),
-    )
-    if (stored === undefined) return truncation.freedSamples
-
-    const trimmed: SessionRecord = {
-      ...stored,
-      sealedSamples: Math.max(0, stored.sealedSamples - truncation.freedSamples),
-      packChunks: Math.max(0, stored.packChunks - droppedPack),
-      solarChunks: Math.max(0, stored.solarChunks - droppedSolar),
-      retainedFrom: truncation.retainedFrom,
-    }
-    await requestAsPromise(sessions.put(trimmed))
-    return truncation.freedSamples
-  }
-
-  // ── reading rows ───────────────────────────────────────────────────────────
 
   private async readSessionRows(transaction: IDBTransaction): Promise<SessionRecord[]> {
     const rows: SessionRecord[] = []
@@ -939,24 +863,6 @@ export class IdbHistoryStore implements HistoryStore {
       rows.push(cursor.value as SessionRecord)
     })
     return rows
-  }
-
-  private async chunkExtentsOf(
-    transaction: IDBTransaction,
-    id: SessionId,
-  ): Promise<readonly ChunkExtent[]> {
-    const extents: ChunkExtent[] = []
-    const chunks = transaction.objectStore(CHUNKS).index(BY_SESSION)
-    await cursorEach(chunks.openCursor(IDBKeyRange.only(id)), (cursor) => {
-      const chunk = cursor.value as HistoryChunk
-      extents.push({
-        stream: chunk.stream,
-        seq: chunk.seq,
-        length: chunk.length,
-        baseAt: chunk.baseAt,
-      })
-    })
-    return extents
   }
 
   private async readDevices(
@@ -973,23 +879,11 @@ export class IdbHistoryStore implements HistoryStore {
     return found
   }
 
-  // ── folding a ring read in ─────────────────────────────────────────────────
-
-  /**
-   * The whole merge as one write: place the read, append what is new, journal the attempt, and
-   * carry out whatever the ring budget decided.
-   *
-   * Nothing here reads or writes a session store, the meta row or a chunk. That is not an oversight
-   * to tidy up later — it is the property that keeps an 800-row merge off the recorder's critical
-   * path, and it is why per-device counts come from `count()` over a key range rather than from a
-   * counter somebody would have to keep in `meta`.
-   */
   private mergeRing(snapshot: RingSnapshot): Promise<RingIngestOutcome> {
     return runTransaction(this.database, RING_STORES, 'readwrite', async (transaction) => {
       const records = transaction.objectStore(RING_RECORDS)
       const tail = await this.readRingTail(transaction, snapshot.deviceKey)
-      // The read's own wall clock stamps the rows it creates: `firstReadAt` is provenance, and this
-      // store has no clock of its own that would be truer than the one the transfer arrived under.
+
       const folded = foldRingSnapshot(tail, snapshot, snapshot.observedAt)
       for (const row of folded.rows) await requestAsPromise(records.put(row))
 
@@ -1006,21 +900,11 @@ export class IdbHistoryStore implements HistoryStore {
     })
   }
 
-  /**
-   * The whole sweep as one write, shaped exactly like the ring merge above and sharing its stores,
-   * its journal cap and its prune.
-   *
-   * The fold is handed every day this ledger holds rather than a tail. A controller's ledger grows
-   * one row a day, so the whole of it is a few hundred rows where the pack's is twenty thousand —
-   * and matching a day by its sequence number needs a neighbourhood in DATE, which a tail cut by row
-   * count could only guess at.
-   */
   private mergeSolarHistory(snapshot: SolarHistorySnapshot): Promise<SolarHistoryIngestOutcome> {
     return runTransaction(this.database, RING_STORES, 'readwrite', async (transaction) => {
       const records = transaction.objectStore(RING_RECORDS)
       const stored = solarDaysIn(await this.readRingRows(transaction, snapshot.deviceKey))
-      // The sweep's own wall clock stamps the rows it creates and revises, for the reason a ring
-      // merge uses the read's: this store has no clock truer than the one the sweep arrived under.
+
       const folded = foldSolarHistorySnapshot(stored, snapshot, snapshot.observedAt)
       for (const row of folded.rows) await requestAsPromise(records.put(row))
 
@@ -1030,7 +914,7 @@ export class IdbHistoryStore implements HistoryStore {
       return {
         ...folded.merge,
         stored: true,
-        // Every row under a controller's key is a day row, so the range count is the day count.
+
         totalDays: await this.countRingRecords(transaction, snapshot.deviceKey),
         prunedRecords,
         failure: null,
@@ -1038,17 +922,6 @@ export class IdbHistoryStore implements HistoryStore {
     })
   }
 
-  /**
-   * As much of the ledger's newest end as the merge needs to place a read against it.
-   *
-   * Read backwards from the head and turned round, because alignment only ever succeeds near the
-   * head: the ring drops from its own tail, so a read can never reach further back than what the
-   * pack still holds.
-   *
-   * `nextSeq` counts from the newest row of ANY format while the tail carries pack records only. A
-   * device key belongs to one radio, so the two can only coincide in a corrupt archive — and there
-   * the reading that hands out a seq nothing else holds is the one that cannot lose a row.
-   */
   private async readRingTail(
     transaction: IDBTransaction,
     deviceKey: DeviceKey,
@@ -1065,17 +938,10 @@ export class IdbHistoryStore implements HistoryStore {
       if (isPackRecordRow(row)) rows.push(row)
     })
     rows.reverse()
-    // A ledger whose head was pruned still hands out seq above everything it ever stored; one
-    // emptied outright starts again at zero, because nothing is left to count from.
+
     return { nextSeq: highestSeq === null ? 0 : highestSeq + 1, rows }
   }
 
-  /**
-   * One journal row per read, whatever the read established, capped at the newest few.
-   *
-   * The key is [deviceKey, observedAt], so two reads at the same millisecond collide into one row
-   * rather than accumulating — which is the same thing the memory store does, for the same reason.
-   */
   private async journalRead(
     transaction: IDBTransaction,
     snapshot: RingSnapshot,
@@ -1107,10 +973,6 @@ export class IdbHistoryStore implements HistoryStore {
     await this.capRingJournal(transaction, snapshot.deviceKey)
   }
 
-  /**
-   * One journal row per sweep, whatever the sweep established, under the same cap and in the same
-   * store as a pack's.
-   */
   private async journalSolarSweep(
     transaction: IDBTransaction,
     snapshot: SolarHistorySnapshot,
@@ -1141,7 +1003,6 @@ export class IdbHistoryStore implements HistoryStore {
     await this.capRingJournal(transaction, snapshot.deviceKey)
   }
 
-  /** Keeps one device's journal to its newest few, oldest dropped first. */
   private async capRingJournal(
     transaction: IDBTransaction,
     deviceKey: DeviceKey,
@@ -1157,7 +1018,6 @@ export class IdbHistoryStore implements HistoryStore {
     })
   }
 
-  /** Carries out what `planRingPrune` decided, and answers with every row it gave up. */
   private async pruneRing(transaction: IDBTransaction): Promise<number> {
     const plan = planRingPrune(await this.ringExtents(transaction))
     let freed = 0
@@ -1184,7 +1044,6 @@ export class IdbHistoryStore implements HistoryStore {
     return extents
   }
 
-  /** Cuts the head off one ledger, which then has to say that its oldest row follows a break. */
   private async trimRingLedger(
     transaction: IDBTransaction,
     eviction: RingEviction,
@@ -1202,10 +1061,6 @@ export class IdbHistoryStore implements HistoryStore {
       freed += 1
     })
 
-    // The surviving pack record declares the break, exactly as `retainedFrom` does for a truncated
-    // session: what came before it is gone, and nothing may read the ledger as contiguous across it.
-    // A day record carries no such field and needs none — a calendar-keyed row states its own
-    // position, so a hole in a controller's ledger is visible as a missing date.
     const survivors = records.openCursor(
       IDBKeyRange.bound([eviction.deviceKey, eviction.fromSeq], [eviction.deviceKey, HIGHEST_SEQ]),
     )
@@ -1217,14 +1072,6 @@ export class IdbHistoryStore implements HistoryStore {
     return freed
   }
 
-  /**
-   * Removes journal rows for a pack whose ledger is gone but whose reads say it held records.
-   *
-   * A ledger and its journal die inside one transaction, so nothing this adapter does can strand
-   * one — but a database left half-written by something else can, and those rows are unreachable
-   * budget. A journal whose every read carried nothing is not stranded at all: it is the receipt
-   * for a pack that answered nothing, which is exactly the read most worth keeping.
-   */
   private sweepRingJournals(): Promise<number> {
     return runTransaction(this.database, RING_STORES, 'readwrite', async (transaction) => {
       const reads = transaction.objectStore(RING_READS)
@@ -1243,8 +1090,6 @@ export class IdbHistoryStore implements HistoryStore {
     })
   }
 
-  // ── reading a ring ledger ──────────────────────────────────────────────────
-
   private async readRingRows(
     transaction: IDBTransaction,
     deviceKey: DeviceKey,
@@ -1257,7 +1102,6 @@ export class IdbHistoryStore implements HistoryStore {
     return rows
   }
 
-  /** Newest read first, capped: the journal is an audit trail rather than a series. */
   private async readRingJournal(
     transaction: IDBTransaction,
     deviceKey: DeviceKey,
@@ -1273,7 +1117,6 @@ export class IdbHistoryStore implements HistoryStore {
     return reads
   }
 
-  /** The newest receipt filed against one device, whichever radio it was against. */
   private async newestRingRead(
     transaction: IDBTransaction,
     deviceKey: DeviceKey,
@@ -1289,11 +1132,9 @@ export class IdbHistoryStore implements HistoryStore {
     return found
   }
 
-  /** Every pack with a ledger or a journal, which is every pack a read was ever filed against. */
   private async ringDeviceKeys(transaction: IDBTransaction): Promise<DeviceKey[]> {
     const keys = new Set<DeviceKey>()
     for (const storeName of [RING_RECORDS, RING_READS]) {
-      // One entry per distinct index key, so enumerating the packs costs the packs and not the rows.
       const distinct = transaction
         .objectStore(storeName)
         .index(BY_DEVICE)
@@ -1311,7 +1152,6 @@ export class IdbHistoryStore implements HistoryStore {
     )
   }
 
-  /** The oldest or newest row of one ledger, without hydrating the rows between them. */
   private async edgeRingRow(
     transaction: IDBTransaction,
     deviceKey: DeviceKey,
@@ -1344,8 +1184,6 @@ export class IdbHistoryStore implements HistoryStore {
     transaction: IDBTransaction,
     deviceKey: DeviceKey,
   ): Promise<void> {
-    // Cursored through the index, never through a constructed compound key range: a row the range
-    // missed would outlive the ledger it belongs to and hold its share of the budget forever.
     for (const storeName of [RING_RECORDS, RING_READS]) {
       const store = transaction.objectStore(storeName)
       await cursorEach(store.index(BY_DEVICE).openKeyCursor(IDBKeyRange.only(deviceKey)), (cursor) => {
@@ -1354,14 +1192,6 @@ export class IdbHistoryStore implements HistoryStore {
     }
   }
 
-  // ── the counter and the open tail ──────────────────────────────────────────
-
-  /**
-   * Marks every unsealed chunk of a session sealed, and reports what that added.
-   *
-   * A tail is a valid prefix of what the radios said, so closing folds it in rather than discarding
-   * it. Running twice folds nothing the second time: there is no unsealed chunk left to find.
-   */
   private async sealOpenChunks(
     transaction: IDBTransaction,
     id: SessionId,
@@ -1394,7 +1224,6 @@ export class IdbHistoryStore implements HistoryStore {
     }
   }
 
-  /** `prunedAt` is the stamp when this write followed an eviction, and null when it did not. */
   private async writeTotal(
     transaction: IDBTransaction,
     meta: HistoryMeta,
@@ -1412,26 +1241,11 @@ export class IdbHistoryStore implements HistoryStore {
     this.knownTotal = settled
   }
 
-  /**
-   * Lets go of the connection so another tab's upgrade can proceed, and says why the archive went
-   * quiet rather than throwing an InvalidStateError out of the next write.
-   *
-   * The connection goes first and the reason is announced after it: a watcher re-reads the archive
-   * the moment it hears, and every one of those reads has to find the store already stood down or it
-   * is a read of an archive that is on its way out.
-   */
   private standDown(): void {
     this.close()
     this.reportUnusable('version-newer')
   }
 
-  /**
-   * Records why this connection can no longer be written to, and tells whoever is watching.
-   *
-   * Only a change is announced. A full disk brings `commitChunk` here on every checkpoint for as
-   * long as it stays full, and a page re-reading the whole archive for each of those would spend the
-   * rest of the session doing it.
-   */
   private reportUnusable(reason: HistoryUnavailableReason): void {
     if (!this.state.usable && this.state.reason === reason) return
     this.state = { ...this.state, usable: false, reason }
@@ -1439,25 +1253,6 @@ export class IdbHistoryStore implements HistoryStore {
   }
 }
 
-function candidateOf(record: SessionRecord, chunks: readonly ChunkExtent[]): PruneCandidate {
-  return {
-    id: record.id,
-    startedAt: record.startedAt,
-    sealedSamples: record.sealedSamples,
-    state: record.state,
-    heartbeatAt: record.heartbeatAt,
-    chunks,
-  }
-}
-
-/**
- * Keeps a rename, and the first sighting, across every later identification of the same device.
- * `userLabel` lives here and not on a session row precisely so one rename covers every session.
- *
- * The two pack-clock fields are kept under the same rule and for the same reason: they are the
- * owner's own answers, nothing derives them, and only `setPackClock` may change one. A reconnect
- * that quietly cleared them would be silent data loss rather than a visible one.
- */
 function mergeDevice(stored: DeviceRecord, incoming: DeviceRecord): DeviceRecord {
   return {
     ...incoming,
@@ -1470,28 +1265,15 @@ function mergeDevice(stored: DeviceRecord, incoming: DeviceRecord): DeviceRecord
   }
 }
 
-/**
- * One pack's rows as a contiguous key range, in either ring store: both are keyed [deviceKey, n] —
- * a seq in the ledger, a wall clock in the journal. `[key]` sorts below every `[key, n]`.
- */
 function ringRangeOf(deviceKey: DeviceKey): IDBKeyRange {
   return IDBKeyRange.bound([deviceKey], [deviceKey, Number.MAX_SAFE_INTEGER])
 }
 
-/**
- * Where a pruned ledger now begins, derived rather than stored.
- *
- * A ledger nothing has cut is dense from zero, because the fold numbers a pack's first read from
- * there. So an oldest row above zero is exactly what pruning left behind, and there is no separate
- * marker to keep in step with the rows it describes.
- */
 function retainedFromSeqOf(records: readonly StoredRingRecord[]): number | null {
   const oldest = records[0]
   return oldest === undefined || oldest.seq === 0 ? null : oldest.seq
 }
 
-/** Which radio a ledger belongs to, read off a row it holds rather than off a device row it may
- *  outlive. A ledger with neither a row nor a receipt does not list at all. */
 function ledgerKindOf(
   row: StoredRingRecord | null,
   read: StoredRingRead | null,
@@ -1501,7 +1283,6 @@ function ledgerKindOf(
   return 'pack'
 }
 
-/** The pack clock a row carries, or zero for a row that keeps no clock face. */
 function packClockFaceOf(row: StoredRingRecord | null): number {
   return row !== null && isPackRecordRow(row) ? row.packClockSeconds : 0
 }
@@ -1534,7 +1315,6 @@ function refusedSolarIngest(failure: HistoryUnavailableReason | null): SolarHist
   }
 }
 
-/** Where the event code sits in a record, and the value that means "nothing happened". */
 const EVENT_CODE_BYTE = 4
 const SCHEDULED_SAMPLE = 0
 
@@ -1556,12 +1336,6 @@ function indexSpanOf(snapshot: RingSnapshot): { readonly from: number; readonly 
   return from === null || to === null ? null : { from, to }
 }
 
-/**
- * The newest scheduled record the read carried — the read's one clock anchor.
- *
- * Newest by ring index rather than by counter: after a backward rewrite the counter runs down, and
- * the whole point of the anchor is to place the read against the face in force at the time.
- */
 function newestScheduledRecord(snapshot: RingSnapshot): Uint8Array | null {
   let newestIndex = Number.NEGATIVE_INFINITY
   let newest: Uint8Array | null = null
@@ -1580,14 +1354,6 @@ function newestScheduledRecord(snapshot: RingSnapshot): Uint8Array | null {
   return newest
 }
 
-/**
- * Where the anchor landed in the ledger, found by matching the bytes from the newest end.
- *
- * Adjacent records are byte-identical often enough that this can land on either half of such a
- * pair. Both halves carry the same counter and sit in the same clock segment, so which one is
- * named changes nothing the field is read for; and a run of identical rows is indistinguishable by
- * construction, so there is no better answer to be had.
- */
 function seqOfBytes(ledger: readonly RingRecordRow[], bytes: Uint8Array): number | null {
   for (let at = ledger.length - 1; at >= 0; at -= 1) {
     if (sameBytes(ledger[at].bytes, bytes)) return ledger[at].seq

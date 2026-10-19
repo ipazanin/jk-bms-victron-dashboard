@@ -2,7 +2,7 @@
 
 A static, installable web app that talks Bluetooth directly to a **JK-BMS** and a **Victron SmartSolar MPPT**,
 and reconciles them. Recording works locally without an account or backend. Optional Google sync
-keeps a copy in your own Drive and shares saved history between devices.
+keeps hourly history in your own Drive and shares it between devices. Detailed samples stay local.
 
 **[Open it →](https://ipazanin.github.io/jk-bms-victron-dashboard/)** — live Bluetooth needs Chrome or
 Edge and the two radios. Saved and imported history can be viewed in Firefox and Safari. Without
@@ -175,7 +175,8 @@ Shunt JSON archives (`.json`). One file can contain one source snapshot or an ar
 from different sources. The transfer works offline after the app is cached and does not need
 Bluetooth, including in Firefox.
 
-Archives include sessions, sample chunks, device names, warnings, battery and solar history reads,
+Archives include sessions, retained raw sample chunks, hourly summaries and selected moments,
+device names, warnings, battery and solar history reads,
 stored totals, theme, sidebar, Stats preferences, the last instrument snapshot and the lifetime
 logbook. Raw sample columns retain their original typed arrays and integer units. Import validates
 the complete archive before showing a preview. Malformed records and duplicate source identifiers
@@ -213,30 +214,37 @@ memory. Use a desktop browser for a full retained history.
 
 In **Connect → Data & backup → Google sync**, enable sync, connect to Google, then create or choose
 a workspace. Use the same Google account and the same configured app on each device. Each workspace
-has a Drive folder containing archive blocks and a Google Sheet with its catalogue and shared
-settings. Shunt requests only access to files it creates or you select, using Google's
+has a Drive folder containing complete compressed JSON copies and a Google Sheet for shared
+settings. The completed JSON files form the history catalogue. Shunt requests only access to files it creates or you select, using Google's
 [`drive.file` scope](https://developers.google.com/workspace/drive/api/guides/api-specific-auth).
 It will not adopt an arbitrary spreadsheet.
 
-**Sync now** uploads this browser's retained history and downloads the latest saved sources from
+**Sync now** uploads this browser's hourly history and downloads the latest saved sources from
 other devices. Each source stays separate in Log, Stats and Warnings. Imported history does not
 join the active recording. Older cloud snapshots remain available through the saved history list.
 Opening one pauses automatic sync so its history stays on screen. Use **Sync now** or enable
 automatic sync again when you want the latest copy.
-Cloud files contain complete archive records with checksums. New history uploads compress their
-JSON blocks with gzip. Unchanged blocks are reused and a snapshot appears in the catalogue only
-after its blocks have uploaded. Existing uncompressed Drive copies remain readable and are left
-in place. Compression reduces new uploads but does not reclaim storage used by existing copies.
+New Drive copies contain hourly summaries, selected important moments, session totals, warnings,
+native battery and solar history, and saved settings. Raw sample chunks and the remembered
+instrument's short trend stay local. A copy appears only after its complete compressed JSON file
+has been uploaded and verified. Unchanged history creates no new copy.
+
+Each source keeps its latest three complete copies, ordered by Drive's creation time. Older copies
+of that source are permanently removed after publication succeeds. Other sources and shared settings history
+are preserved. Keep manual JSON exports for independent recovery beyond those three copies.
+
+Older workspaces remain readable. Create a new compact workspace and select it on each updated
+device to start compact uploads. Existing workspaces and their raw history are not deleted or
+rewritten automatically.
 
 Update Shunt on every browser before opening newly compressed cloud copies or importing JSON
 archives. Older app versions cannot read the new formats. When the update notice appears, finish
 recording, close all Shunt tabs and app windows, then reopen.
 
-Local sample limits still apply. A recording must sync before the browser prunes or loses it to be
-available in the cloud. New snapshots retain the data currently present locally. Older snapshots
-preserve previously uploaded history, but their samples are not combined into the latest snapshot.
-Sync accepts up to 512 MiB of encoded records per snapshot, with 1 MiB blocks and manifests. Large
-histories need substantial browser memory. Keep independent JSON archives for important recordings.
+Hourly history must sync before the browser loses it to be available on another device. It is
+retained for up to two years, subject to the summary and session limits below. A Drive copy is
+not a backup of local raw samples. Export this browser's JSON archive to preserve those samples.
+Transfers retain the JSON archive size limits described above.
 
 Shared settings cover theme, sidebar and Stats preferences. When devices change them independently,
 Shunt asks which version to keep. Disconnect radios before applying cloud settings. Bluetooth
@@ -393,8 +401,8 @@ the company id, the same broadcast is most likely a neighbour's, and the panel s
 
 ## The Log
 
-Every session is recorded, browsable at `#/log`, and kept in this browser. Optional Google sync
-backs it up and makes it available to your other devices.
+Every session is recorded and browsable at `#/log`. Detailed samples stay in this browser.
+Optional Google sync makes hourly history and important moments available to your other devices.
 
 Recording starts on its own — no button — the moment either radio produces its first sample, and
 ends when both links go idle. A session is one continuous recording period bounded by the radios,
@@ -417,15 +425,34 @@ every field at the integer scale its radio transmits, so 3.394 V comes back as 3
 `housePower` column: house load is `solar − pack`, and deriving it on read is what lets a correction
 to the noise floor correct recordings already on disk.
 
-**The budget is 2,000,000 samples**, about 48 MB, which is roughly 278 hours of both radios at 1 Hz.
-Past that the oldest session is deleted whole, down to 90% of the cap so the next sample does not
-trigger another eviction. A single session larger than the entire budget loses its oldest chunks
-instead, and the row then says where its retained data really starts. The session being viewed and
-any session a tab is still writing are never evicted.
+**The default raw allowance is 100 MiB**, configurable to 25, 50 or 100 MiB in the Log storage
+controls. This choice applies only to this browser. At one reading per second from both radios,
+100 MiB holds about 27 days of sample columns. Browser overhead, summaries, imported sources and
+native device history use additional storage. Available disk space and browser policy can impose
+a lower practical limit.
 
-**`[ DOWNLOAD JSON ]`** writes every sample exactly as the radios reported it, in engineering units,
-with the stored ledger and a ledger recomputed from the samples side by side so the two can be
-compared. Keep exports outside the browser for recordings you cannot afford to lose.
+Once the allowance fills, the oldest sealed raw chunks are removed down to 90% of the allowance.
+Hourly summaries are saved before raw chunks can be removed. Session totals, warnings and selected
+moments remain available. The view identifies the retained raw range and shows hourly history
+where detailed samples are absent.
+
+Hourly summaries keep the existing energy accounting, observed coverage, current averages and
+the minimum and maximum of nine displayed measurements. Up to 22 selected moments per session-hour
+preserve first and last observations and those extrema with their original radio timestamps.
+Missing readings remain gaps. Hour boundaries are UTC, displayed in the viewer's local time.
+Intervals crossing an hour boundary allocate their existing energy totals by elapsed duration.
+Summaries reconstructed from older raw recordings are labelled separately from summaries recorded
+live. The original session totals remain unchanged.
+
+Compact history keeps up to two years, 20,000 session-hours and 2,000 sessions. The count limits
+can remove older closed sessions before their raw allowance fills. Local summaries needed by raw
+chunks can remain longer until those chunks are removed. Open and currently viewed sessions are
+protected from session eviction. Native BMS ring history and Victron daily history retain their
+existing limits. These allowances do not reserve browser disk space.
+
+**`[ DOWNLOAD JSON ]`** includes retained raw samples in engineering units, hourly summaries and
+selected moments. Its stored session ledger and ledger recomputed from retained raw samples are
+kept separate. Keep exports outside the browser for recordings you cannot afford to lose.
 
 **Where it degrades, it says so.** Storage blocked by private browsing, a disk too full to accept
 another chunk, or a database written by a newer build of this page each get their own sentence

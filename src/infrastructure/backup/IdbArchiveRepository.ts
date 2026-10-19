@@ -6,15 +6,17 @@ import type { ArchiveSnapshot } from '../../domain/backup/ArchiveSnapshot'
 import type { ArchiveSource } from '../../domain/backup/ArchiveSource'
 import type { ArchiveStores } from '../../domain/backup/ArchiveStores'
 import { validateArchiveSnapshot } from '../../domain/backup/archiveCodec'
+import { hourlyArchiveStores } from '../../domain/backup/hourlyArchiveStores'
 import type { SessionRecord } from '../../domain/history/types'
 import { openArchiveChannel } from '../history/archiveChannel'
 import { DATABASE_VERSION, IdbHistoryStore, applySchema } from '../history/IdbHistoryStore'
+import { compactSessionInTransaction } from '../history/compactSession'
 import { requestAsPromise, runTransaction } from '../history/idb'
 import type { ImportedArchiveDescriptor } from './ImportedArchiveDescriptor'
 import { openArchiveDatabase } from './openArchiveDatabase'
 import { readOnlyHistoryStore } from './readOnlyHistoryStore'
 
-const HISTORY_STORES = ['sessions', 'chunks', 'devices', 'meta', 'warnings', 'ringRecords', 'ringReads'] as const
+const HISTORY_STORES = ['sessions', 'chunks', 'devices', 'meta', 'warnings', 'ringRecords', 'ringReads', 'sessionHours'] as const
 const DESCRIPTOR = 'archiveDescriptor'
 
 export class IdbArchiveRepository implements ArchiveRepository {
@@ -28,13 +30,19 @@ export class IdbArchiveRepository implements ArchiveRepository {
     this.source = source
   }
 
-  async capture(preferences: readonly ArchivePreference[]): Promise<ArchiveSnapshot> {
+  async capture(preferences: readonly ArchivePreference[], detail: 'complete' | 'hourly' = 'complete'): Promise<ArchiveSnapshot> {
+    const exportedAt = Date.now()
     const snapshot: ArchiveSnapshot = {
       format: 'shunt-archive',
-      version: 1,
+      version: 2,
       source: this.source,
-      exportedAt: Date.now(),
-      stores: await runTransaction(this.history, HISTORY_STORES, 'readonly', readStores),
+      exportedAt,
+      stores: await runTransaction(this.history, HISTORY_STORES, 'readwrite', async (transaction) => {
+        const sessions = await requestAsPromise<SessionRecord[]>(transaction.objectStore('sessions').getAll())
+        for (const session of sessions) await compactSessionInTransaction(transaction, session.id)
+        const stores = await readStores(transaction, detail)
+        return detail === 'hourly' ? hourlyArchiveStores(stores, exportedAt) : stores
+      }),
       preferences: structuredClone(preferences),
     }
     validateArchiveSnapshot(snapshot)
@@ -68,6 +76,7 @@ export class IdbArchiveRepository implements ArchiveRepository {
     const database = await this.openSource(snapshot.source.id)
     const descriptor: ImportedArchiveDescriptor = {
       key: 'snapshot',
+      version: snapshot.version,
       source: snapshot.source,
       exportedAt: snapshot.exportedAt,
       importedAt: Date.now(),
@@ -95,11 +104,11 @@ export class IdbArchiveRepository implements ArchiveRepository {
         if (descriptor === undefined) throw new Error('The imported archive does not exist.')
         return {
           format: 'shunt-archive',
-          version: 1,
+          version: descriptor.version ?? 1,
           source: descriptor.source,
           exportedAt: descriptor.exportedAt,
           preferences: descriptor.preferences,
-          stores,
+          stores: (descriptor.version ?? 1) === 1 ? withoutHours(stores) : stores,
         }
       })
     } finally {
@@ -161,21 +170,27 @@ export class IdbArchiveRepository implements ArchiveRepository {
   }
 }
 
-async function readStores(transaction: IDBTransaction): Promise<ArchiveStores> {
-  const [sessions, chunks, devices, meta, warnings, ringRecords, ringReads] = await Promise.all(
-    HISTORY_STORES.map((store) => requestAsPromise(transaction.objectStore(store).getAll())),
+async function readStores(transaction: IDBTransaction, detail: 'complete' | 'hourly' = 'complete'): Promise<ArchiveStores> {
+  const [sessions, chunks, devices, meta, warnings, ringRecords, ringReads, hours] = await Promise.all(
+    HISTORY_STORES.map((store) => store === 'chunks' && detail === 'hourly' ? Promise.resolve([]) : requestAsPromise(transaction.objectStore(store).getAll())),
   )
-  return { sessions, chunks, devices, meta, warnings, ringRecords, ringReads }
+  return { sessions, chunks, devices, meta, warnings, ringRecords, ringReads, hours }
 }
 
 async function replaceStores(transaction: IDBTransaction, stores: ArchiveStores): Promise<void> {
   for (const name of HISTORY_STORES) {
     const destination = transaction.objectStore(name)
     await requestAsPromise(destination.clear())
-    for (const row of stores[name]) await requestAsPromise(destination.add(row))
+    const rows = name === 'sessionHours' ? stores.hours ?? [] : stores[name]
+    for (const row of rows) await requestAsPromise(destination.add(row))
   }
 }
 
 function readDescriptor(transaction: IDBTransaction): Promise<ImportedArchiveDescriptor | undefined> {
   return requestAsPromise(transaction.objectStore(DESCRIPTOR).get('snapshot'))
+}
+
+function withoutHours(stores: ArchiveStores): ArchiveStores {
+  const { hours: _hours, ...legacyStores } = stores
+  return legacyStores
 }

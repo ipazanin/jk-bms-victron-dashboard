@@ -18,7 +18,7 @@ export interface GoogleSyncDependencies {
   createWorkspace(name: string, signal: AbortSignal): Promise<CloudWorkspace>
   chooseWorkspace(signal: AbortSignal): Promise<CloudWorkspace | null>
   trashWorkspace(workspace: CloudWorkspace, signal: AbortSignal): Promise<void>
-  capture(includeSecret: boolean): Promise<ArchiveSnapshot>
+  capture(includeSecret: boolean, detail?: 'complete' | 'hourly'): Promise<ArchiveSnapshot>
   sourceId(): string | null
   importArchive(snapshot: ArchiveSnapshot, select: boolean): Promise<void>
   imported(): readonly ImportedArchive[]

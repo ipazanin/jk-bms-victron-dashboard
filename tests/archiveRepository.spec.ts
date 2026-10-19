@@ -70,14 +70,17 @@ describe('archive repository', () => {
     expect(second.repository.source.id).not.toBe(first.repository.source.id)
   })
 
-  it('captures every store in one read-only transaction including unsealed active checkpoints', async () => {
+  it('backfills summaries and captures every store in one transaction including unsealed active checkpoints', async () => {
     const { repository, store } = await openRepository()
     await populate(store)
     const transaction = vi.spyOn(IDBDatabase.prototype, 'transaction')
     const snapshot = await repository.capture([{ key: 'shunt.theme', value: 'dark' }])
     expect(transaction).toHaveBeenCalledTimes(1)
-    expect(transaction.mock.calls[0][0]).toEqual(['sessions', 'chunks', 'devices', 'meta', 'warnings', 'ringRecords', 'ringReads'])
-    expect(transaction.mock.calls[0][1]).toBe('readonly')
+    expect(transaction.mock.calls[0][0]).toEqual(['sessions', 'chunks', 'devices', 'meta', 'warnings', 'ringRecords', 'ringReads', 'sessionHours'])
+    expect(transaction.mock.calls[0][1]).toBe('readwrite')
+    expect(snapshot.version).toBe(2)
+    expect(snapshot.stores.hours).toHaveLength(1)
+    expect(snapshot.stores.hours![0]!.basis).toBe('reconstructed')
     expect(snapshot.stores.sessions[0].state).toBe('open')
     expect(snapshot.stores.chunks[0].sealed).toBe(false)
     expect(snapshot.stores.chunks[0].offsetMs).toBeInstanceOf(Uint32Array)
@@ -92,6 +95,23 @@ describe('archive repository', () => {
     const session = sessionRecord({ packDeviceKey: null, solarDeviceKey: null, groupKey: groupKeyFor(null, null) })
     await store.openSession(session)
     expect((await repository.capture([])).stores.sessions).toEqual([session])
+  })
+
+  it('captures hourly history without reading raw chunks after backfill', async () => {
+    const { repository, store } = await openRepository()
+    await populate(store)
+    await store.closeSession(sessionRecord().id, sessionClosure({ packSamples: 3, packChunks: 1 }))
+    const complete = await repository.capture([])
+    const getAll = vi.spyOn(IDBObjectStore.prototype, 'getAll')
+    const compact = await repository.capture([], 'hourly')
+    expect(getAll.mock.contexts.some((context) => context instanceof IDBObjectStore && context.name === 'chunks')).toBe(false)
+    expect(compact.stores.chunks).toEqual([])
+    expect(compact.stores.hours).toEqual(complete.stores.hours)
+    expect(compact.stores.warnings).toEqual(complete.stores.warnings)
+    expect(compact.stores.ringRecords).toEqual(complete.stores.ringRecords)
+    expect(compact.stores.sessions[0]!.ledger).toEqual(complete.stores.sessions[0]!.ledger)
+    expect(compact.stores.meta[0]!.rawBytes).toBe(0)
+    expect((await repository.capture([])).stores).toEqual(complete.stores)
   })
 
   it('captures a session between opening it and writing its device metadata', async () => {

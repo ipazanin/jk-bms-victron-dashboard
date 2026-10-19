@@ -62,7 +62,7 @@ function spacedTotal(elapsedMs: number): string {
     <header class="head">
       <h2 class="head-title">Log</h2>
       <p class="copy head-sub">
-        Sessions from {{ selected?.source.label ?? 'this browser' }}. 1 Hz, exactly what the radios reported.
+        Sessions from {{ selected?.source.label ?? 'this browser' }}. Hourly history, important moments, and raw samples where retained.
       </p>
       <p v-if="archive.sessions > 0" class="readout totals">{{ totals }}</p>
     </header>

@@ -41,20 +41,23 @@ export const settings = shape({
   balancerEnabled: boolean,
 })
 
+export const sessionLedger = shape({
+  ...fields('countedMs foreignMs foreignAhFloor', nonnegative),
+  ...fields('packAh solarAh houseWh packAhWholeSession', finite),
+  ...fields('stateOfChargeFirst stateOfChargeLast stateOfChargeMin', nullable(bounded(0, 100))),
+  ...fields('remainingCapacityFirstAh remainingCapacityLastAh pvPowerPeakW', nullable(finite)),
+})
+
 export const sessionRecord = shape({
   id: identity, schema: choice(SNAPSHOT_SCHEMA_VERSION), writerId: identity,
   state: choice('open', 'closed'), startedAt: timestamp, endedAt: nullable(timestamp), heartbeatAt: timestamp,
+  hourlyBasis: optional(choice('recorded', 'reconstructed')),
   endReason: nullable(choice('user-disconnect', 'link-lost', 'stalled', 'device-changed', 'page-away', 'archive-lost', 'abandoned')),
   packDeviceKey: nullable(identity), solarDeviceKey: nullable(identity), groupKey: identity,
   ...fields('packSamples solarSamples sealedSamples packChunks solarChunks droppedChunks', count),
   retainedFrom: nullable(timestamp), continues: nullable(identity),
   coverage: list(shape({ from: timestamp, to: timestamp, kind: choice('both', 'pack-only', 'solar-only', 'foreign', 'none') })),
-  ledger: shape({
-    ...fields('countedMs foreignMs foreignAhFloor', nonnegative),
-    ...fields('packAh solarAh houseWh packAhWholeSession', finite),
-    ...fields('stateOfChargeFirst stateOfChargeLast stateOfChargeMin', nullable(bounded(0, 100))),
-    ...fields('remainingCapacityFirstAh remainingCapacityLastAh pvPowerPeakW', nullable(finite)),
-  }),
+  ledger: sessionLedger,
   entries: list(shape({ at: timestamp, kind: choice('begin', 'fault', 'cleared', 'gap', 'deepest', 'end'), level: choice('good', 'warning', 'serious', 'critical', 'neutral'), text })),
   finalBattery: nullable(batterySnapshot), finalSolar: nullable(solarReading), deviceInfo: nullable(deviceInfo), settings: nullable(settings),
 })
@@ -69,6 +72,7 @@ export const deviceRecord = shape({
 
 export const historyMeta = shape({
   key: choice('totals'), totalSamples: count, schema: choice(SNAPSHOT_SCHEMA_VERSION),
+  rawBytes: optional(count),
   createdAt: timestamp, lastPrunedAt: nullable(timestamp),
 })
 

@@ -119,6 +119,7 @@ const onKeydown = (event: KeyboardEvent): void => {
 
 let stopRouting: (() => void) | null = null
 let stopArchiveLevers: (() => void) | null = null
+let disposed = false
 
 function wireArchive(store: HistoryStore): void {
   attachHistoryStore(store)
@@ -138,6 +139,10 @@ onMounted(() => {
   const archiveName = import.meta.env.VITE_FAKE_BLE === 'true' ? FAKE_ARCHIVE_NAME : DATABASE_NAME
   void openHistoryStore(archiveName)
     .then((store) => {
+      if (disposed) {
+        store.close()
+        return
+      }
       const archive =
         import.meta.env.VITE_FAKE_BLE === 'true' ? fakeRadioController().archiveFor(store) : store
       wireArchive(archive)
@@ -146,13 +151,14 @@ onMounted(() => {
         : navigator.userAgent.includes('Edg/')
           ? 'Edge'
           : navigator.userAgent.includes('Chrome/') ? 'Chrome' : 'Browser'
-      void archives.initialize(archiveName, archive, `${browserName} on ${navigator.platform || 'this device'}`).then(() => {
-        const selectedSource = new URL(window.location.href).searchParams.get('archive')
-        if (selectedSource !== null) void archives.selectSource(selectedSource)
-      })
       if (import.meta.env.VITE_FAKE_BLE === 'true') {
         stopArchiveLevers = fakeRadioController().onArchiveChange(wireArchive)
       }
+      return archives.initialize(archiveName, archive, `${browserName} on ${navigator.platform || 'this device'}`).then(() => {
+        if (disposed) return
+        const selectedSource = new URL(window.location.href).searchParams.get('archive')
+        if (selectedSource !== null) return archives.selectSource(selectedSource)
+      })
     })
     .catch(() => undefined)
 
@@ -160,6 +166,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
   googleSync.dispose()
   stopRouting?.()
   stopRouting = null

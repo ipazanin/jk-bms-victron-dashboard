@@ -6,4 +6,6 @@ export interface DriveFile {
   readonly appProperties?: Readonly<Record<string, string>>
   readonly size?: string
   readonly trashed?: boolean
+  readonly description?: string
+  readonly createdTime?: string
 }

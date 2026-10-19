@@ -49,6 +49,14 @@ describe('shared settings persistence', () => {
     expect(loadGoogleSyncState().settingsBaseline).toEqual(baseline)
   })
 
+  it('preserves compact workspace versions and rejects unsupported versions', () => {
+    const workspace = { id: 'sheet', name: 'Boat', folderId: 'folder', version: 2 }
+    localStorage.setItem('shunt.googleSync', JSON.stringify({ workspace }))
+    expect(loadGoogleSyncState().workspace).toEqual(workspace)
+    localStorage.setItem('shunt.googleSync', JSON.stringify({ workspace: { ...workspace, version: 3 } }))
+    expect(loadGoogleSyncState().workspace).toBeNull()
+  })
+
   it('keeps fake-radio sync preferences separate from real history and stores no access token', () => {
     const saved = { ...loadGoogleSyncState(), enabled: true, sourceLabel: 'Boat tablet' }
     vi.stubEnv('VITE_FAKE_BLE', 'true')

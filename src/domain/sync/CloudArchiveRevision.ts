@@ -1,13 +1,4 @@
-import type { ArchiveSource } from '../backup/ArchiveSource'
+import type { CloudSnapshotRevision } from './CloudSnapshotRevision'
+import type { LegacyCloudArchiveRevision } from './LegacyCloudArchiveRevision'
 
-export interface CloudArchiveRevision {
-  readonly id: string
-  readonly source: ArchiveSource
-  readonly exportedAt: number
-  readonly manifestFileId: string
-  readonly manifestHash: string
-  readonly contentHash: string
-  readonly sessions: number
-  readonly samples: number
-  readonly bytes: number
-}
+export type CloudArchiveRevision = LegacyCloudArchiveRevision | CloudSnapshotRevision

@@ -1,23 +1,4 @@
 <script setup lang="ts">
-/**
- * The ammeter with time added.
- *
- * One signed amp axis, zero dead centre, and the house load is the vertical gap between the pack
- * trace and the solar trace — the same claim the live instrument's span makes, drawn across a
- * session. Nothing here is a second instrument to learn.
- *
- * The house region is a wash bounded by a 1px edge rather than a filled colour, because the
- * interior of a band cannot carry contrast at any alpha this design language would accept: 0.16
- * measures about 1.20:1 against the surface and even 0.55 only reaches 2.17:1. So the edge does the
- * work and the wash is support.
- *
- * Where the pack took more than the panels gave, the fill is replaced by a hatch instead of being
- * drawn as a house load below zero. That is the same withholding the live instrument performs,
- * made legible across time — which means the archive records for free exactly when the engine ran.
- *
- * Gaps are drawn as gaps. A stream silent longer than the join's bound says nothing about what
- * happened in between, and a straight line across it would assert a reading nobody took.
- */
 import { computed, ref, useId } from 'vue'
 
 import { COMPACT_QUERY } from '../../application/breakpoints'
@@ -39,29 +20,23 @@ import type { TimeWindow } from '../../domain/history/types'
 
 const props = defineProps<{
   timeline: readonly PairedSample[]
-  /** What the loaded rows actually span, which is not the session's own span after a clamp. */
+
   window: TimeWindow
   cursorAt: number | null
-  /** Resolved by the view that owns the crosshair, so tape, ribbon and entries share one search. */
+
   cursorSample: PairedSample | null
-  windowClamped: boolean
-  sessionMs: number
 }>()
 
 const emit = defineEmits<{
   scrub: [number | null]
-  shift: ['earlier' | 'later']
 }>()
 
 const MS_PER_MINUTE = 60_000
 const MS_PER_HOUR = 3_600_000
 const MS_PER_DAY = 86_400_000
 
-/** Roughly one column per two viewBox units: finer than the eye resolves, coarser than a redraw
- *  per stored sample, which for a day-long session is forty thousand path commands. */
 const UNITS_PER_COLUMN = 2
 
-/** Candidate spacings for the time ruler, in ascending order. */
 const TIME_STEPS_MS = [
   5 * MS_PER_MINUTE,
   15 * MS_PER_MINUTE,
@@ -83,7 +58,6 @@ const box = computed(() => (compact.value ? PHONE : DESKTOP))
 
 const plot = ref<SVGSVGElement | null>(null)
 
-/** Each instance owns its hatch, so two ribbons on one page cannot share a definition. */
 const hatchId = `ribbon-withheld-${useId()}`
 
 const tracks = computed(() =>
@@ -94,7 +68,6 @@ const tracks = computed(() =>
   ),
 )
 
-/** The instant at the centre of a column, which is where its reach is drawn. */
 function columnAt(index: number): number {
   return props.window.from + (index + 0.5) * tracks.value.columnMs
 }
@@ -120,7 +93,6 @@ const value = computed<LinearScale>(() =>
 
 const zeroY = computed(() => positionOn(value.value, 0))
 
-/** One entry per column: the two traces' rates, and whether the difference is a house load at all. */
 interface Column {
   readonly at: number
   readonly pack: number | null
@@ -140,9 +112,6 @@ const columns = computed<readonly Column[]>(() => {
       at: columnAt(index),
       pack,
       solar,
-      // The withholding rule is read from dcBus rather than restated, so the archive and the live
-      // instrument can never withhold on different thresholds. Only the flag is wanted here, and
-      // the voltage term scales the power alone.
       withheld: pack !== null && solar !== null && !deriveHouse(pack, solar, 0).plausible,
     })
   }
@@ -168,14 +137,11 @@ const solarTrace = computed(() =>
 const packBand = computed(() => reachBand(tracks.value.pack.columns))
 const solarBand = computed(() => reachBand(tracks.value.solar.columns))
 
-/** The house region where the difference is a load, and where it is not. The two are drawn from
- *  the same geometry through complementary nulls, so they can never overlap or leave a seam. */
 const houseFill = computed(() => houseRegion(false))
 const houseHatch = computed(() => houseRegion(true))
 
 const withheldPresent = computed(() => columns.value.some((column) => column.withheld))
 
-/** Where neither radio reported. A stretch one of them covered is not "no samples". */
 const silences = computed<readonly TimeWindow[]>(() => {
   const found: TimeWindow[] = []
   for (const packGap of tracks.value.pack.gaps) {
@@ -239,8 +205,6 @@ const timeTicks = computed(() => {
 
   const step = TIME_STEPS_MS.find((candidate) => span / candidate <= TARGET_TIME_TICKS) ?? MS_PER_DAY
   const ticks: number[] = []
-  // Aligned to the local wall clock rather than to the window's own start, so the labels are round
-  // times a reader can find on their watch.
   const first = new Date(props.window.from)
   first.setMinutes(0, 0, 0)
   for (let at = first.getTime(); at <= props.window.to; at += step) {
@@ -248,10 +212,6 @@ const timeTicks = computed(() => {
   }
   return ticks
 })
-
-const clampSentence = computed(
-  () => `Showing the last ${spacedSpan(props.window.to - props.window.from)} of a ${spacedSpan(props.sessionMs)} session.`,
-)
 
 const summary = computed(() => {
   const parts = [
@@ -301,8 +261,6 @@ function atFromClientX(clientX: number): number | null {
   const bounds = svg.getBoundingClientRect()
   if (bounds.width === 0) return null
 
-  // The viewBox is letterboxed into the element, so the pointer is mapped through the same units
-  // the marks are drawn in rather than through the element's own pixels.
   const units = ((clientX - bounds.left) / bounds.width) * box.value.width
   const fraction = (units - box.value.left) / (box.value.right - box.value.left)
   const span = props.window.to - props.window.from
@@ -321,7 +279,6 @@ function onStep(direction: -1 | 1): void {
   emit('scrub', next)
 }
 
-/** `3 h 12 m`, `41 min`, `3 min 40 s` — the form that sits inside a sentence. */
 function spacedSpan(elapsedMs: number): string {
   if (elapsedMs < MS_PER_MINUTE) return `${Math.round(elapsedMs / 1000)} s`
   if (elapsedMs < MS_PER_HOUR) {
@@ -371,7 +328,6 @@ function spacedSpan(elapsedMs: number): string {
           </pattern>
         </defs>
 
-        <!-- Recessive: the scale is checkable by eye without competing with the marks on it. -->
         <g class="grid">
           <line
             v-for="tick in axis.ticks"
@@ -437,8 +393,6 @@ function spacedSpan(elapsedMs: number): string {
           </g>
         </g>
 
-        <!-- Named at the rail rather than left to hue, so the two traces are told apart in
-             monochrome, in print and by a reader who cannot separate blue from amber. -->
         <text :x="box.left + 4" :y="box.top + 12" class="rail-label solar-ink">SOLAR</text>
         <text :x="box.left + 4" :y="box.bottom - 6" class="rail-label pack-ink">PACK</text>
 
@@ -490,11 +444,6 @@ function spacedSpan(elapsedMs: number): string {
       each bucket are kept, so spikes survive.
     </p>
 
-    <p v-if="windowClamped" class="copy clamp">
-      {{ clampSentence }}
-      <button type="button" class="nudge" @click="emit('shift', 'earlier')">Earlier</button>
-      <button type="button" class="nudge" @click="emit('shift', 'later')">Later</button>
-    </p>
   </section>
 </template>
 
@@ -531,7 +480,6 @@ function spacedSpan(elapsedMs: number): string {
   stroke-width: 1;
 }
 
-/* The only emphasised gridline: every mark on this chart is a distance from it. */
 .grid line.zero {
   stroke: var(--baseline);
 }
@@ -574,14 +522,11 @@ function spacedSpan(elapsedMs: number): string {
   vector-effect: non-scaling-stroke;
 }
 
-/* Thin enough that the region reads as hatched rather than as a solid light block, which is what a
-   heavier stroke on an 8-unit pitch collapses into. */
 .hatch-line {
   stroke: var(--ink-muted);
   stroke-width: 1.5;
 }
 
-/* The envelope of each bucket, so a single-sample spike is still on the page. */
 .band {
   fill-opacity: 0.22;
   stroke: none;
@@ -714,30 +659,4 @@ function spacedSpan(elapsedMs: number): string {
   color: var(--ink-muted);
 }
 
-.clamp {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.6rem;
-}
-
-.nudge {
-  background: transparent;
-  border: 1px solid var(--card-border);
-  color: var(--ink-secondary);
-  border-radius: var(--r-sm);
-  padding: 0.2rem 0.7rem;
-  min-height: var(--tap);
-  display: inline-flex;
-  align-items: center;
-  font-family: var(--font-label);
-  font-size: 0.75rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.nudge:hover {
-  color: var(--ink);
-  border-color: var(--baseline);
-}
 </style>

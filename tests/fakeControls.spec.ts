@@ -22,93 +22,54 @@ import LogView from '../src/components/history/LogView.vue'
 import SessionRow from '../src/components/history/SessionRow.vue'
 import {
   dropViewedSession,
-  fillSampleCounterToNearCapacity,
   seedFakeArchive,
   wipeFakeArchive,
 } from '../src/components/dev/seedFakeArchive'
-import { MAX_TOTAL_SAMPLES, PRUNE_TARGET_RATIO } from '../src/domain/history/budget'
-import type { HistoryMeta, SessionId } from '../src/domain/history/types'
+import type { SessionId } from '../src/domain/history/types'
 import { FakeRadioController } from '../src/infrastructure/ble/fake/FakeRadioController'
 import { loadPlaybackFixture } from '../src/infrastructure/ble/fake/fixture/loadPlaybackFixture'
 import { FAKE_ARCHIVE_NAME } from '../src/infrastructure/history/fakeArchiveName'
-import { requestAsPromise } from '../src/infrastructure/history/idb'
 import {
   DATABASE_NAME,
-  DATABASE_VERSION,
-  META,
-  TOTALS_KEY,
-  applySchema,
 } from '../src/infrastructure/history/IdbHistoryStore'
 import { openHistoryStore } from '../src/infrastructure/history/openHistoryStore'
 import { MemoryHistoryStore } from './support/MemoryHistoryStore'
 
-// One row per control the dev panel offers: press it, then look at what the app does about it.
-//
-// This is the whole reason the controls are methods on a controller with no Vue in it. A panel
-// whose levers lived in its own click handlers could only be checked by mounting it and clicking,
-// which would test the panel's markup and leave the states it exists to reach — a pack that refuses
-// the connection, a ring with a hole in it, an archive that fails every call — asserted nowhere.
-// Each case here presses the same method the button presses and then reads what the app made of it.
-//
-// Three rules the rows obey. A capability is read once, when telemetry is built, so a row that moves
-// one reloads the page rather than pretending otherwise. Nothing plays into a link that is not up,
-// so a row about what the pack reports connects first. And nothing is asserted against an object the
-// fake itself built: a row reads a ref an instrument reads, or the words a view prints with the view
-// already on screen. A lever that answers correctly when asked is not a lever a reader can see.
-
 const fixture = await loadPlaybackFixture()
 
-/** Enough of the recording for the first few pack frames of either scenario to have landed. */
 const FIRST_FRAMES_MS = 4000
-/** Longer than any case waits, so an attempt held for this long is outstanding when it is read. */
+
 const HELD_ATTEMPT_MS = 8000
 
-/** Volts of disagreement about the bus, against a tolerance of three tenths. */
 const BUS_DISAGREEMENT_V = 0.5
-/** Amps taken off the controller's reading, which puts the derived house load below zero. */
+
 const HOUSE_LOAD_OFFSET_A = 20
-/** Milliohms on one cell's path, well past the three the alarm calls a loose joint. */
+
 const LOOSE_JOINT_MILLIOHMS = 8
-/** The panel's smaller step on the same lever, which its label states as what it adds. */
+
 const ADDED_JOINT_MILLIOHMS = 4
 const MILLIOHMS_PER_OHM = 1000
-/**
- * How long the fit needs before it claims a slope. Twice what it measured at: the captured float
- * afternoon separates enough current pairs to identify one inside ten seconds, and the estimator
- * compares every pair with every other, so a window twice that long costs four times as much.
- */
+
 const BALANCE_FIT_MS = 20_000
 
 const CONTROLLER_MODEL_ID = 0xa060
 
-/**
- * The page the panel is pinned to: the controller its buttons call, the telemetry the instruments
- * read, and the archive both write through. Held as accessors so a row that reloads gets the new
- * pair without every row having to take them as arguments.
- */
 interface FakePage {
   readonly controller: FakeRadioController
   readonly telemetry: Telemetry
-  /**
-   * The archive as it really is, which is what a seeding or an assertion about stored rows has to
-   * reach. Deliberately the only archive a row is handed: whichever store the levers put in front of
-   * it is the app's business, and a row that read the app's copy would be asserting that the fake
-   * knows its own mind rather than that a reader saw anything.
-   */
+
   readonly store: MemoryHistoryStore
-  /** What a reload does. The persisted levers come back; nothing that was running does. */
+
   reload(): Promise<void>
-  /** Walks the recording for as long as the app would have seen it, then settles the writes. */
+
   play(forMs: number): Promise<void>
 }
 
-/** One control, as the panel offers it. */
 interface DevControl {
-  /** What the panel's button says. */
   readonly control: string
-  /** Presses it, and then whichever of the app's own buttons the state needs. */
+
   readonly press: (page: FakePage) => Promise<void>
-  /** The state it exists to reach. */
+
   readonly reaches: (page: FakePage) => void | Promise<void>
 }
 
@@ -134,14 +95,12 @@ function playbackDeps(): TelemetryDeps {
   }
 }
 
-/** Builds the pair the composition root builds, in the order it builds them. */
 async function load(): Promise<void> {
   controller = new FakeRadioController(loadPlaybackFixture())
-  // The recording is fetched rather than imported, so a page is only ready once it has landed.
+
   await controller.whenReady()
   archive = controller.archiveFor(store)
-  // Every archive lever mints a store of its own, so the page has to be handed the new one — this
-  // is the shell's own subscription, and without it a lever moves an object nothing is holding.
+
   controller.onArchiveChange((next) => {
     archive = next
   })
@@ -169,11 +128,6 @@ const page: FakePage = {
 }
 
 beforeEach(async () => {
-  // jsdom answers 'prerender' and unfocused, which would tell both supervisors the page is behind
-  // another window for the whole suite — and the solar loop rightly stands a watch down over a page
-  // nobody is looking at. The page these tests model is the one in front of the developer, so the
-  // browser half of the answer is pinned in front here and the panel's own levers stay the only way
-  // to take it away.
   vi.spyOn(document, 'hasFocus').mockReturnValue(true)
   Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true })
   localStorage.clear()
@@ -206,7 +160,6 @@ function faultLevel(title: string): FaultLevel | undefined {
   return telemetry.faults.value.find((fault) => fault.title === title)?.level
 }
 
-/** Ohms of path resistance the fit claims, and a refusal that names why when it claims none. */
 function fittedJointSpread(): number {
   const verdict = telemetry.balance.value
   if (verdict?.kind !== 'fitted') {
@@ -225,17 +178,12 @@ async function solarLive(): Promise<void> {
   await page.play(FIRST_FRAMES_MS)
 }
 
-/** Both radios up before either plays, so the first pack frame has a reading to pair with. */
 async function bothLive(): Promise<void> {
   await telemetry.connectBms()
   await telemetry.startSolar(loadAdvertisementKey())
   await page.play(FIRST_FRAMES_MS)
 }
 
-/**
- * A live pack that has not yet said anything. The automatic stale-ring read fires off the first
- * snapshot, so a case about what one read did needs a ledger nothing has already filled.
- */
 async function packLiveBeforeAnyFrame(): Promise<void> {
   controller.holdAtFirstFrame(true)
   await telemetry.connectBms()
@@ -269,7 +217,6 @@ describe('what this browser can do', () => {
         await page.telemetry.reconnectBms()
       },
       reaches: (page) => {
-        // The pack is remembered, so the only thing stopping the attempt is the missing API.
         expect(page.telemetry.lastDevice.value).not.toBeNull()
         expect(page.telemetry.bmsState.value).toBe('idle')
       },
@@ -289,8 +236,6 @@ describe('what this browser can do', () => {
         await page.reload()
       },
       reaches: (page) => {
-        // Never reported on rather than reported off: the requirements row then says this browser
-        // will not answer instead of blaming a radio that was never there.
         expect(page.telemetry.capabilities.hasBluetooth).toBe(false)
         expect(page.telemetry.adapterOn.value).toBeNull()
       },
@@ -420,7 +365,6 @@ describe("the pack's link", () => {
         await page.telemetry.connectBms()
       },
       reaches: (page) => {
-        // A chooser the user closed is a decision, not a fault, and the page says nothing.
         expect(page.telemetry.bmsState.value).toBe('idle')
         expect(page.telemetry.bmsError.value).toBeNull()
       },
@@ -446,9 +390,6 @@ describe("the pack's link", () => {
         await page.telemetry.drain()
       },
       reaches: async (page) => {
-        // The same banner as a drop, and a different word in the archive — which the archive only
-        // gets to say once the resume window has run out, because until then the session is being
-        // held open for a pack the owner has not told this browser to stop going back to.
         expect(page.telemetry.bmsError.value).toMatch(/Lost the BMS/)
         await page.play(REJOIN_RESUME_WINDOW_MS)
         const [listing] = await page.store.listSessions()
@@ -474,7 +415,6 @@ describe("the pack's link", () => {
         await page.telemetry.connectBms()
       },
       reaches: (page) => {
-        // Two banners were in play and the one naming the event is the one left standing.
         expect(page.telemetry.bmsError.value).toMatch(/Lost the BMS/)
         expect(page.telemetry.bmsError.value).not.toMatch(/refused the connection/)
       },
@@ -488,7 +428,7 @@ describe("the pack's link", () => {
       },
       reaches: (page) => {
         expect(page.telemetry.detailLog.value?.outcome).toBe('records-read')
-        // Read, and filed under nothing: one invented key would merge every unnamed pack.
+
         expect(page.telemetry.ringFilingNote.value).not.toBeNull()
         expect(page.telemetry.ringIngest.value).toBeNull()
       },
@@ -520,11 +460,6 @@ describe("the pack's link", () => {
 })
 
 describe('going back to the pack on its own', () => {
-  /**
-   * jsdom never gives its window focus, and the fake page reports the browser's own answer alongside
-   * its levers so that a window genuinely moved behind another still stands both loops down. Without
-   * this the levers below would be pulled on a page that is already reported as put away.
-   */
   const answeredFocus = document.hasFocus.bind(document)
 
   beforeEach(() => {
@@ -535,11 +470,6 @@ describe('going back to the pack on its own', () => {
     document.hasFocus = answeredFocus
   })
 
-  /**
-   * A page that has met the pack before. The remembered pack is read from storage when telemetry is
-   * built, so seeding one takes a reload — after which the supervisor is started exactly where the
-   * shell starts it, on mount.
-   */
   async function rememberThePack(page: FakePage): Promise<void> {
     page.controller.seedLastDevice()
     await page.reload()
@@ -551,8 +481,7 @@ describe('going back to the pack on its own', () => {
       press: async (page) => {
         await rememberThePack(page)
         await page.telemetry.connectBms()
-        // The one thing that disarms it. From here the supervisor keeps being asked and keeps
-        // answering that the owner said not to, until the button below says otherwise.
+
         await page.telemetry.disconnectBms()
         page.telemetry.startRejoin()
         await page.play(FIRST_FRAMES_MS)
@@ -588,7 +517,6 @@ describe('going back to the pack on its own', () => {
         await page.play(FIRST_FRAMES_MS)
       },
       reaches: (page) => {
-        // Still looking, and saying nothing about it. A pack behind a bulkhead is not a fault.
         expect(page.telemetry.rejoinSearching.value).toBe(true)
         expect(page.telemetry.bmsState.value).toBe('connecting')
         expect(page.telemetry.bmsError.value).toBeNull()
@@ -620,10 +548,6 @@ describe('going back to the pack on its own', () => {
         await page.play(FIRST_FRAMES_MS)
       },
       reaches: (page) => {
-        // Chromium tears an advertisement watch down when the tab goes behind another and fires
-        // nothing, so the wait for a sighting is gone. The hunt is not: it drops to the straight
-        // attach, which needs no tab in front of anybody, and this pack is simply not there to
-        // answer one.
         expect(page.telemetry.rejoinSearching.value).toBe(true)
         expect(page.telemetry.bmsState.value).toBe('idle')
       },
@@ -702,7 +626,6 @@ describe("the controller's link", () => {
         await page.telemetry.drain()
       },
       reaches: (page) => {
-        // The scan is still up and the controller may come back, so this is not a session end.
         expect(page.telemetry.solarState.value).toBe('listening')
         expect(page.telemetry.solar.value).toBeNull()
       },
@@ -729,8 +652,6 @@ describe("the controller's link", () => {
       control: 'The marina is what is being heard',
       press: async (page) => page.controller.emitUnreadable('key-mismatch', 'anything-in-range'),
       reaches: (page) => {
-        // The same three bytes, and a different sentence on the other side of it: a browser
-        // listening to every Victron on the pontoon may not be told its own key has gone stale.
         expect(page.telemetry.solarRejection.value).toBe('key-mismatch')
         expect(page.telemetry.solarRejectionSource.value).toBe('anything-in-range')
       },
@@ -784,7 +705,6 @@ describe("the controller's link", () => {
 })
 
 describe('what the pack reports', () => {
-  /** The fit over the discharge recording as it stands, and again with the panel's step on it. */
   let jointSpreadAsRecorded: number
   let jointSpreadWithTheStep: number
 
@@ -803,8 +723,6 @@ describe('what the pack reports', () => {
     {
       control: 'Cell imbalance — charge divergence',
       press: async (page) => {
-        // Over the pack's own balance trigger and under the fifty millivolts that stops the alarm
-        // asking questions, which is the arm that names the balancer.
         page.controller.setCellSpreadMv(20)
         await packLive()
       },
@@ -821,8 +739,6 @@ describe('what the pack reports', () => {
         await page.play(BALANCE_FIT_MS)
       },
       reaches: (page) => {
-        // A slope against the load, which is the wiring rather than the charge, so the verdict has
-        // to be a fitted one before the alarm may name a joint at all.
         expect(page.telemetry.balance.value?.kind).toBe('fitted')
         expect(faultTitles()).toContain('Cell path resistance')
         expect(faultLevel('Cell path resistance')).toBe('serious')
@@ -836,8 +752,6 @@ describe('what the pack reports', () => {
         await page.play(BALANCE_FIT_MS)
         jointSpreadAsRecorded = fittedJointSpread()
 
-        // The same window again from the top, rather than the lever thrown mid-session: a fit run
-        // across the throw would be taken over frames half of which never carried the step.
         await page.reload()
         page.controller.playScenario('discharge')
         page.controller.setCellPathResistanceMilliohms(ADDED_JOINT_MILLIOHMS)
@@ -846,10 +760,6 @@ describe('what the pack reports', () => {
         jointSpreadWithTheStep = fittedJointSpread()
       },
       reaches: () => {
-        // Why the panel's steps are labelled as what they add rather than as the verdict they
-        // produce. The captured discharge carries path resistance of its own before anything is
-        // levered, and the fit reports the step on top of it — so a step naming the figure the fit
-        // would report would be wrong by whatever the recording underneath happened to be carrying.
         expect(jointSpreadAsRecorded).toBeGreaterThan(0)
         expect(jointSpreadWithTheStep - jointSpreadAsRecorded).toBeCloseTo(
           ADDED_JOINT_MILLIOHMS / MILLIOHMS_PER_OHM,
@@ -942,7 +852,6 @@ describe('what the controller reports', () => {
         await bothLive()
       },
       reaches: (page) => {
-        // Nothing to reconcile: no bus view and no derived house load.
         expect(page.telemetry.solar.value?.batteryVoltage).toBeNull()
         expect(page.telemetry.bus.value).toBeNull()
       },
@@ -1002,8 +911,7 @@ describe("the pack's stored log", () => {
       },
       reaches: (page) => {
         const merge = page.telemetry.ringIngest.value
-        // The ring moved under the reader between the two reads, and every figure here is what
-        // the fold made of two real bursts rather than arithmetic anyone wrote down.
+
         expect(merge?.overlap).toBeGreaterThan(0)
         expect(merge?.ringShift).not.toBeNull()
         expect(merge?.appended).toBeGreaterThan(0)
@@ -1080,20 +988,6 @@ describe("the pack's stored log", () => {
 })
 
 describe("the controller's stored history", () => {
-  /**
-   * Two watches of the same controller a day apart, with nothing pressed between them but the two
-   * the panel offers for the clock.
-   *
-   * The first watch is already a sweep: this browser holds none of the backlog, so the automatic
-   * one fires off the first decoded reading. What it files is what the second is measured against.
-   *
-   * Three things about the order matter. The rejoin loop is started first, as the shell starts it
-   * on mount, because the app will not take a watch away that nothing would put back. The clock
-   * moves only with both radios down, which is what Stop solar is doing here rather than any claim
-   * about the owner walking away. And Stop solar is the one press that forgets which controller
-   * this was, so the watch that follows it has to be a press of Connect solar — which remembers it
-   * again, and hands this watch its own chance at the backlog.
-   */
   async function watchedAcrossADay(page: FakePage): Promise<void> {
     page.telemetry.startRejoin()
     await solarLive()
@@ -1123,9 +1017,6 @@ describe("the controller's stored history", () => {
     {
       control: "Today's record, further along",
       press: async (page) => {
-        // Swept twice on purpose. Filing is a comparison, so the first sweep is what puts the days
-        // on the ledger the second one is measured against — armed against an empty ledger this
-        // answer files today as a first sighting and revises nothing.
         await page.telemetry.readSolarHistory()
         page.controller.answerSweepWithRevisedToday()
         await page.telemetry.readSolarHistory()
@@ -1134,9 +1025,7 @@ describe("the controller's stored history", () => {
         const merge = page.telemetry.solarHistoryIngest.value
         const daysSwept = page.telemetry.solarHistory.value?.days.length ?? 0
         expect(daysSwept).toBeGreaterThan(1)
-        // One day the ledger already held and whose figures moved, which is the whole of what the
-        // sentence about a record still being written is drawn from. Every completed day behind it
-        // answers what it answered before, so nothing else can be mistaken for it.
+
         expect(merge?.revised).toBe(1)
         expect(merge?.appended).toBe(0)
         expect(merge?.unchanged).toBe(daysSwept - 1)
@@ -1146,7 +1035,7 @@ describe("the controller's stored history", () => {
       control: 'The same history, read on a later date',
       press: async (page) => {
         await page.telemetry.readSolarHistory()
-        // Past a whole day, so the date every stored row was filed under is yesterday's.
+
         page.controller.ageClockByHours(25)
         await page.telemetry.readSolarHistory()
       },
@@ -1154,8 +1043,7 @@ describe("the controller's stored history", () => {
         const merge = page.telemetry.solarHistoryIngest.value
         const daysSwept = page.telemetry.solarHistory.value?.days.length ?? 0
         expect(daysSwept).toBeGreaterThan(1)
-        // Redating is about the clock the sweep was read on and not about its bytes: the same
-        // registers a day later are the same days, dated one further back.
+
         expect(merge?.redated).toBe(daysSwept)
         expect(merge?.unchanged).toBe(daysSwept)
         expect(merge?.revised).toBe(0)
@@ -1170,9 +1058,7 @@ describe("the controller's stored history", () => {
       },
       reaches: (page) => {
         const sweep = page.telemetry.solarHistory.value
-        // Every register answered and not one of them holds a day, which is a read that kept
-        // nothing rather than a read that got somewhere. A recorded day of zero yield is a
-        // different finding, so the two never collapse into one shape.
+
         expect(sweep?.outcome).toBe('empty-history')
         expect(sweep?.days.length).toBeGreaterThan(0)
         expect(sweep?.days.every((reading) => !reading.day.recorded)).toBe(true)
@@ -1234,24 +1120,17 @@ describe("the controller's stored history", () => {
         await watchedAcrossADay(page)
       },
       reaches: (page) => {
-        // Nobody was shown a chooser. The whole feature rests on there being a way back to a
-        // controller this origin already holds a grant for, because a dialog raised at a watch the
-        // owner did not ask for would be worse than a backlog that never gathers.
         expect(page.controller.lastSolarSweepRoute).toBe('remembered')
         expect(page.controller.lastRememberedSolarController).toBe(
           page.telemetry.lastController.value?.id,
         )
 
-        // The same registers a day later are the same days, dated one further back — which is the
-        // whole of what proves the second sweep was measured against what the first one filed.
         const merge = page.telemetry.solarHistoryIngest.value
         const daysSwept = page.telemetry.solarHistory.value?.days.length ?? 0
         expect(daysSwept).toBeGreaterThan(1)
         expect(merge?.redated).toBe(daysSwept)
         expect(merge?.appended).toBe(0)
 
-        // And the radio is the watch's again. The tunnel borrowed it; nothing was pressed to get
-        // it back.
         expect(page.telemetry.solarState.value).toBe('live')
       },
     },
@@ -1262,16 +1141,11 @@ describe("the controller's stored history", () => {
         await watchedAcrossADay(page)
       },
       reaches: (page) => {
-        // Refused before a tunnel was opened, so nothing came back and nothing was filed. It is
-        // said in the receipt and nowhere else: a browser that has let a grant lapse is not a
-        // fault, and the button is still there for anyone who wants the backlog today.
         expect(page.telemetry.solarHistoryError.value).toMatch(/no longer has permission/)
         expect(page.telemetry.solarHistory.value).toBeNull()
         expect(page.telemetry.solarHistoryIngest.value).toBeNull()
         expect(page.controller.lastSolarSweepRoute).toBeNull()
 
-        // The live watch is up regardless, which is what makes the failure quiet: the instruments
-        // report the controller as they did before anything was attempted.
         expect(page.telemetry.solarState.value).toBe('live')
         expect(page.telemetry.solar.value).not.toBeNull()
       },
@@ -1280,7 +1154,6 @@ describe("the controller's stored history", () => {
 })
 
 describe('what the page is looking at', () => {
-  /** Records a session and hands back the closed row, which is what the Log would offer. */
   async function recordOneSession(): Promise<void> {
     await telemetry.connectBms()
     await page.play(15_000)
@@ -1346,8 +1219,6 @@ describe('what the page is looking at', () => {
         page.controller.ageClockByHours(-30)
       },
       reaches: (page) => {
-        // Refused rather than obeyed: a recorder running against a clock that has just jumped
-        // writes rows into the future and the archive keeps them.
         expect(page.controller.clockOffsetMs).toBe(0)
       },
     },
@@ -1355,14 +1226,12 @@ describe('what the page is looking at', () => {
 })
 
 describe('the archive', () => {
-  /** What the last control stopped on, caught the way the panel's own handler catches it. */
   let archiveControlFailure: string | null
 
   beforeEach(() => {
     archiveControlFailure = null
   })
 
-  /** Runs one control the way the panel's own handler runs it, keeping whatever stopped it. */
   async function runArchiveControl(control: Promise<void>): Promise<void> {
     await control.catch((failure: unknown) => {
       archiveControlFailure = failure instanceof Error ? failure.message : String(failure)
@@ -1403,31 +1272,13 @@ describe('the archive', () => {
     },
   ])
 
-  /**
-   * The archive levers, read off a screen that was already up when they moved.
-   *
-   * Nothing below reads the store a lever built, and the order matters as much as the subject. A
-   * lever swaps the store the page records and reads through, with the setting read into that store
-   * when it is built and never afterwards. A page handed one store and never handed another
-   * therefore goes on reading the archive it started with, so a store answering exactly what the
-   * lever set is no evidence that any reader saw it: that is the shape of an archive reporting
-   * itself gone to a Log still listing its sessions.
-   *
-   * So each row here puts the screen up first and moves the lever underneath it. Mounting afterwards
-   * would paint the right sentence either way and prove nothing.
-   */
   describe('the levers, under a screen that is already up', () => {
-    /** Two checkpoints, so a refused write has been offered and turned away more than once. */
     const WRITES_REFUSED_MS = 2 * CHECKPOINT_INTERVAL_MS
 
     let mountedScreen: MountedApp | null = null
     let host: HTMLElement
     let stopWiringArchive: (() => void) | null = null
 
-    /**
-     * The shell's own wiring, and the resubscription that is the whole point of it: an archive lever
-     * mints a store of its own, and a page learns that the archive changed by being handed one.
-     */
     function wireArchive(store: HistoryStore): void {
       provideHistoryEnvironment({ store, downloadJson: () => undefined })
     }
@@ -1449,7 +1300,6 @@ describe('the archive', () => {
       host.remove()
     })
 
-    /** What the screen says now, wrapping collapsed so the copy reads as one sentence. */
     async function painted(): Promise<string> {
       await vi.advanceTimersByTimeAsync(0)
       await nextTick()
@@ -1471,8 +1321,6 @@ describe('the archive', () => {
           control: 'Storage refused to open',
           press: async (page) => page.controller.failArchiveWith('open-denied'),
           reaches: async () => {
-            // The same screen as no IndexedDB at all, and deliberately: from here they are one
-            // fact, which is that this browser refused to keep anything.
             expect(await painted()).toContain('This browser will not keep a log.')
           },
         },
@@ -1482,8 +1330,7 @@ describe('the archive', () => {
           reaches: async () => {
             const shown = await painted()
             expect(shown).toContain('Another tab is running an older version of this page')
-            // Nothing about this browser refused anything, so the storage sentence would send the
-            // reader to settings that have nothing to do with it.
+
             expect(shown).not.toContain('will not keep a log')
           },
         },
@@ -1511,8 +1358,6 @@ describe('the archive', () => {
             page.controller.failArchiveWith(null)
           },
           reaches: async () => {
-            // Both directions, because a screen that only ever goes wrong is a screen nobody can
-            // tell apart from one that was wrong to begin with.
             const shown = await painted()
             expect(shown).not.toContain('newer version')
             expect(shown).not.toContain('will not keep a log')
@@ -1522,9 +1367,6 @@ describe('the archive', () => {
           control: 'Every archive call fails',
           press: async (page) => page.controller.failEveryArchiveCall(true),
           reaches: async () => {
-            // There and failing, which is a different screen from a browser that keeps none — and
-            // the only route to it, because the store for a browser that keeps none is honest by
-            // design and cannot fail a caller that asked it politely.
             const shown = await painted()
             expect(shown).toContain('The archive is set to fail every call.')
             expect(shown).not.toContain('will not keep a log')
@@ -1533,10 +1375,6 @@ describe('the archive', () => {
       ])
     })
 
-    /**
-     * The plate wired as the bus view wires it: this file's own recorder, and the shared read
-     * model's answer about the archive.
-     */
     function recordingPlateAsTheBusViewMountsIt(): Component {
       const log = useHistoryBrowser()
       return {
@@ -1561,8 +1399,6 @@ describe('the archive', () => {
             await page.play(WRITES_REFUSED_MS)
           },
           reaches: async (page) => {
-            // The only shape the recorder reads a failure of its own out of: a write it was allowed
-            // to make, which came back saying it was not stored and why.
             expect(page.telemetry.recording.value.failure).toBe('quota-exhausted')
             expect(await painted()).toContain('NOT RECORDING — the log could not be written to.')
           },
@@ -1575,9 +1411,6 @@ describe('the archive', () => {
             await page.play(WRITES_REFUSED_MS)
           },
           reaches: async (page) => {
-            // Why the lever above had to exist. A rejected commit is caught and retried, so the
-            // recorder never learns of a failure of its own and the plate goes on counting rows
-            // that are not reaching disk.
             expect(page.telemetry.recording.value.failure).toBeNull()
             expect(await painted()).toMatch(/RECORDING · /)
           },
@@ -1589,10 +1422,6 @@ describe('the archive', () => {
             await packLive()
           },
           reaches: async (page) => {
-            // A store the recorder may not use is a store it never calls, so it opens no session and
-            // has no failure of its own to report. The archive's own answer is the plate's only
-            // source for this state, and an answer that cannot move is a plate that cannot report
-            // it — a live pack recording nothing, under a plate saying neither.
             expect(page.telemetry.recording.value.sessionId).toBeNull()
             expect(await painted()).toContain('NOT RECORDING — this browser will not keep a log.')
           },
@@ -1604,8 +1433,6 @@ describe('the archive', () => {
             await packLive()
           },
           reaches: async () => {
-            // The one unusable archive the owner can do something about from where they are
-            // standing, so it gets its own line rather than the general refusal.
             expect(await painted()).toContain(
               'NOT RECORDING — an older version of this page is open in another tab.',
             )
@@ -1615,29 +1442,18 @@ describe('the archive', () => {
     })
   })
 
-  /**
-   * What a seeded watch says about its own day, painted one row at a time.
-   *
-   * The row is the whole of what the Log offers about a watch, and one of its sentences is about the
-   * shape of the watch rather than about the archive — so it is read off the row rather than off the
-   * record the row was built from.
-   */
   describe('the seeded rows in the Log', () => {
-    /** Eight hours spread across the day, so nothing here depends on when the suite happens to run. */
     const HOURS_ROUND_THE_CLOCK: readonly number[] = [0, 3, 6, 9, 12, 15, 18, 21]
 
-    /** The row's two clipped-band sentences, which a watch has to be shaped to reach. */
     const CLIPPED_UNDER_A_DAY = 'the band shows the part that fits'
     const CLIPPED_OVER_A_DAY = 'longer than a day'
 
-    /** What the seeding put on screen, per hour the control was pressed at. */
     let seededAtEachHour: { readonly hoursOn: number; readonly shown: readonly string[] }[]
 
     beforeEach(() => {
       seededAtEachHour = []
     })
 
-    /** Every seeded watch, painted the way the Log paints it, against the clock it was seeded on. */
     async function seededRowsAsPainted(page: FakePage): Promise<readonly string[]> {
       await seedFakeArchive(page.store, page.controller.now())
       const listings = await page.store.listSessions()
@@ -1668,11 +1484,6 @@ describe('the archive', () => {
           }
         },
         reaches: () => {
-          // A row draws its watch on one local day anchored at noon and clips whatever reaches
-          // outside it, so a watch crossing noon and a watch longer than a day are both clipped and
-          // each owes the reader a different sentence. Whether the first of them renders at all is
-          // otherwise a fact about the hour the control happened to be pressed at, which is why one
-          // seeded watch is anchored to noon and why the same seeding is read here at eight of them.
           const shownAtEachHour = seededAtEachHour.map(({ hoursOn, shown }) => ({
             hoursOn,
             fits: shown.some((row) => row.includes(CLIPPED_UNDER_A_DAY)),
@@ -1687,16 +1498,9 @@ describe('the archive', () => {
     ])
   })
 
-  /**
-   * The rows about the one session a view is holding, rather than about the archive as a whole.
-   *
-   * A read model of this file's own, built the way the page builds the shared one every screen and
-   * the panel read from. What a session says about itself is drawn from these refs, so a row that
-   * moves one has moved what is on screen.
-   */
   describe('the session on screen', () => {
     let browser: HistoryBrowser
-    /** Which session a row opened, so the notice can be checked against it rather than against null. */
+
     let openedId: SessionId | null
 
     beforeEach(() => {
@@ -1710,7 +1514,6 @@ describe('the archive', () => {
 
     afterEach(() => browser.dispose())
 
-    /** The seeded watch that holds no sample, found by the one thing that makes it that watch. */
     async function silentWatchId(): Promise<SessionId> {
       const listings = await store.listSessions()
       const silent = listings.find(
@@ -1720,7 +1523,6 @@ describe('the archive', () => {
       return silent.record.id
     }
 
-    /** Whatever the Log would offer first, which is the session a view is likeliest to be holding. */
     async function newestSessionId(): Promise<SessionId> {
       const [newest] = await store.listSessions()
       if (newest === undefined) throw new Error('the seeding left no session to open')
@@ -1737,9 +1539,7 @@ describe('the archive', () => {
         reaches: () => {
           const held = browser.loaded.value
           expect(held).not.toBeNull()
-          // The session view captions itself off the row's own two counters. The recorder opens no
-          // session until a frame lands and deletes one that closes under its floor, so nothing
-          // playback records can leave a watch behind with these at zero.
+
           expect(held?.record.packSamples).toBe(0)
           expect(held?.record.solarSamples).toBe(0)
           expect(held?.pack).toEqual([])
@@ -1756,10 +1556,7 @@ describe('the archive', () => {
         },
         reaches: () => {
           expect(archiveControlFailure).toBeNull()
-          // Pruning is held off whatever a tab is reading, so nothing inside one tab takes a
-          // session out from under its own view. Only a read that comes back with nothing gets
-          // here, which is what the control asks for once the row is gone — and it has to be the
-          // session that was open, not merely some read that failed.
+
           expect(browser.missing.value).toBe(openedId)
           expect(browser.loaded.value).toBeNull()
         },
@@ -1770,8 +1567,6 @@ describe('the archive', () => {
           await runArchiveControl(dropViewedSession(page.store, browser))
         },
         reaches: () => {
-          // Refused out loud. A control that cannot do what its label says has to reach the panel's
-          // failure line rather than look like one that did it.
           expect(archiveControlFailure).not.toBeNull()
           expect(archiveControlFailure).toMatch(/Open a stored session first/)
           expect(browser.missing.value).toBeNull()
@@ -1780,34 +1575,14 @@ describe('the archive', () => {
     ])
   })
 
-  /**
-   * The two controls that reach past the archive's own port, and the only rows in this file that
-   * need the browser's real database rather than a store standing in for one: the sample counter,
-   * which no port method moves without two million rows behind it, and the wipe, which names a
-   * database instead of calling one.
-   *
-   * Off the fake clock the rest of the file plays the recording on. IndexedDB settles each request
-   * as a task of its own, and a fake clock turns only when something turns it, so a write nobody is
-   * advancing time for never lands. Nothing here plays, so nothing needs the recording's cadence.
-   */
   describe('the controls that go around the port', () => {
-    /** A build behind this one, holding the archive at the version it knew. */
-    const OLDER_SCHEMA_VERSION = DATABASE_VERSION - 1
 
-    /** Far enough back that a stamp taken on the second press could not read as the first. */
-    const HOURS_BETWEEN_PRESSES = -30
-
-    /** How many times a control has sent the page round again. */
     let pageReloads: number
-    /** What the archive said its own date was the first time it was asked. */
-    let bornAt: number | null
 
     beforeEach(async () => {
       vi.useRealTimers()
       pageReloads = 0
-      bornAt = null
-      // The wipe ends by reloading, and jsdom answers a navigation by refusing it out loud. Stubbed
-      // so that going round again is a fact a row can read rather than a complaint in the output.
+
       vi.stubGlobal('location', {
         ...window.location,
         reload: () => {
@@ -1821,52 +1596,18 @@ describe('the archive', () => {
       vi.unstubAllGlobals()
     })
 
-    /** A connection of this file's own, opened and upgraded exactly as the control opens it. */
-    function openArchiveDirectly(
-      archiveName: string,
-      version: number = DATABASE_VERSION,
-    ): Promise<IDBDatabase> {
-      return new Promise<IDBDatabase>((resolve, reject) => {
-        const request = indexedDB.open(archiveName, version)
-        request.addEventListener('upgradeneeded', (event) => {
-          applySchema(request.result, (event as IDBVersionChangeEvent).oldVersion)
-        })
-        request.addEventListener('success', () => resolve(request.result), { once: true })
-        request.addEventListener('error', () => reject(request.error), { once: true })
-      })
-    }
-
-    /**
-     * The archive's counter, read from the row it lives in.
-     *
-     * Read that way because opening the archive the way the page opens it recomputes the total
-     * from every session row on the way in — which is the invariant the control breaks on purpose,
-     * so a read through `openHistoryStore` would report the figure it had just erased.
-     */
-    async function storedTotals(archiveName: string): Promise<HistoryMeta | undefined> {
-      const database = await openArchiveDirectly(archiveName)
-      try {
-        const meta = database.transaction([META], 'readonly').objectStore(META)
-        return await requestAsPromise<HistoryMeta | undefined>(meta.get(TOTALS_KEY))
-      } finally {
-        database.close()
-      }
-    }
-
     async function storedArchiveNames(): Promise<readonly string[]> {
       const stored = await indexedDB.databases()
       return stored.flatMap((archive) => (archive.name === undefined ? [] : [archive.name]))
     }
 
-    /** Every archive on this origin, gone, so no row inherits one from the row before it. */
     async function dropEveryArchive(): Promise<void> {
       for (const archiveName of await storedArchiveNames()) {
         await new Promise<void>((resolve) => {
           const request = indexedDB.deleteDatabase(archiveName)
           request.addEventListener('success', () => resolve(), { once: true })
           request.addEventListener('error', () => resolve(), { once: true })
-          // A connection a failing row left open is that row's finding. Waiting on it here would
-          // hang the next row instead and report the fault against the wrong one.
+
           request.addEventListener('blocked', () => resolve(), { once: true })
         })
       }
@@ -1874,62 +1615,8 @@ describe('the archive', () => {
 
     eachControl([
       {
-        control: 'Fill the sample counter',
-        press: async (page) => {
-          await runArchiveControl(fillSampleCounterToNearCapacity(page.controller.now()))
-        },
-        reaches: async () => {
-          expect(archiveControlFailure).toBeNull()
-          const totals = await storedTotals(FAKE_ARCHIVE_NAME)
-          // Past the mark pruning aims for, which is what the storage line reads as near the limit,
-          // and under the cap that mark is measured against, so the next sealed chunk does not
-          // evict every session in the archive on its way back down.
-          expect(totals?.totalSamples).toBeGreaterThan(MAX_TOTAL_SAMPLES * PRUNE_TARGET_RATIO)
-          expect(totals?.totalSamples).toBeLessThan(MAX_TOTAL_SAMPLES)
-        },
-      },
-      {
-        control: 'Filling twice keeps the first date',
-        press: async (page) => {
-          await runArchiveControl(fillSampleCounterToNearCapacity(page.controller.now()))
-          bornAt = (await storedTotals(FAKE_ARCHIVE_NAME))?.createdAt ?? null
-          // A day and a quarter between the two presses, so a stamp taken on the second is a
-          // different figure by hours rather than by however long the first write took.
-          page.controller.ageClockByHours(HOURS_BETWEEN_PRESSES)
-          await runArchiveControl(fillSampleCounterToNearCapacity(page.controller.now()))
-        },
-        reaches: async () => {
-          expect(archiveControlFailure).toBeNull()
-          expect(bornAt).not.toBeNull()
-          // An archive comes into being once. A control that restamped it every time it moved the
-          // counter would leave a log claiming to be younger than the sessions inside it.
-          expect((await storedTotals(FAKE_ARCHIVE_NAME))?.createdAt).toBe(bornAt)
-        },
-      },
-      {
-        control: 'Filling while an older tab holds it',
-        press: async (page) => {
-          const olderTab = await openArchiveDirectly(FAKE_ARCHIVE_NAME, OLDER_SCHEMA_VERSION)
-          try {
-            await runArchiveControl(fillSampleCounterToNearCapacity(page.controller.now()))
-          } finally {
-            olderTab.close()
-          }
-        },
-        reaches: async () => {
-          // Named rather than waited on. An open the browser reports as blocked sends neither of
-          // the two events a request promise settles on, and this one carries no ceiling to give up
-          // under, so the alternative is a button that never comes back and never says why.
-          expect(archiveControlFailure).toMatch(/older schema/)
-          // Refused before it wrote, so the archive is as the tab holding it left it.
-          expect(await storedTotals(FAKE_ARCHIVE_NAME)).toBeUndefined()
-        },
-      },
-      {
         control: 'Wipe the fake archive',
         press: async (page) => {
-          // Opened for real, so the wipe runs against the connection the page records through
-          // rather than against a name nothing is holding.
           const playbackArchive = await openHistoryStore(FAKE_ARCHIVE_NAME)
           const boatArchive = await openHistoryStore(DATABASE_NAME)
           await seedFakeArchive(boatArchive, page.controller.now())
@@ -1941,15 +1628,11 @@ describe('the archive', () => {
           expect(archiveControlFailure).toBeNull()
           const archives = await storedArchiveNames()
           expect(archives).not.toContain(FAKE_ARCHIVE_NAME)
-          // The one that has to survive. Both names are on this origin and they differ by a
-          // suffix, and what sits under the shipping one is a season of the owner's recordings
-          // that nothing brings back.
+
           expect(archives).toContain(DATABASE_NAME)
 
           const boatArchive = await openHistoryStore(DATABASE_NAME)
           try {
-            // Opened again rather than kept: a deleted archive comes straight back empty under the
-            // same name, and would be listed above exactly as it is here.
             expect((await boatArchive.listSessions()).length).toBeGreaterThan(0)
           } finally {
             boatArchive.close()

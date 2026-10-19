@@ -5,7 +5,7 @@ import { googleRequest, jsonRequest } from './googleRequest'
 export const DRIVE_FILES = 'https://www.googleapis.com/drive/v3/files'
 export const FOLDER_MIME = 'application/vnd.google-apps.folder'
 export const SHEET_MIME = 'application/vnd.google-apps.spreadsheet'
-export const DRIVE_FIELDS = 'id,name,mimeType,parents,appProperties,size,trashed'
+export const DRIVE_FIELDS = 'id,name,mimeType,parents,appProperties,size,trashed,description,createdTime'
 
 export function driveLiteral(text: string): string {
   return text.replaceAll('\\', '\\\\').replaceAll("'", "\\'")
@@ -55,6 +55,7 @@ export function checkWorkspace(workspace: CloudWorkspace): void {
   checkGoogleId(workspace.id)
   checkGoogleId(workspace.folderId)
   if (!workspace.name.trim() || workspace.name.length > 200) throw new Error('The Google archive name is invalid.')
+  if (workspace.version !== undefined && workspace.version !== 1 && workspace.version !== 2) throw new Error('This Google archive version requires a newer app.')
 }
 
 export function isShuntFile(file: DriveFile, role: string, mimeType: string): boolean {

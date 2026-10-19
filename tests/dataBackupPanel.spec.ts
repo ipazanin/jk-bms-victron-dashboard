@@ -194,7 +194,8 @@ describe('complete archive controls', () => {
     workspace.preview.value = [snapshot()]
     await nextTick()
     expect(host.textContent).toContain('Boat tablet')
-    expect(host.textContent).toContain('Stored samples')
+    expect(host.textContent).toContain('Raw samples')
+    expect(host.textContent).toContain('Hourly summaries')
     expect(host.textContent).toContain('Your current recordings and browser settings stay unchanged')
     expect(host.textContent).not.toContain('private-key')
     button('Import saved copies').click()

@@ -1,6 +1,6 @@
 import { forgetGoogleAccess, googleAccessToken } from './googleAuth'
 
-export async function googleRequest(url: string, signal: AbortSignal, request: RequestInit = {}): Promise<Response> {
+export async function googleRequest(url: string, signal: AbortSignal, request: RequestInit = {}, allowedStatuses: readonly number[] = []): Promise<Response> {
   signal.throwIfAborted()
   const headers = new Headers(request.headers)
   headers.set('Authorization', `Bearer ${googleAccessToken()}`)
@@ -8,7 +8,7 @@ export async function googleRequest(url: string, signal: AbortSignal, request: R
     if (signal.aborted) throw error
     throw new Error('Google could not be reached. Check your connection. Sync will try again.')
   })
-  if (response.ok) return response
+  if (response.ok || allowedStatuses.includes(response.status)) return response
   if (response.status === 401) {
     forgetGoogleAccess()
     throw new Error('Google access expired. Connect to Google again and retry.')

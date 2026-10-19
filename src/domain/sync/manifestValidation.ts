@@ -1,6 +1,6 @@
 import { archivePreference } from '../backup/preferenceValidation'
 import { bounded, choice, list, record, requireArchive, shape, text } from '../backup/validation'
-import { CLOUD_ARCHIVE_STORES } from './archiveGroups'
+import { CLOUD_ARCHIVE_STORES } from './cloudArchiveStores'
 import type { CloudArchiveManifest } from './CloudArchiveManifest'
 import { CLOUD_ARCHIVE_BYTES, CLOUD_BLOCK_BYTES, CLOUD_MANIFEST_GROUPS } from './limits'
 import { cloudHash, cloudIdentity } from './syncValidation'

@@ -1,5 +1,4 @@
 <script setup lang="ts">
-
 import { computed } from 'vue'
 
 import { ampHoursSigned, clockTime } from '../../application/format'
@@ -39,8 +38,6 @@ const endedAt = computed(() => record.value.endedAt ?? props.now)
 
 const lengthMs = computed(() => {
   const span = endedAt.value - record.value.startedAt
-  // A clock stepped backwards mid-session can invert the span; the sample count cannot be corrupted
-  // that way, and one row a second is the recorder's own gate.
   if (span > 0) return span
   return Math.max(record.value.packSamples, record.value.solarSamples) * MS_PER_SECOND
 })
@@ -52,10 +49,6 @@ const segments = computed(() => {
   const scale = linearScale(window.from, window.to, 0, 100)
   const runs: CoverageRun[] = []
 
-  const retainedFrom = record.value.retainedFrom
-  if (retainedFrom !== null && retainedFrom > record.value.startedAt) {
-    runs.push({ from: record.value.startedAt, to: retainedFrom, kind: 'none' })
-  }
   for (const run of record.value.coverage) runs.push(run)
 
   return coverageSegments(runs, window, scale, MIN_RUN_PERCENT)
@@ -174,18 +167,13 @@ function stateOfChargeWords(row: SessionRecord): string {
       />
     </span>
 
-    <!--
-      No noon-anchored day can contain a watch that crosses noon, so a daytime watch is clipped as
-      well as a multi-day one. Both need the real duration printed or a clipped watch reads as a
-      short one, but only one of them is longer than a day and the sentence must not say so.
-    -->
     <span v-if="band.clipped" class="note copy">
       <span aria-hidden="true">»&nbsp;</span>
       <template v-if="lengthMs > MS_PER_DAY">longer than a day — {{ spacedSpan(lengthMs) }}</template>
       <template v-else>{{ spacedSpan(lengthMs) }} — the band shows the part that fits.</template>
     </span>
     <span v-if="trimmedMs !== null" class="note copy">
-      Trimmed — the first {{ spacedSpan(trimmedMs) }} were deleted to make room.
+      Raw samples from the first {{ spacedSpan(trimmedMs) }} are no longer retained here. Hourly history may still cover that time.
     </span>
     <span v-if="record.continues !== null" class="note copy">
       Continues the session above, after this tab was closed.
@@ -194,10 +182,7 @@ function stateOfChargeWords(row: SessionRecord): string {
 </template>
 
 <style scoped>
-/*
- * The template is inherited from the group so the column header and every row are ruled by one
- * declaration; the fallback keeps a row readable if it is ever mounted on its own.
- */
+
 .row {
   display: grid;
   grid-template-columns: var(
@@ -259,7 +244,6 @@ function stateOfChargeWords(row: SessionRecord): string {
   color: var(--house-ink);
 }
 
-/* The header row names these columns for sighted readers; a listener gets them per cell. */
 .cell-label {
   position: absolute;
   width: 1px;
@@ -296,14 +280,11 @@ function stateOfChargeWords(row: SessionRecord): string {
   background: var(--coverage-partial);
 }
 
-/* Half height and bottom-aligned: one radio reported, and the bar says so by its size. */
 .run.solar-only {
   height: 4px;
   background: var(--coverage-partial);
 }
 
-/* Cut by surface-coloured diagonals — the same bar, interrupted, because the pack was charging
-   from something no radio here measured. */
 .run.foreign {
   background:
     repeating-linear-gradient(
@@ -333,9 +314,6 @@ function stateOfChargeWords(row: SessionRecord): string {
   color: var(--ink-muted);
 }
 
-/* Matches DeviceGroup's fold, keyed to the same `sessions` container the group establishes: the row
-   folds when the card's content box can no longer hold the six fixed tracks, so an expanded rail
-   folds it rather than scrolling the page. */
 @container sessions (max-width: 48rem) {
   .row {
     grid-template-columns: 1fr 1fr 1fr;
@@ -364,9 +342,6 @@ function stateOfChargeWords(row: SessionRecord): string {
     gap: 0.15rem;
   }
 
-  /* Each figure column is a ~73px 1fr track, and the amp-hour readouts are white-space:nowrap. A
-     long value would otherwise spill a few pixels past its neighbour; overflow:hidden lets the
-     nowrap span clip to the track and end in an ellipsis instead. */
   .figure:not(.length) > span {
     min-width: 0;
     overflow: hidden;
@@ -385,7 +360,6 @@ function stateOfChargeWords(row: SessionRecord): string {
     order: 3;
   }
 
-  /* On a phone the header row is gone, so the labels have to be visible rather than only spoken. */
   .cell-label {
     position: static;
     width: auto;

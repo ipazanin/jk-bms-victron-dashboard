@@ -21,7 +21,6 @@ import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import DevControlGroup from './DevControlGroup.vue'
 import {
   dropViewedSession,
-  fillSampleCounterToNearCapacity,
   seedFakeArchive,
   wipeFakeArchive,
 } from './seedFakeArchive'
@@ -581,10 +580,6 @@ function dropSessionOnScreen(): void {
   runArchiveControl(() => dropViewedSession(openedArchive(), log))
 }
 
-function fillSampleCounter(): void {
-  runArchiveControl(() => fillSampleCounterToNearCapacity(controller.now()))
-}
-
 function wipeArchive(): void {
   runArchiveControl(async () => {
     await wipeFakeArchive(openedArchive())
@@ -1116,9 +1111,6 @@ function wipeArchive(): void {
           <div class="actions">
             <button type="button" @click="seedArchive()">Seed rows playback cannot reach</button>
             <button type="button" @click="dropSessionOnScreen()">Drop the session on screen</button>
-            <button type="button" @click="fillSampleCounter()">
-              Near the limit — written around the port
-            </button>
             <button type="button" @click="wipeArchive()">Wipe it</button>
           </div>
         </DevControlGroup>

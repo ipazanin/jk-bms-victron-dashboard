@@ -1,17 +1,6 @@
-/**
- * What these tests establish.
- *
- * Ring pruning decides and never acts, so every case here is about the shape of a plan. The one
- * property worth more than the arithmetic is the last block: the ring budget and the Log's sample
- * budget count different things and cannot reach each other, which is what stops a long recording
- * from deleting the device history Stats is scoped to — or a ring merge from having anything to say
- * about a session.
- */
-
 import { describe, expect, it } from 'vitest'
 
-import { MAX_TOTAL_SAMPLES, planPrune } from '../src/domain/history/budget'
-import type { PruneCandidate } from '../src/domain/history/budget'
+import { planRawPrune } from '../src/domain/history/budget'
 import {
   MAX_RING_DEVICES,
   MAX_RING_RECORDS_PER_DEVICE,
@@ -19,7 +8,6 @@ import {
   planRingPrune,
 } from '../src/domain/history/ringBudget'
 import type { RingDeviceExtent } from '../src/domain/history/ringBudget'
-import { HEARTBEAT_STALE_MS } from '../src/domain/history/types'
 import { SAMPLE_EPOCH } from './support/samples'
 
 const TARGET = Math.floor(MAX_RING_RECORDS_PER_DEVICE * RING_PRUNE_TARGET_RATIO)
@@ -114,38 +102,10 @@ describe('more packs than the archive keeps', () => {
 })
 
 describe('the two budgets', () => {
-  it('never counts a ring record toward the sample budget', () => {
-    const ringRecords = MAX_RING_RECORDS_PER_DEVICE + 5_000
-
-    const ring = planRingPrune([extent(0, { records: ringRecords })])
-    const sessions = planPrune([], ringRecords, {
-      now: SAMPLE_EPOCH,
-      heartbeatStaleMs: HEARTBEAT_STALE_MS,
-      viewedSessionId: null,
-    })
-
-    expect(ring.trim).toHaveLength(1)
-    expect(sessions).toEqual({ evict: [], truncate: null, projectedTotal: ringRecords })
-  })
-
-  it('leaves the ring alone when the Log is the thing that overran', () => {
-    const fat: PruneCandidate = {
-      id: 'session-0',
-      startedAt: SAMPLE_EPOCH,
-      sealedSamples: MAX_TOTAL_SAMPLES * 2,
-      state: 'closed',
-      heartbeatAt: SAMPLE_EPOCH,
-      chunks: [],
-    }
-
-    const sessions = planPrune([fat], MAX_TOTAL_SAMPLES * 2, {
-      now: SAMPLE_EPOCH + HEARTBEAT_STALE_MS * 2,
-      heartbeatStaleMs: HEARTBEAT_STALE_MS,
-      viewedSessionId: null,
-    })
+  it('keeps device history independent of raw recording capacity', () => {
     const ring = planRingPrune([extent(0, { records: 900 })])
-
-    expect(sessions.evict).toEqual(['session-0'])
+    const chunk = { sessionId: 'session', stream: 'pack' as const, seq: 0, length: 300, baseAt: SAMPLE_EPOCH, sealed: true }
+    expect(planRawPrune([chunk], 8_400, 100)).toEqual([chunk])
     expect(ring).toEqual({ trim: [], dropWhole: [] })
   })
 })

@@ -1,22 +1,7 @@
-/**
- * One contract, two implementations.
- *
- * The Map-backed fake and the IndexedDB adapter each reimplement upsert-by-compound-key, the seal
- * accounting, the prune execution and the window filtering. Without a suite binding them, every
- * spec written above the port would be a statement about whichever one it happened to run against,
- * and the two would drift apart in exactly the places that are expensive to notice: a counter that
- * moves twice, a chunk that outlives its session row, a rename a reconnect quietly undoes.
- *
- * So everything asserted here is a rule both must obey. Where they legitimately differ — the fake
- * emulates no quota, the adapter emulates no second tab — the case belongs in one of the two
- * specs and not in this file.
- */
-
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import type { HistoryStore } from '../../src/application/history/port'
 import { MAX_RENDER_WINDOW_MS, unavailableHistoryStore } from '../../src/application/history/port'
-import { MAX_SESSIONS } from '../../src/domain/history/budget'
 import { isReadableLayout } from '../../src/domain/history/columns'
 import { PACK_SAMPLING_PERIOD_SECONDS } from '../../src/domain/history/ringClock'
 import { MIN_ALIGNMENT_OVERLAP } from '../../src/domain/history/ringLedger'
@@ -62,7 +47,6 @@ import {
   withYield,
 } from './solarHistoryFixture'
 
-/** What a spec has to hand back so the suite can open a store and let go of it again. */
 export interface HistoryStoreHarness {
   readonly store: HistoryStore
   dispose(): Promise<void>
@@ -70,19 +54,13 @@ export interface HistoryStoreHarness {
 
 const HOUR_MS = 3_600_000
 
-/** A second pack, for the cases about one ledger not reaching into another. */
 const OTHER_PACK_KEY: DeviceKey = 'jk:DEMO00000000002'
 
-/**
- * Twenty consecutive hourly records off one pack — enough ring for a second read to find it shifted
- * and still overlap. Built once: nothing below mutates a record, and the fold compares bytes.
- */
 const RING = ringRecords(20)
 
 const FIRST_READ_AT = SAMPLE_EPOCH + 20 * HOUR_MS
 const SECOND_READ_AT = FIRST_READ_AT + 8 * HOUR_MS
 
-/** One unbroken read, as the transport hands it over: records in ring order from `firstIndex`. */
 function ringRead(
   records: readonly Uint8Array[],
   options: {
@@ -102,7 +80,6 @@ function hexOf(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-/** Everything a stored row is: where it sits, what it holds, and whether its predecessor is gone. */
 function rowSignature(row: RingRecordRow): string {
   return `${row.seq}:${hexOf(row.bytes)}:${row.followsGap}`
 }
@@ -121,7 +98,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       await harness.dispose()
     })
 
-    /** A session already carrying `rows` sealed pack rows, which is where most cases start. */
     async function openWithRows(rows: number, id: SessionId = SESSION_ID): Promise<void> {
       await store.openSession(sessionRecord({ id }))
       await store.commitChunk(
@@ -179,8 +155,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
 
     describe('committing a chunk', () => {
       it('refuses a chunk whose session was never opened', async () => {
-        // A session row invented here would carry none of the fields only the recorder knows, and
-        // would be indistinguishable from a real one afterwards.
         const outcome = await store.commitChunk(packChunk(packSamples(3)), sessionPatch())
 
         expect(outcome.stored).toBe(false)
@@ -206,12 +180,10 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       it('moves the archive counter when a chunk seals, and by exactly its rows', async () => {
         await openWithRows(7)
 
-        expect(await store.usage()).toEqual({ totalSamples: 7, sessions: 1, ringRecords: 0 })
+        expect(await store.usage()).toMatchObject({ totalSamples: 7, sessions: 1, ringRecords: 0 })
       })
 
       it('leaves the counter alone for a tail, however many times it is rewritten', async () => {
-        // The tail is rewritten at its own key every checkpoint. That is what makes a
-        // re-checkpointed session free, and a retried commit impossible to double-count.
         await store.openSession(sessionRecord())
         for (const rows of [1, 2, 3]) {
           await store.commitChunk(
@@ -276,7 +248,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('is idempotent all the way down to the counter', async () => {
-        // finish() may run twice; a second close finds no open chunk and folds nothing.
         await store.openSession(sessionRecord())
         await store.commitChunk(
           packChunk(packSamples(6), { sealed: false }),
@@ -310,14 +281,13 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
 
     describe('deleting a session', () => {
       it('takes the row and every chunk together', async () => {
-        // An orphan chunk is unreachable and holds its share of the budget forever.
         await openWithRows(9)
 
         await store.deleteSession(SESSION_ID)
 
         expect(await store.listSessions()).toHaveLength(0)
         expect(await store.readSession(SESSION_ID)).toBeNull()
-        expect(await store.usage()).toEqual({ totalSamples: 0, sessions: 0, ringRecords: 0 })
+        expect(await store.usage()).toMatchObject({ totalSamples: 0, sessions: 0, ringRecords: 0 })
 
         const visited: HistoryChunk[] = []
         await store.streamChunks(SESSION_ID, PACK_STREAM, { from: 0, to: Number.MAX_SAFE_INTEGER }, (chunk) => {
@@ -347,7 +317,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
 
     describe('reading a session back', () => {
       it('has nothing to return for an id that is gone', async () => {
-        // A reader whose session was pruned underneath it lands here, and falls back to the list.
         expect(await store.readSession('never-opened')).toBeNull()
       })
 
@@ -390,8 +359,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('says when a session is wider than one read may cover', async () => {
-        // The session view's clock band is one day, so nothing it draws is wider than this. A
-        // longer watch is returned from its late end backwards, and says it is a window.
         await openWithRows(4)
         await store.closeSession(
           SESSION_ID,
@@ -437,9 +404,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('hands over a chunk in a layout it cannot read, rather than dropping it', async () => {
-        // Dropping it here is what would report a session holding thousands of rows as one holding
-        // none: the row keeps its counts, and the caller above needs the chunk itself to say why
-        // nothing could be drawn from it.
         await store.openSession(sessionRecord())
         await store.commitChunk(
           inForeignLayout(packChunk(packSamples(3))),
@@ -454,8 +418,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('hands it over whatever window was asked for, having no way to place it in time', async () => {
-        // Deciding a chunk falls outside a window means indexing its offsets, which is the same
-        // read the gate refuses. A readable chunk from the same session is windowed as ever.
         await store.openSession(sessionRecord())
         await store.commitChunk(
           packChunk(packSamples(3), { seq: 0 }),
@@ -509,8 +471,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
 
     describe('devices', () => {
       it('keeps the name the owner chose across every later sighting of the device', async () => {
-        // userLabel lives on the device row and not on a session row precisely so one rename
-        // covers every session, and a reconnect must not undo it.
         await store.upsertDevice(deviceRecord())
         await store.renameDevice(PACK_DEVICE_KEY, 'Starboard bank')
 
@@ -561,8 +521,18 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
     describe('recovering from a killed tab', () => {
       const LATER = SAMPLE_EPOCH + HEARTBEAT_STALE_MS + 60_000
 
+      it('refuses a frozen writer after another connection recovered its session', async () => {
+        await store.openSession(sessionRecord({ heartbeatAt: SAMPLE_EPOCH }))
+        await store.commitChunk(packChunk(packSamples(12), { sealed: false }), sessionPatch({ packSamples: 12, heartbeatAt: SAMPLE_EPOCH }))
+        await store.recover(SAMPLE_EPOCH + 3_600_000)
+        const outcome = await store.commitChunk(packChunk(packSamples(15), { sealed: false }), sessionPatch({ packSamples: 15, heartbeatAt: SAMPLE_EPOCH + 3_600_000 }))
+        expect(outcome.stored).toBe(false)
+        expect(outcome.failure).toBeNull()
+        expect((await store.readSession(SESSION_ID))?.record.state).toBe('closed')
+        expect((await store.usage()).rawBytes).toBe(12 * 28)
+      })
+
       it('closes a session whose writer is gone, and never deletes its rows', async () => {
-        // A tab that was merely frozen must find its work intact when it thaws.
         await store.openSession(sessionRecord({ heartbeatAt: SAMPLE_EPOCH }))
         await store.commitChunk(
           packChunk(packSamples(30), { sealed: false }),
@@ -575,7 +545,7 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
         const [listing] = await store.listSessions()
         expect(listing.record.state).toBe('closed')
         expect(listing.record.endReason).toBe('abandoned')
-        // The end is derived from the last row it actually holds, not from the heartbeat.
+
         expect(listing.record.endedAt).toBe(SAMPLE_EPOCH + 29_000)
         expect(listing.record.sealedSamples).toBe(30)
         expect((await store.usage()).totalSamples).toBe(30)
@@ -616,34 +586,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
     })
 
-    describe('too many sessions', () => {
-      it('evicts the oldest rows and their chunks in the commit that overran the cap', async () => {
-        // The only budget reachable in a test: the sample cap is two million rows. Both stores run
-        // the same pure plan, so this is the execution rather than the policy.
-        const overflow = MAX_SESSIONS + 2
-        for (let index = 0; index < overflow; index += 1) {
-          const id = `session-${String(index).padStart(4, '0')}`
-          await store.openSession(sessionRecord({ id, startedAt: SAMPLE_EPOCH + index * 1_000 }))
-          await store.closeSession(
-            id,
-            sessionClosure({ heartbeatAt: SAMPLE_EPOCH, endedAt: SAMPLE_EPOCH + index * 1_000 }),
-          )
-        }
-        const live = 'session-live'
-        await store.openSession(sessionRecord({ id: live, startedAt: SAMPLE_EPOCH + HOUR_MS }))
-
-        const outcome = await store.commitChunk(
-          packChunk(packSamples(3), { sessionId: live }),
-          sessionPatch({ packSamples: 3, heartbeatAt: SAMPLE_EPOCH + 2 * HOUR_MS }),
-        )
-
-        expect(outcome.stored).toBe(true)
-        expect(outcome.prunedSessionIds).toEqual(['session-0000', 'session-0001', 'session-0002'])
-        expect((await store.usage()).sessions).toBe(MAX_SESSIONS)
-        expect(await store.readSession('session-0000')).toBeNull()
-      })
-    })
-
     describe('warnings', () => {
       it("reads back a session's warnings in the order they fired", async () => {
         await store.openSession(sessionRecord())
@@ -672,8 +614,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('reads only the warnings inside a window, ascending, uncapped by the log limit', async () => {
-        // The Stats range tally reads this rather than the capped list, so a wide range counts the
-        // whole window. Both bounds are inclusive; anything outside is left out.
         await store.openSession(sessionRecord({ id: 'session-a' }))
         for (const [seq, offset] of [0, 5_000, 10_000, 20_000].entries()) {
           await store.appendWarning(
@@ -719,14 +659,11 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
     })
 
     describe("the pack's own ring", () => {
-      /** The rows one pack's ledger holds, in the order the store hands them over. */
       async function rowsOf(deviceKey: DeviceKey = PACK_DEVICE_KEY): Promise<readonly RingRecordRow[]> {
         return (await store.readRingLedger(deviceKey))?.records ?? []
       }
 
       it('never changes a stored row’s seq, and never rewrites its bytes', async () => {
-        // The ring shifts under a reader — 42 places in three and a half hours on the real pack —
-        // so a merge that renumbered or rewrote would silently rewrite history every read.
         await store.appendRingSnapshot(ringRead(RING.slice(0, 12)))
         const opened = (await rowsOf()).map(rowSignature)
 
@@ -746,8 +683,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('appends nothing when the same read is filed twice', async () => {
-        // The read button is a button, and a tab that files its transfer twice must not double the
-        // ledger. Recognition is the fold's own, so idempotence costs the store nothing.
         await store.appendRingSnapshot(ringRead(RING))
 
         const again = await store.appendRingSnapshot(ringRead(RING, { observedAt: SECOND_READ_AT }))
@@ -769,8 +704,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('appends nothing and declares no gap for a read lying wholly inside the ledger', async () => {
-        // The case a suffix-of-ledger against prefix-of-read match gets wrong: it would report no
-        // overlap and append several hundred rows the ledger already holds.
         await store.appendRingSnapshot(ringRead(RING))
 
         const inside = await store.appendRingSnapshot(
@@ -784,9 +717,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('keeps two byte-identical adjacent records as two rows', async () => {
-        // Nine such pairs sit in one real read and both halves are records the pack wrote. A
-        // content digest as the merge key would collapse them and make the ledger disagree with
-        // the pack about how many hours it holds.
         const stalled = { counterSeconds: RING_EPOCH_COUNTER_SECONDS + 3 * PACK_SAMPLING_PERIOD_SECONDS }
         const twins = [...RING.slice(0, 3), ringRecordBytes(stalled), ringRecordBytes(stalled)]
 
@@ -807,9 +737,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('orders rows by the pack’s write order even where the counter runs backwards', async () => {
-        // The pack's clock was set forward seven hours on this boat, and the next correction will be
-        // backward. Ordering by counter would interleave post-correction rows among rows written
-        // hours earlier and make every consecutive-row fold wrong.
         const face = RING_EPOCH_COUNTER_SECONDS + 4 * PACK_SAMPLING_PERIOD_SECONDS
         const rewound = face - 25_268
         const rewrite = [
@@ -839,8 +766,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('discards a run too short to identify itself, and says how many it gave up', async () => {
-        // Never guessed at: a run under the alignment floor could sit at several shifts, and a
-        // wrong one puts a row's neighbour an unknown distance away.
         const torn = ringSnapshot({
           observedAt: FIRST_READ_AT,
           runs: [
@@ -857,10 +782,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('stamps exactly one row per contiguity break', async () => {
-        // A month away from the boat leaves two reads with nothing in common. The break is declared
-        // rather than bridged, and the ledger's own oldest row declares one too: the ring had
-        // already dropped whatever came before it. The other row this field is set on is the oldest
-        // survivor of a prune, which the budget cap puts out of a contract case's reach.
         await store.appendRingSnapshot(ringRead(RING.slice(0, 8)))
         const stranded = ringRecords(8, {
           counterSeconds: RING_EPOCH_COUNTER_SECONDS + 900 * PACK_SAMPLING_PERIOD_SECONDS,
@@ -876,8 +797,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('journals exactly one row per read, whatever the read established', async () => {
-        // A pack that stops answering 0xA7 after a firmware change is exactly what a stored history
-        // of attempts reveals, so a read that carried nothing is the one most worth keeping.
         await store.appendRingSnapshot(
           ringSnapshot({ observedAt: FIRST_READ_AT, outcome: 'no-answer', runs: [] }),
         )
@@ -922,13 +841,11 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('never moves the sample budget, in either direction', async () => {
-        // The two budgets cannot evict each other. Folding ring rows into the sample counter would
-        // let session pruning delete device history to make room for a recording.
         await openWithRows(7)
 
         await store.appendRingSnapshot(ringRead(RING))
 
-        expect(await store.usage()).toEqual({
+        expect(await store.usage()).toMatchObject({
           totalSamples: 7,
           sessions: 1,
           ringRecords: RING.length,
@@ -937,8 +854,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('keeps the owner’s answers about the pack’s clock across a reconnect', async () => {
-        // The same rule userLabel lives under: a reconnect's upsert carries derived fields only, and
-        // forgetting that here is a silent data-loss bug rather than a visible one.
         await store.upsertDevice(deviceRecord())
         await store.setPackClock(PACK_DEVICE_KEY, { utcOffsetMinutes: 60, aheadSeconds: 25_268 })
 
@@ -951,8 +866,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('stores nothing on an archive that cannot hold one, and says why', async () => {
-        // The unusable store is the same object whichever adapter this suite is running, and the
-        // rule is the port's rather than either implementation's: no call site gains a null check.
         const refusing = unavailableHistoryStore('quota-exhausted')
 
         const outcome = await refusing.appendRingSnapshot(ringRead(RING))
@@ -989,8 +902,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('anchors a read to the newest scheduled record it carried', async () => {
-        // The one measurement of how far the pack's clock runs ahead. An event record would not do:
-        // it is written when the event fires, not on the sampling period the bound rests on.
         await store.appendRingSnapshot(ringRead(RING))
 
         const [read] = (await store.readRingLedger(PACK_DEVICE_KEY))?.reads ?? []
@@ -1037,8 +948,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
         expect(pinned?.packUtcOffsetMinutes).toBe(60)
         expect(pinned?.packClockAheadSeconds).toBe(25_268)
 
-        // Null clears it, exactly as an empty label restores the derived name: the owner may take
-        // an answer back, and nothing else may.
         const cleared = await store.setPackClock(PACK_DEVICE_KEY, {
           utcOffsetMinutes: 60,
           aheadSeconds: null,
@@ -1151,8 +1060,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('journals exactly one receipt per sweep, whatever the sweep established', async () => {
-        // A controller that stops serving history after a firmware update is exactly what a stored
-        // history of attempts reveals, so a sweep that carried nothing is the one worth keeping.
         await store.appendSolarHistory(
           capturedSolarSnapshot({
             outcome: 'refused',
@@ -1173,7 +1080,7 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
         expect(refused?.refusedRegisters).toEqual([0x104f])
         expect(ledger?.solarReads[0].totals?.daysAvailable).toBeGreaterThan(0)
         expect(ledger?.solarReads[0].readOnDate).toBe(CAPTURE_READ_ON_DATE)
-        // The pack's own journal is a different list and stays empty.
+
         expect(ledger?.reads).toEqual([])
       })
 
@@ -1191,8 +1098,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
       })
 
       it('reads a row carrying no format at all as a pack record', async () => {
-        // Every pack row already on disk was written before the discriminator existed, and an
-        // upgrade may only add — so absence is what says "pack record", now and permanently.
         await store.appendRingSnapshot(ringRead(RING))
 
         const rows = (await store.readRingLedger(PACK_DEVICE_KEY))?.records ?? []
@@ -1211,7 +1116,7 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
         const pack = summaries.find((row) => row.deviceKey === PACK_DEVICE_KEY)
         expect(controller?.kind).toBe('solar')
         expect(controller?.records).toBe(CAPTURED_DAYS)
-        // A controller keeps no clock face, so it reports none rather than inventing one.
+
         expect(controller?.oldestPackClockSeconds).toBe(0)
         expect(controller?.newestPackClockSeconds).toBe(0)
         expect(pack?.kind).toBe('pack')
@@ -1223,7 +1128,7 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
 
         await store.appendSolarHistory(capturedSolarSnapshot())
 
-        expect(await store.usage()).toEqual({
+        expect(await store.usage()).toMatchObject({
           totalSamples: 7,
           sessions: 1,
           ringRecords: CAPTURED_DAYS,
@@ -1259,8 +1164,6 @@ export function describeHistoryStore(name: string, open: () => Promise<HistorySt
 
     describe('watching for another tab', () => {
       it('does not notify its own writer', async () => {
-        // A view refreshing itself off its own writes would reload the list under the owner on
-        // every checkpoint.
         let notified = 0
         const unsubscribe = store.watch(() => {
           notified += 1

@@ -12,6 +12,8 @@ import ring from './fixtures/ringLedger.json'
 import remembered from './fixtures/rememberedSession.json'
 import { deviceRecord, SAMPLE_EPOCH, sessionRecord, warningRecord } from './support/samples'
 import { capturedSolarSnapshot } from './support/solarHistoryFixture'
+import { summarizeSessionHours } from '../src/domain/history/summarizeSessionHours'
+import { packSamples } from './support/samples'
 
 function completeSnapshot(): ArchiveSnapshot {
   const solar = capturedSolarSnapshot()
@@ -57,6 +59,41 @@ function completeSnapshot(): ArchiveSnapshot {
 }
 
 describe('complete archive contract', () => {
+  it('round trips hourly history with original sample timestamps and calculation basis', () => {
+    const legacy = completeSnapshot()
+    const hours = summarizeSessionHours(stored.session.id, packSamples(3), [])
+    const snapshot: ArchiveSnapshot = { ...legacy, version: 2, stores: { ...legacy.stores, hours } }
+    expect(decodeArchiveSnapshot(encodeArchiveSnapshot(snapshot))).toEqual(snapshot)
+    expect(snapshot.stores.hours![0]!.basis).toBe('reconstructed')
+  })
+
+  it('requires hourly history on v2 and preserves the v1 store contract', () => {
+    const snapshot = completeSnapshot()
+    expect(() => validateArchiveSnapshot({ ...snapshot, version: 2 })).toThrow('hourly history must match archive version')
+    expect(() => validateArchiveSnapshot({ ...snapshot, stores: { ...snapshot.stores, hours: [] } })).toThrow('hourly history must match archive version')
+  })
+
+  it('rejects orphan or duplicate session hours', () => {
+    const legacy = completeSnapshot()
+    const [hour] = summarizeSessionHours(stored.session.id, packSamples(3), [])
+    const snapshot = { ...legacy, version: 2, stores: { ...legacy.stores, hours: [hour] } }
+    expect(() => validateArchiveSnapshot({ ...snapshot, stores: { ...snapshot.stores, hours: [hour, hour] } })).toThrow('duplicate identity')
+    expect(() => validateArchiveSnapshot({ ...snapshot, stores: { ...snapshot.stores, hours: [{ ...hour, sessionId: 'missing' }] } })).toThrow('missing session')
+  })
+
+  it('rejects hourly data outside its supported boundary and calculation contract', () => {
+    const legacy = completeSnapshot()
+    const [hour] = summarizeSessionHours(stored.session.id, packSamples(3), [])
+    for (const change of [{ hourStart: hour!.hourStart + 1 }, { to: hour!.hourStart + 3_600_001 }, { calculationVersion: 99 }]) {
+      expect(() => validateArchiveSnapshot({ ...legacy, version: 2, stores: { ...legacy.stores, hours: [{ ...hour, ...change }] } })).toThrow()
+    }
+  })
+
+  it('rejects an incorrect raw byte total', () => {
+    const snapshot = completeSnapshot()
+    expect(() => validateArchiveSnapshot({ ...snapshot, stores: { ...snapshot.stores, meta: [{ ...snapshot.stores.meta[0], rawBytes: 1 }] } })).toThrow('raw byte total disagrees')
+  })
+
   it('round trips captured session columns, ring bytes, solar days, receipts and every preference', () => {
     const snapshot = completeSnapshot()
     const restored = decodeArchiveSnapshot(encodeArchiveSnapshot(snapshot))
@@ -150,7 +187,7 @@ describe('complete archive contract', () => {
 
   it('rejects unsupported schema versions and unknown settings', () => {
     const snapshot = completeSnapshot()
-    expect(() => validateArchiveSnapshot({ ...snapshot, version: 2 })).toThrow('unsupported value')
+    expect(() => validateArchiveSnapshot({ ...snapshot, version: 3 })).toThrow('unsupported value')
     expect(() => validateArchiveSnapshot({ ...snapshot, preferences: [{ key: 'unrelated.account.token', value: 'opaque' }] })).toThrow('unsupported value')
     expect(() => validateArchiveSnapshot({ ...snapshot, preferences: [{ key: 'shunt.statsPreferences', value: '{"version":1,"range":"custom","custom":null,"pack":null}' }] })).toThrow('custom range needs dates')
   })

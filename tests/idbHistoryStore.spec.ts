@@ -1,7 +1,10 @@
+import { MAX_SESSIONS, COMPACT_RETENTION_MS } from '../src/domain/history/budget'
 import 'fake-indexeddb/auto'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { SessionHourAccumulator } from '../src/domain/history/SessionHourAccumulator'
+import type { SessionHour } from '../src/domain/history/SessionHour'
 import { unavailableHistoryStore } from '../src/application/history/port'
 import type { HistoryAvailability } from '../src/application/history/port'
 import { PACK_SAMPLING_PERIOD_SECONDS } from '../src/domain/history/ringClock'
@@ -36,29 +39,14 @@ import {
 } from './support/samples'
 import { describeHistoryStore } from './support/describeHistoryStore'
 
-/**
- * The only file that imports `fake-indexeddb`, and the only place real IndexedDB semantics are
- * exercised — compound keys, index cursors, transaction scope and commit ordering are exactly the
- * things a hand-rolled fake would get wrong in the same direction as the code under test.
- *
- * One limitation is worth stating rather than working around: `fake-indexeddb` emulates no quota,
- * so a full disk cannot be reproduced here. The adapter's retry decision is extracted as
- * `classifyWriteFailure` and tested as the pure branch it is, and the recorder's behaviour on a
- * refused write is driven through the port instead.
- */
-
 let databaseCount = 0
 
 interface RecordedChannel extends ArchiveChannel {
   readonly posted: readonly ArchiveMessage[]
-  /** Drops what has been heard so far, so a case can assert about one step of a longer setup. */
+
   forget(): void
 }
 
-/**
- * Stands in for BroadcastChannel and, like it, never delivers back to the context that posted.
- * A real one would also keep Node's event loop alive past the run.
- */
 function recordingChannel(): RecordedChannel {
   const posted: ArchiveMessage[] = []
   return {
@@ -106,12 +94,12 @@ interface Adapter {
   dispose(): Promise<void>
 }
 
-async function openAdapter(): Promise<Adapter> {
+async function openAdapter(rawCapacityBytes?: () => number): Promise<Adapter> {
   databaseCount += 1
   const name = `shunt.log.spec.${databaseCount}`
   const database = await openDatabase(name)
   const channel = recordingChannel()
-  const store = new IdbHistoryStore(database, USABLE, channel)
+  const store = new IdbHistoryStore(database, USABLE, channel, rawCapacityBytes)
   return {
     store,
     database,
@@ -124,7 +112,6 @@ async function openAdapter(): Promise<Adapter> {
   }
 }
 
-/** Reads a whole object store, for the assertions that have to look past the port. */
 function readAll<T>(database: IDBDatabase, storeName: string): Promise<T[]> {
   return new Promise((resolve, reject) => {
     const request = database.transaction([storeName], 'readonly').objectStore(storeName).getAll()
@@ -142,7 +129,6 @@ function deleteRow(database: IDBDatabase, storeName: string, key: IDBValidKey): 
   })
 }
 
-/** Writes rows straight into a store, for the states only a budget far past a test's reach reaches. */
 function seedRows(database: IDBDatabase, storeName: string, rows: readonly unknown[]): Promise<void> {
   return new Promise((resolve, reject) => {
     const transaction = database.transaction([storeName], 'readwrite')
@@ -153,14 +139,6 @@ function seedRows(database: IDBDatabase, storeName: string, rows: readonly unkno
   })
 }
 
-/**
- * The scope of every transaction opened while `work` ran.
- *
- * The one thing about a ring merge that matters most is invisible from the port: IndexedDB
- * serialises overlapping-scope readwrite transactions across every connection on the origin, so a
- * merge that reached the chunk store would queue behind — or abort — a live recording's commit, and
- * nothing either store returns would ever show it.
- */
 async function scopesOpenedDuring(
   database: IDBDatabase,
   work: () => Promise<unknown>,
@@ -202,6 +180,7 @@ describe('the schema', () => {
       'meta',
       'ringReads',
       'ringRecords',
+      'sessionHours',
       'sessions',
       'warnings',
     ])
@@ -218,6 +197,8 @@ describe('the schema', () => {
     expect([...transaction.objectStore('warnings').indexNames]).toEqual(['byTime'])
     expect([...transaction.objectStore('ringRecords').indexNames]).toEqual(['byDevice'])
     expect([...transaction.objectStore('ringReads').indexNames]).toEqual(['byDevice'])
+    expect([...transaction.objectStore('sessionHours').indexNames]).toEqual(['bySession', 'byTime'])
+    expect(transaction.objectStore('sessionHours').keyPath).toEqual(['sessionId', 'hourStart'])
   })
 
   it('keys a chunk on its session, stream and sequence together', async () => {
@@ -235,21 +216,16 @@ describe('the schema', () => {
   })
 
   it('keys a ring row on the pack’s own write order, and a read on when it happened', async () => {
-    // Never on the ring index, which moved 42 places in three and a half hours on the real pack,
-    // and never on the RTC counter, which repeats and runs backwards across a clock rewrite.
     adapter = await openAdapter()
     const transaction = adapter.database.transaction(['ringRecords', 'ringReads'], 'readonly')
 
     expect(transaction.objectStore('ringRecords').keyPath).toEqual(['deviceKey', 'seq'])
     expect(transaction.objectStore('ringReads').keyPath).toEqual(['deviceKey', 'observedAt'])
   })
-
 })
 
 describe('upgrading an archive in place', () => {
   it('adds the ring stores to one already holding a session, a chunk and a warning', async () => {
-    // An upgrade transaction blocks every tab on the origin and the chunk store is tens of
-    // megabytes, so it may only add. What was already recorded has to come through untouched.
     databaseCount += 1
     const name = `shunt.log.spec.${databaseCount}`
     const before = await openThePreviousVersion(name)
@@ -280,8 +256,6 @@ describe('one write, one transaction', () => {
   })
 
   it('rolls the chunk back when the session row that follows it cannot be written', async () => {
-    // The chunk lands first and the row second. If the second fails, the first must not survive:
-    // a chunk with a row that never learned about it is budget nobody can reach.
     adapter = await openAdapter()
     await adapter.store.openSession(sessionRecord())
 
@@ -296,8 +270,6 @@ describe('one write, one transaction', () => {
   })
 
   it('writes nothing at all for a session another tab deleted underneath it', async () => {
-    // This is the seam the recorder reads as "my row is gone": refused, with no storage failure to
-    // name. It opens a fresh session pointing back at this one rather than resurrecting it.
     adapter = await openAdapter()
     await adapter.store.openSession(sessionRecord())
     await deleteRow(adapter.database, 'sessions', SESSION_ID)
@@ -350,8 +322,6 @@ describe('the recovery sweep', () => {
   })
 
   it('removes chunks whose session row is gone', async () => {
-    // Only reachable by looking past the port, because nothing above it can produce an orphan. A
-    // crash between the two deletes can, and an unreachable chunk holds budget forever.
     adapter = await openAdapter()
     await adapter.store.openSession(sessionRecord())
     await adapter.store.commitChunk(packChunk(packSamples(5)), sessionPatch({ packSamples: 5 }))
@@ -438,10 +408,8 @@ describe("filing the pack's own ring", () => {
     await adapter.dispose()
   })
 
-  /** Far enough past everything seeded below that no run of it could align against a stored row. */
   const STRANDED_FROM = RING_EPOCH_COUNTER_SECONDS + 30_000 * PACK_SAMPLING_PERIOD_SECONDS
 
-  /** A read carrying eight records the ledger cannot possibly already hold. */
   function strandedRead(observedAt: number): RingSnapshot {
     return ringSnapshot({
       observedAt,
@@ -470,8 +438,6 @@ describe("filing the pack's own ring", () => {
     await adapter.store.appendRingSnapshot(ringSnapshot())
     expect(adapter.channel.posted).toEqual(['ring-read'])
 
-    // A journal row the platform cannot store takes the whole merge down with it, rows included:
-    // a ledger that grew while its receipt was lost is a ledger nothing can account for.
     adapter.channel.forget()
     const unwritable = strandedRead(SAMPLE_EPOCH + 3_600_000)
     const refused = await adapter.store.appendRingSnapshot({
@@ -487,7 +453,6 @@ describe("filing the pack's own ring", () => {
   })
 
   it('announces a clock correction and a deleted ledger under the same word', async () => {
-    // The archive is the shared state and a receiver re-reads it, so nothing finer would be read.
     adapter = await openAdapter()
     await adapter.store.upsertDevice(deviceRecord())
     await adapter.store.appendRingSnapshot(ringSnapshot())
@@ -500,9 +465,6 @@ describe("filing the pack's own ring", () => {
   })
 
   it('drops the least recently read ledger whole once one pack too many has one', async () => {
-    // The one ring budget a test can actually reach. The per-device cap is twenty thousand rows,
-    // and seeding that many through this fake takes minutes — its index maintenance is quadratic
-    // in the rows already under one key, which is exactly the shape of a single pack's ledger.
     adapter = await openAdapter()
     const packs = Array.from(
       { length: MAX_RING_DEVICES + 1 },
@@ -516,8 +478,6 @@ describe("filing the pack's own ring", () => {
       )
     }
 
-    // A ledger nobody has read in months is the fairest thing to lose, and it goes whole: rows,
-    // journal and all, counted in the figures the read that evicted it reports.
     expect(last.prunedRecords).toBe(8)
     expect(await adapter.store.readRingLedger(packs[0])).toBeNull()
     expect(await adapter.store.listRingLedgers()).toHaveLength(MAX_RING_DEVICES)
@@ -525,8 +485,6 @@ describe("filing the pack's own ring", () => {
   })
 
   it('sweeps journal rows whose ledger is gone', async () => {
-    // A crash between two deletes cannot produce this — the rows and the journal die in one
-    // transaction — but a half-written database can, and those rows are unreachable budget.
     adapter = await openAdapter()
     const orphaned: DeviceKey = 'jk:GONE000000001'
     await seedRows(adapter.database, 'ringReads', [ringReadRow({ deviceKey: orphaned })])
@@ -538,8 +496,6 @@ describe("filing the pack's own ring", () => {
   })
 
   it('leaves the receipt of a pack that answered nothing exactly where it is', async () => {
-    // A ledger holding no record is still a ledger: a pack that stopped answering 0xA7 is what a
-    // stored history of attempts is for, and the sweep runs on every single page load.
     adapter = await openAdapter()
     await adapter.store.appendRingSnapshot(
       ringSnapshot({ observedAt: SAMPLE_EPOCH, outcome: 'no-answer', runs: [] }),
@@ -560,8 +516,6 @@ describe('another tab upgrading the schema', () => {
   })
 
   it('steps aside rather than deadlocking the upgrade, and says why it went quiet', async () => {
-    // Holding this connection open means the upgrade never runs and the other tab hangs with
-    // nothing on screen to explain it. So this one lets go and reports the reason.
     adapter = await openAdapter()
     await adapter.store.openSession(sessionRecord())
 
@@ -569,39 +523,21 @@ describe('another tab upgrading the schema', () => {
 
     expect(adapter.store.availability.usable).toBe(false)
     expect(adapter.store.availability.reason).toBe('version-newer')
-    // Every later call answers honestly instead of throwing InvalidStateError from a dead handle.
+
     expect(await adapter.store.listSessions()).toEqual([])
     expect((await adapter.store.commitChunk(packChunk(packSamples(3)), sessionPatch())).stored).toBe(false)
     upgraded.close()
   })
 })
 
-/** Comfortably past the probe's own blocked wait, which the module keeps to itself. */
 const PAST_THE_BLOCKED_WAIT_MS = 10_000
 
-/**
- * Waits for the probe to start counting the blocking tab out.
- *
- * Only `setTimeout` may be faked while a blocked open is in flight: `fake-indexeddb` drives its
- * whole event dispatch through `setImmediate` and polls on it for the blocking connection to
- * close, so faking that strands the request half-open and every later use of the database with it.
- * With the clock only half fake, the countdown has to be waited for rather than assumed — it is
- * armed several dispatches after `open()` returns.
- */
 async function waitForBlockedCountdown(): Promise<void> {
   for (let dispatch = 0; dispatch < 100 && vi.getTimerCount() === 0; dispatch += 1) {
     await new Promise((resume) => setImmediate(resume))
   }
 }
 
-/**
- * The archive as the build before this one left it.
- *
- * `applySchema` only ever builds every version it knows in one pass, so it cannot play an older
- * build: the stores this build's upgrade adds would already be there, and the upgrade under test
- * would abort on the constraint rather than complete. They are taken back out again here, which is
- * what makes the version this opens at genuinely the previous one.
- */
 function openThePreviousVersion(name: string): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(name, DATABASE_VERSION - 1)
@@ -615,10 +551,6 @@ function openThePreviousVersion(name: string): Promise<IDBDatabase> {
   })
 }
 
-/**
- * Opens at `version` and says which of the two things happened, so a case can assert that a version
- * bump got through rather than hanging on one that never will.
- */
 function attemptUpgrade(name: string, version: number): Promise<'upgraded' | 'blocked'> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(name, version)
@@ -632,11 +564,6 @@ function attemptUpgrade(name: string, version: number): Promise<'upgraded' | 'bl
 }
 
 describe('probing for an archive', () => {
-  /**
-   * The connection standing in for the tab that is holding the upgrade off. It is closed here
-   * rather than in the case, because a failed assertion that left it open would leave the open
-   * request stuck half-way and hang every case after this one instead of failing one.
-   */
   let blockingTab: IDBDatabase | null = null
 
   afterEach(async () => {
@@ -665,8 +592,6 @@ describe('probing for an archive', () => {
   })
 
   it('leaves a newer build’s recordings completely alone', async () => {
-    // Deleting a newer version's data to make an older build work is not a trade this page is
-    // entitled to make on the owner's behalf.
     const newer = await openDatabase(DATABASE_NAME, DATABASE_VERSION + 1)
     newer.close()
 
@@ -680,9 +605,6 @@ describe('probing for an archive', () => {
   })
 
   it('gives up on a tab that is still holding the older version open', async () => {
-    // A tab running the previous build blocks the upgrade for as long as it stays open, and no
-    // event ever arrives to say so. Waiting forever leaves the owner with a page that will never
-    // record and never explain itself, so the probe bounds the wait and names the cause.
     blockingTab = await openThePreviousVersion(DATABASE_NAME)
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
 
@@ -699,9 +621,6 @@ describe('probing for an archive', () => {
   })
 
   it('closes the connection the abandoned open still hands back later', async () => {
-    // Giving up on the blocking tab only stops this page waiting: the request cannot be cancelled,
-    // so the upgrade runs anyway once that tab goes and produces a connection nobody holds. Nothing
-    // gave it an `onversionchange`, so left open it is the permanent block the timeout escaped.
     blockingTab = await openThePreviousVersion(DATABASE_NAME)
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
 
@@ -715,15 +634,10 @@ describe('probing for an archive', () => {
     blockingTab.close()
     blockingTab = null
 
-    // The strongest proof available that nothing is still holding the archive: the next schema bump
-    // gets through instead of announcing itself as blocked, the way this one did. It queues behind
-    // the abandoned upgrade, so it is only judged once that upgrade has run and been let go of.
     expect(await attemptUpgrade(DATABASE_NAME, DATABASE_VERSION + 1)).toBe('upgraded')
   })
 
   it('answers null for persistence when the browser will not say', async () => {
-    // navigator.storage is undefined under this environment, which is exactly the case the probe
-    // has to survive: an unguarded call there throws while the module is being imported.
     const store = await openHistoryStore()
 
     expect(store.availability.persisted).toBeNull()
@@ -816,16 +730,12 @@ describe('probing for an archive', () => {
 
 describe('classifying a failed write', () => {
   it('knows a full disk by name and by the legacy code older WebKit still sends', () => {
-    // iOS is where the archive is most likely to hit a wall, and it is the platform still sending
-    // the numeric code.
     expect(isQuotaError(new DOMException('no room', 'QuotaExceededError'))).toBe(true)
     expect(isQuotaError({ code: 22 })).toBe(true)
     expect(classifyWriteFailure(new DOMException('no room', 'QuotaExceededError'))).toBe('quota')
   })
 
   it('tells a bare commit-time abort apart from a full disk', () => {
-    // Chromium can surface a full disk as an abort with no request error at all, so the two are
-    // named separately and only one of them is worth making room for.
     expect(classifyWriteFailure(new DOMException('gone', 'AbortError'))).toBe('aborted')
   })
 
@@ -838,8 +748,6 @@ describe('classifying a failed write', () => {
 
 describe('a browser that cannot keep an archive', () => {
   it('answers every call honestly and stores nothing', async () => {
-    // Honest degradation is a value rather than a branch: nothing above the port has to ask
-    // whether it holds a store.
     const store = unavailableHistoryStore('no-indexeddb')
 
     expect(store.availability.usable).toBe(false)
@@ -863,5 +771,163 @@ describe('a browser that cannot keep an archive', () => {
 
     store.watch(() => undefined)()
     store.close()
+  })
+})
+
+describe('compact history and raw retention', () => {
+  let adapter: Adapter
+
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    await adapter.dispose()
+  })
+
+  it('backfills before raw eviction while preserving session totals and warnings', async () => {
+    adapter = await openAdapter(() => 400)
+    await adapter.store.openSession(sessionRecord())
+    await adapter.store.appendWarning(warningRecord())
+    const ledger = { ...sessionRecord().ledger, packAhWholeSession: 123 }
+    await adapter.store.commitChunk(packChunk(packSamples(10)), sessionPatch({ ledger }))
+    await adapter.store.commitChunk(packChunk(packSamples(10, { at: SAMPLE_EPOCH + 10_000 }), { seq: 1 }), sessionPatch({ ledger, packSamples: 20, heartbeatAt: SAMPLE_EPOCH + 20_000 }))
+
+    const stored = await adapter.store.readSession(SESSION_ID)
+    expect(stored?.record.ledger).toEqual(ledger)
+    expect(stored?.pack.map((chunk) => chunk.seq)).toEqual([1])
+    expect(stored?.hours?.[0]?.basis).toBe('reconstructed')
+    expect(stored?.hours?.[0]?.packSamples).toBe(20)
+    expect(await adapter.store.warningsOf(SESSION_ID)).toHaveLength(1)
+    expect((await adapter.store.usage()).rawBytes).toBe(280)
+  })
+
+  it('does not restore discarded coverage when a later writer patch repeats the full session account', async () => {
+    adapter = await openAdapter(() => 400)
+    await adapter.store.openSession(sessionRecord())
+    const coverage = [{ from: SAMPLE_EPOCH, to: SAMPLE_EPOCH + 19_000, kind: 'pack-only' as const }]
+    await adapter.store.commitChunk(packChunk(packSamples(10)), sessionPatch({ coverage }))
+    const tail = packChunk(packSamples(10, { at: SAMPLE_EPOCH + 10_000 }), { seq: 1 })
+    const patch = sessionPatch({ coverage, packSamples: 20, heartbeatAt: SAMPLE_EPOCH + 20_000 })
+    await adapter.store.commitChunk(tail, patch)
+    await adapter.store.commitChunk(tail, patch)
+    await adapter.store.closeSession(SESSION_ID, sessionClosure({ ...patch, endedAt: SAMPLE_EPOCH + 20_000 }))
+    expect((await adapter.store.readSession(SESSION_ID))?.record.coverage).toEqual([
+      { from: SAMPLE_EPOCH + 10_000, to: SAMPLE_EPOCH + 19_000, kind: 'pack-only' },
+    ])
+  })
+
+  it('counts rewritten tails once and stores matching hourly snapshots atomically', async () => {
+    adapter = await openAdapter()
+    await adapter.store.openSession(sessionRecord())
+    const accumulator = new SessionHourAccumulator(SESSION_ID, 'recorded')
+    const samples = packSamples(10)
+    for (const sample of samples) accumulator.push({ at: sample.at, pack: sample, solar: null })
+    const hours = accumulator.updatedHours()
+    const tail = packChunk(samples, { sealed: false })
+    await adapter.store.commitChunk(tail, sessionPatch(), hours)
+    await adapter.store.commitChunk(tail, sessionPatch(), hours)
+    expect((await adapter.store.usage()).rawBytes).toBe(280)
+    expect((await adapter.store.readSession(SESSION_ID))?.hours?.[0]?.packSamples).toBe(10)
+    expect((await adapter.store.readSession(SESSION_ID))?.record.hourlyBasis).toBe('recorded')
+  })
+
+  it('aborts both raw and hourly changes when the hourly store refuses a write', async () => {
+    adapter = await openAdapter(() => 100)
+    await adapter.store.openSession(sessionRecord())
+    const accumulator = new SessionHourAccumulator(SESSION_ID, 'recorded')
+    for (const sample of packSamples(10)) accumulator.push({ at: sample.at, pack: sample, solar: null })
+    const realPut = IDBObjectStore.prototype.put
+    vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore, ...arguments_: Parameters<IDBObjectStore['put']>) {
+      if (this.name === 'sessionHours') throw new DOMException('refused', 'AbortError')
+      return realPut.apply(this, arguments_)
+    })
+    const outcome = await adapter.store.commitChunk(packChunk(packSamples(10)), sessionPatch(), accumulator.updatedHours())
+    expect(outcome.stored).toBe(false)
+    expect(await readAll(adapter.database, 'chunks')).toEqual([])
+    expect(await readAll(adapter.database, 'sessionHours')).toEqual([])
+    expect((await adapter.store.usage()).rawBytes).toBe(0)
+  })
+
+  it('never replaces recorded hourly accounting during legacy backfill', async () => {
+    adapter = await openAdapter()
+    await adapter.store.openSession(sessionRecord())
+    const accumulator = new SessionHourAccumulator(SESSION_ID, 'recorded')
+    for (const sample of packSamples(10)) accumulator.push({ at: sample.at, pack: sample, solar: null })
+    const hours = accumulator.updatedHours()
+    await adapter.store.commitChunk(packChunk(packSamples(10)), sessionPatch(), hours)
+    await adapter.store.compactSession(SESSION_ID)
+    expect(await readAll<SessionHour>(adapter.database, 'sessionHours')).toEqual(hours)
+  })
+
+  it('reconstructs new raw observations in an open legacy hour without doubling old observations', async () => {
+    adapter = await openAdapter()
+    await adapter.store.openSession(sessionRecord())
+    await adapter.store.commitChunk(packChunk(packSamples(5), { sealed: false }), sessionPatch())
+    await adapter.store.compactSession(SESSION_ID)
+    await adapter.store.commitChunk(packChunk(packSamples(10), { sealed: false }), sessionPatch())
+    await adapter.store.compactSession(SESSION_ID)
+    expect((await adapter.store.readSession(SESSION_ID))?.hours?.[0]?.packSamples).toBe(10)
+  })
+
+  it('recovers legacy raw byte totals and seals tails without discarding compact history', async () => {
+    adapter = await openAdapter()
+    await seedRows(adapter.database, 'sessions', [sessionRecord({ heartbeatAt: SAMPLE_EPOCH })])
+    await seedRows(adapter.database, 'chunks', [packChunk(packSamples(10), { sealed: false })])
+    await adapter.store.compactSession(SESSION_ID)
+    await adapter.store.recover(SAMPLE_EPOCH + 3_600_000)
+    expect((await adapter.store.usage()).rawBytes).toBe(280)
+    expect((await adapter.store.usage()).totalSamples).toBe(10)
+    expect((await adapter.store.readSession(SESSION_ID))?.hours).toHaveLength(1)
+  })
+
+  it('keeps expired hours while raw depends on them and removes both after raw pruning', async () => {
+    let capacity = 1_000
+    adapter = await openAdapter(() => capacity)
+    await adapter.store.openSession(sessionRecord())
+    const accumulator = new SessionHourAccumulator(SESSION_ID, 'recorded')
+    for (const sample of packSamples(10)) accumulator.push({ at: sample.at, pack: sample, solar: null })
+    await adapter.store.commitChunk(packChunk(packSamples(10)), sessionPatch({ packSamples: 10 }), accumulator.updatedHours())
+    const later = SAMPLE_EPOCH + COMPACT_RETENTION_MS + 3_600_000
+    await adapter.store.recover(later)
+    expect(await readAll(adapter.database, 'sessionHours')).toHaveLength(1)
+    expect(await readAll(adapter.database, 'chunks')).toHaveLength(1)
+
+    capacity = 100
+    await adapter.store.recover(later + 1)
+    expect(await readAll(adapter.database, 'sessionHours')).toHaveLength(0)
+    expect(await readAll(adapter.database, 'chunks')).toHaveLength(0)
+    expect((await adapter.store.usage()).rawBytes).toBe(0)
+    expect(await adapter.store.readSession(SESSION_ID)).not.toBeNull()
+  })
+
+  it('bounds metadata even when thousands of tiny closed sessions still retain raw samples', async () => {
+    adapter = await openAdapter()
+    const sessions = Array.from({ length: MAX_SESSIONS + 1 }, (_, index) => sessionRecord({
+      id: `tiny-${index}`, startedAt: SAMPLE_EPOCH + index,
+      state: 'closed', endReason: 'user-disconnect', endedAt: SAMPLE_EPOCH + index + 1,
+      heartbeatAt: SAMPLE_EPOCH, packSamples: 1, packChunks: 1, sealedSamples: 1,
+    }))
+    await seedRows(adapter.database, 'sessions', sessions)
+    await seedRows(adapter.database, 'chunks', sessions.map((session) => packChunk(packSamples(1), { sessionId: session.id })))
+    await adapter.store.recover(SAMPLE_EPOCH + 3_600_000)
+    expect(await adapter.store.readSession('tiny-0')).toBeNull()
+    expect((await adapter.store.usage()).sessions).toBe(MAX_SESSIONS)
+    expect((await adapter.store.usage()).rawBytes).toBe(MAX_SESSIONS * 28)
+    expect((await adapter.store.usage()).totalSamples).toBe(MAX_SESSIONS)
+  })
+
+  it('serializes byte accounting across two connections', async () => {
+    adapter = await openAdapter()
+    const secondDatabase = await openDatabase(adapter.name)
+    const second = new IdbHistoryStore(secondDatabase, USABLE, recordingChannel())
+    try {
+      await adapter.store.openSession(sessionRecord())
+      await second.openSession(sessionRecord({ id: 'second' }))
+      await Promise.all([
+        adapter.store.commitChunk(packChunk(packSamples(10)), sessionPatch()),
+        second.commitChunk(packChunk(packSamples(10), { sessionId: 'second' }), sessionPatch()),
+      ])
+      expect((await adapter.store.usage()).rawBytes).toBe(560)
+    } finally {
+      second.close()
+    }
   })
 })

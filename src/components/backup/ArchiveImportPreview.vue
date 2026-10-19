@@ -17,7 +17,8 @@ defineProps<{
       <p>Captured {{ new Date(snapshot.exportedAt).toLocaleString() }}</p>
       <dl>
         <div><dt>Sessions</dt><dd>{{ snapshot.stores.sessions.length.toLocaleString() }}</dd></div>
-        <div><dt>Stored samples</dt><dd>{{ snapshot.stores.chunks.reduce((total, chunk) => total + chunk.length, 0).toLocaleString() }}</dd></div>
+        <div><dt>Raw samples</dt><dd>{{ snapshot.stores.chunks.reduce((total, chunk) => total + chunk.length, 0).toLocaleString() }}</dd></div>
+        <div><dt>Hourly summaries</dt><dd>{{ (snapshot.stores.hours?.length ?? 0).toLocaleString() }}</dd></div>
         <div><dt>Device history records</dt><dd>{{ snapshot.stores.ringRecords.length.toLocaleString() }}</dd></div>
         <div><dt>Saved settings</dt><dd>{{ snapshot.preferences.length }}</dd></div>
       </dl>

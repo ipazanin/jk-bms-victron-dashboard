@@ -1245,3 +1245,34 @@ describe('one archive, one recorder', () => {
     })
   })
 })
+
+describe('hourly recording checkpoints', () => {
+  it('retains dirty hours after a failed checkpoint and retries without double counting', async () => {
+    harness = harnessFor()
+    drivePack(12)
+    harness.store.failNextCommitWith(new Error('temporary write failure'))
+    harness.recorder.checkpoint()
+    await harness.recorder.drain()
+    expect((await harness.store.readSession(harness.sessionId()))?.hours).toEqual([])
+
+    drivePack(3)
+    harness.recorder.checkpoint()
+    await harness.recorder.drain()
+    harness.recorder.checkpoint()
+    await harness.recorder.drain()
+    const stored = await harness.store.readSession(harness.sessionId())
+    expect(stored?.hours?.reduce((count, hour) => count + hour.packSamples, 0)).toBe(15)
+    expect(stored?.record.hourlyBasis).toBe('recorded')
+  })
+
+  it('persists the final dirty hour when a session closes before its next checkpoint', async () => {
+    harness = harnessFor()
+    drivePack(12)
+    const id = harness.sessionId()
+    harness.recorder.finish('user-disconnect')
+    await harness.recorder.drain()
+    const stored = await harness.store.readSession(id)
+    expect(stored?.record.state).toBe('closed')
+    expect(stored?.hours?.reduce((count, hour) => count + hour.packSamples, 0)).toBe(12)
+  })
+})

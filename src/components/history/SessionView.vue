@@ -4,12 +4,14 @@ import { computed, ref, watch } from 'vue'
 import CoverageTape from './CoverageTape.vue'
 import EntryList from './EntryList.vue'
 import SessionRibbon from './SessionRibbon.vue'
+import SessionHours from './SessionHours.vue'
 import ShuntLedger from './ShuntLedger.vue'
 import ShuntAmmeter from '../ShuntAmmeter.vue'
 import StatusChip from '../StatusChip.vue'
 import { COMPACT_QUERY } from '../../application/breakpoints'
 import { ampHoursSigned, clockTime, clockTimeWithSeconds, groupedCount } from '../../application/format'
 import { useHistoryBrowser } from '../../application/history/historyBrowser'
+import { MAX_RENDER_WINDOW_MS } from '../../application/history/port'
 import { useArchiveWorkspace } from '../../application/backup/useArchiveWorkspace'
 import { hashOf, navigate, route } from '../../application/route'
 import { useMediaQuery } from '../../application/useMediaQuery'
@@ -24,9 +26,7 @@ const MS_PER_SECOND = 1000
 const MS_PER_MINUTE = 60_000
 const MS_PER_HOUR = 3_600_000
 const MS_PER_DAY = 86_400_000
-const BYTES_PER_MB = 1_000_000
 
-// The BMS counter and the 1 Hz integral can drift within 2 Ah or 10%.
 const CROSS_CHECK_FLOOR_AH = 2
 const CROSS_CHECK_FRACTION = 0.1
 
@@ -34,7 +34,7 @@ const TABLE_PAGE_ROWS = 240
 
 const browser = useHistoryBrowser()
 const { readOnly } = useArchiveWorkspace()
-const { loaded, loading, missing, failure, account, selection, exportSize, exportState } = browser
+const { loaded, loading, missing, failure, account, selection, selectedHour, exportState } = browser
 
 const compact = useMediaQuery(COMPACT_QUERY)
 
@@ -42,7 +42,6 @@ const cursorAt = ref<number | null>(null)
 const confirmingDelete = ref(false)
 const tableStart = ref(0)
 
-// The route owner loads the session and releases its decoded samples.
 const sessionId = computed<SessionId | null>(
   () => props.id || (route.value.name === 'session' ? route.value.id : null),
 )
@@ -54,6 +53,7 @@ watch(sessionId, () => {
 })
 
 const record = computed(() => loaded.value?.record ?? null)
+const hasRaw = computed(() => (loaded.value?.timeline.length ?? 0) > 0)
 
 const sessionWindow = computed<TimeWindow | null>(() => {
   const row = record.value
@@ -95,6 +95,12 @@ const identityLine = computed(() => {
 const windowSentence = computed(() => {
   const folded = ledger.value
   if (folded === null) return ''
+  const clockAdjusted = selectedHour.value === null
+    ? loaded.value?.hours.some((hour) => hour.clockAdjusted)
+    : selectedHour.value.clockAdjusted === true
+  if (clockAdjusted) {
+    return `Both radios contributed ${spacedSpan(folded.countedMs)} of counted time. The recording clock moved backward, so clock times overlap.`
+  }
   return `Both radios agreed for ${spacedSpan(folded.countedMs)} of the ${spacedSpan(brushedMs.value)}. Only that window is counted.`
 })
 
@@ -106,7 +112,7 @@ const brushedMs = computed(() => {
 const ledgerHeading = computed(() => {
   const window = selection.value
   if (window === null) return 'Session ledger'
-  return `Ledger · ${clockTime(window.from)} → ${clockTime(window.to)}`
+  return `${selectedHour.value === null ? 'Raw selection' : 'Hourly ledger'} · ${clockTime(window.from)} → ${clockTime(window.to)}`
 })
 
 const foreignMs = computed(() => {
@@ -114,7 +120,6 @@ const foreignMs = computed(() => {
   return folded === null || folded.foreignAhFloor <= 0 ? null : folded.foreignMs
 })
 
-// Remaining capacity avoids the 1% quantization of state of charge.
 const crossCheck = computed(() => {
   const folded = record.value?.ledger ?? null
   if (folded === null) return null
@@ -193,12 +198,16 @@ const tableCaption = computed(() => {
 })
 
 const exportNote = computed(() => {
-  const size = exportSize.value
-  if (size === null) return ''
-  return `Every sample exactly as the radios reported it. ${groupedCount(size.rows)} rows, about ${(size.bytes / BYTES_PER_MB).toFixed(1)} MB.`
+  const session = loaded.value
+  if (session === null) return ''
+  return `Download includes ${session.hours.length} hourly summaries, their important moments, and all raw samples still retained.`
 })
 
 function onScrub(at: number | null): void {
+  if (at !== null && sampleAt(at) === null) {
+    const hour = loaded.value?.hours.find((summary) => at >= summary.from && at <= summary.to)
+    if (hour !== undefined) browser.selectHour(hour.hourStart)
+  }
   cursorAt.value = at
 }
 
@@ -213,7 +222,7 @@ function stepCursor(direction: -1 | 1): void {
 
 function shiftWindow(direction: 'earlier' | 'later'): void {
   const session = sessionWindow.value
-  const shown = loaded.value?.window
+  const shown = loaded.value?.rawWindow
   const id = sessionId.value
   if (!session || !shown || id === null) return
 
@@ -303,11 +312,11 @@ function tightSpan(elapsedMs: number): string {
           {{ tightSpan(sessionMs) }}
         </h2>
         <p class="readout facts">
-          {{ groupedCount(totalSamples) }} samples at 1 Hz ·
+          {{ groupedCount(totalSamples) }} samples originally recorded at 1 Hz ·
           {{ silences.count }} {{ silences.count === 1 ? 'gap' : 'gaps' }} totalling
           {{ spacedSpan(silences.total) }}<template v-if="identityLine"> · {{ identityLine }}</template>
         </p>
-        <p v-if="totalSamples === 0" class="copy">
+        <p v-if="totalSamples === 0 && loaded.hours.length === 0" class="copy">
           No samples. The BMS connected but sent nothing before the link went quiet.
         </p>
         <p v-if="loaded.unreadableChunks > 0" class="copy">
@@ -357,11 +366,10 @@ function tightSpan(elapsedMs: number): string {
           <p class="muted">boat = solar − pack, integrated</p>
         </header>
         <p class="copy window">{{ windowSentence }}</p>
+        <p v-if="selectedHour" class="copy">{{ selectedHour.basis === 'recorded' ? 'Calculated while recording.' : 'Reconstructed from the raw samples that were still available.' }} This selection covers one retained hour span.</p>
 
         <ShuntLedger :ledger="ledger" :solar-seen="solarSeen" />
 
-        <!-- The figure and its ≥ are on the bar itself, inside the ledger; this is only the
-             sentence that says what the floor is a floor on. -->
         <div v-if="foreignMs !== null" class="unmeasured">
           <details v-if="compact">
             <summary class="copy">Why this is a floor</summary>
@@ -397,29 +405,49 @@ function tightSpan(elapsedMs: number): string {
         </div>
       </section>
 
+      <SessionHours
+        v-if="loaded.hours.length > 0"
+        :key="record.id"
+        :hours="loaded.hours"
+        :selected-hour="selectedHour"
+        @select="browser.selectHour($event)"
+      />
+
+      <p v-if="!hasRaw" class="notice copy card">
+        No raw samples are available in this view. Hourly history and important moments are shown above when retained.
+        Selected moments cannot recreate the original trace or partial-hour totals.
+      </p>
+      <p v-else class="notice copy card">
+        Raw detail below shows the retained samples in the current window. Hourly history above covers all retained hours in this session.
+      </p>
+      <nav v-if="sessionWindow && sessionMs > MAX_RENDER_WINDOW_MS" class="paging card" aria-label="Raw recording window">
+        <button type="button" class="action" :disabled="loaded.rawWindow.from <= sessionWindow.from" @click="shiftWindow('earlier')">Earlier raw window</button>
+        <span class="copy">{{ dayWords(loaded.rawWindow.from) }} {{ clockTime(loaded.rawWindow.from) }} to {{ dayWords(loaded.rawWindow.to) }} {{ clockTime(loaded.rawWindow.to) }}</span>
+        <button type="button" class="action" :disabled="loaded.rawWindow.to >= sessionWindow.to" @click="shiftWindow('later')">Later raw window</button>
+      </nav>
+
       <CoverageTape
+        v-if="hasRaw"
         class="card"
         :coverage="coverage"
         :window="loaded.window"
-        :selection="selection"
+        :selection="selectedHour === null ? selection : null"
         :cursor-at="cursorAt"
         @select="browser.select($event)"
         @scrub="onScrub"
       />
 
       <SessionRibbon
+        v-if="hasRaw"
         class="card"
         :timeline="loaded.timeline"
         :window="loaded.window"
         :cursor-at="cursorAt"
         :cursor-sample="activeSample"
-        :window-clamped="loaded.windowClamped"
-        :session-ms="sessionMs"
         @scrub="onScrub"
-        @shift="shiftWindow"
       />
 
-      <section class="band scrub card">
+      <section v-if="hasRaw" class="band scrub card">
         <header class="band-head">
           <h3 class="plate">
             <template v-if="activeAt === null">At —</template>
@@ -463,7 +491,7 @@ function tightSpan(elapsedMs: number): string {
 
       <EntryList class="card" :entries="record.entries" :cursor-at="cursorAt" @scrub="onScrub" />
 
-      <section class="band card">
+      <section v-if="hasRaw" class="band card">
         <details>
           <summary class="plate">Show the numbers</summary>
 
@@ -679,8 +707,6 @@ summary {
   align-items: center;
 }
 
-/* The six-column table scrolls inside this box; the page body never scrolls sideways, even though
-   this table lives in a collapsed <details> that the overflow check does not open. */
 .table-scroll {
   overflow-x: auto;
 }

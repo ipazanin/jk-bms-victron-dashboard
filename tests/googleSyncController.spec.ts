@@ -3,26 +3,29 @@ import { createGoogleSyncController } from '../src/application/sync/googleSyncCo
 import type { GoogleSyncDependencies } from '../src/application/sync/GoogleSyncDependencies'
 import type { GoogleSyncState } from '../src/application/sync/GoogleSyncState'
 import type { SyncRemote } from '../src/application/sync/SyncRemote'
+import { compactCloudArchive } from '../src/application/sync/compactCloudArchive'
 import { publishArchive } from '../src/application/sync/archiveSync'
 import type { ArchiveSnapshot } from '../src/domain/backup/ArchiveSnapshot'
 import type { ArchivePreference } from '../src/domain/backup/ArchivePreference'
 import type { ImportedArchive } from '../src/application/backup/ImportedArchive'
 import type { CloudArchiveRevision } from '../src/domain/sync/CloudArchiveRevision'
-import type { CloudBlock } from '../src/domain/sync/CloudBlock'
+import type { CloudCatalog } from '../src/domain/sync/CloudCatalog'
+import type { CloudSnapshotRevision } from '../src/domain/sync/CloudSnapshotRevision'
 import type { CloudSettingsRevision } from '../src/domain/sync/CloudSettingsRevision'
 import type { CloudWorkspace } from '../src/domain/sync/CloudWorkspace'
 import { settingsHeads } from '../src/domain/sync/sharedSettings'
+import { summarizeSessionHours } from '../src/domain/history/summarizeSessionHours'
 import { deviceRecord, packChunk, packSamples, SAMPLE_EPOCH, sessionRecord } from './support/samples'
 
-const workspace: CloudWorkspace = { id: 'sheet', name: 'Boat', folderId: 'folder' }
+const workspace: CloudWorkspace = { id: 'sheet', name: 'Boat', folderId: 'folder', version: 2 }
 const controllers: ReturnType<typeof createGoogleSyncController>[] = []
 
 function snapshot(sourceId = 'browser', exportedAt = SAMPLE_EPOCH): ArchiveSnapshot {
   return {
-    format: 'shunt-archive', version: 1, exportedAt, source: { id: sourceId, label: sourceId },
+    format: 'shunt-archive', version: 2, exportedAt, source: { id: sourceId, label: sourceId },
     stores: {
       sessions: [sessionRecord({ packSamples: 2, packChunks: 1, sealedSamples: 2, state: 'closed', endedAt: SAMPLE_EPOCH + 1000, endReason: 'user-disconnect' })],
-      chunks: [packChunk(packSamples(2))], devices: [deviceRecord()],
+      chunks: [packChunk(packSamples(2))], hours: summarizeSessionHours('session-0001', packSamples(2), []), devices: [deviceRecord()],
       meta: [{ key: 'totals', schema: 1, totalSamples: 2, createdAt: SAMPLE_EPOCH, lastPrunedAt: null }],
       warnings: [], ringRecords: [], ringReads: [],
     }, preferences: [{ key: 'shunt.theme', value: 'dark' }],
@@ -43,7 +46,7 @@ function deferred<TResult>() {
 function setup(initial: Partial<GoogleSyncState> = {}) {
   const archives: CloudArchiveRevision[] = []
   const settings: CloudSettingsRevision[] = []
-  const blocks: CloudBlock[] = []
+  const pending: CloudSnapshotRevision[] = []
   const files = new Map<string, Uint8Array>()
   const imports = new Map<string, ArchiveSnapshot>()
   let fileCount = 0
@@ -51,14 +54,16 @@ function setup(initial: Partial<GoogleSyncState> = {}) {
   let recordingEndListener: (() => void) | null = null
   let accessListener: ((connected: boolean) => void) | null = null
   const remote = {
-    readCatalog: vi.fn(async (_workspace: CloudWorkspace, _signal: AbortSignal) => ({ archives: [...archives], settings: [...settings] })),
-    listBlocks: vi.fn(async (_workspace: CloudWorkspace, _signal: AbortSignal) => [...blocks]),
-    uploadBlock: vi.fn(async (_workspace: CloudWorkspace, bytes: Uint8Array, hash: string, signal: AbortSignal) => {
+    readCatalog: vi.fn(async (_workspace: CloudWorkspace, _signal: AbortSignal): Promise<CloudCatalog> => ({ archives: [...archives], settings: [...settings] })),
+    listPendingSnapshots: vi.fn(async (_workspace: CloudWorkspace, sourceId: string) => {
+      return pending.filter((revision) => revision.source.id === sourceId)
+    }),
+    uploadSnapshot: vi.fn(async (_workspace: CloudWorkspace, bytes: Uint8Array, description: Omit<CloudSnapshotRevision, 'snapshotFileId' | 'createdAt'>, signal: AbortSignal) => {
       signal.throwIfAborted()
-      const block = { hash, size: bytes.byteLength, fileId: `file-${fileCount++}` }
-      files.set(block.fileId, bytes.slice())
-      blocks.push(block)
-      return block
+      const revision = { ...description, snapshotFileId: `file-${fileCount}`, createdAt: SAMPLE_EPOCH + fileCount++ }
+      files.set(revision.snapshotFileId, bytes.slice())
+      pending.push(revision)
+      return revision
     }),
     downloadBlock: vi.fn(async (fileId: string, maximum: number, signal: AbortSignal) => {
       signal.throwIfAborted()
@@ -67,9 +72,17 @@ function setup(initial: Partial<GoogleSyncState> = {}) {
       if (bytes.byteLength > maximum) throw new Error('Archive too large')
       return bytes
     }),
-    appendArchive: vi.fn(async (_workspace: CloudWorkspace, revision: CloudArchiveRevision, signal: AbortSignal) => {
+    completeSnapshot: vi.fn(async (_workspace: CloudWorkspace, revision: CloudSnapshotRevision, signal: AbortSignal) => {
       signal.throwIfAborted()
       archives.push(revision)
+      const index = pending.findIndex((copy) => copy.id === revision.id)
+      if (index !== -1) pending.splice(index, 1)
+    }),
+    deleteSnapshot: vi.fn(async (_workspace: CloudWorkspace, revision: CloudSnapshotRevision, _sourceId: string, signal: AbortSignal) => {
+      signal.throwIfAborted()
+      const index = archives.findIndex((copy) => copy.id === revision.id)
+      if (index !== -1) archives.splice(index, 1)
+      files.delete(revision.snapshotFileId)
     }),
     appendSettings: vi.fn(async (_workspace: CloudWorkspace, revision: CloudSettingsRevision, signal: AbortSignal) => {
       signal.throwIfAborted()
@@ -141,6 +154,51 @@ afterEach(() => {
 })
 
 describe('Google sync controller history', () => {
+  it('reports failed retirement without losing the successful upload and retries cleanup later', async () => {
+    const harness = setup()
+    for (let index = 0; index < 4; index++) {
+      await harness.seed({ ...snapshot(), source: { id: 'browser', label: `Boat ${index}` } })
+    }
+    await harness.connect()
+    harness.remote.deleteSnapshot.mockRejectedValueOnce(new Error('Google could not be reached.'))
+    await harness.controller.syncNow()
+    expect(harness.controller.lastSyncAt.value).toBe(SAMPLE_EPOCH + 5000)
+    expect(harness.controller.failure.value).toContain('History was uploaded, but old cloud copies could not be removed')
+    expect(harness.settings).toHaveLength(1)
+    expect(harness.archives).toHaveLength(5)
+    harness.remote.uploadSnapshot.mockClear()
+    await harness.controller.syncNow()
+    expect(harness.controller.failure.value).toBeNull()
+    expect(harness.archives).toHaveLength(3)
+    expect(harness.remote.uploadSnapshot).not.toHaveBeenCalled()
+  })
+
+  it('shows a skipped-file warning while listing valid saved copies', async () => {
+    const harness = setup()
+    await harness.seed(snapshot('phone'))
+    await harness.connect()
+    harness.remote.readCatalog.mockResolvedValueOnce({ archives: harness.archives, settings: [], unreadableArchives: 2 })
+    await harness.controller.selectWorkspace(workspace.id)
+    expect(harness.controller.revisions.value).toHaveLength(1)
+    expect(harness.controller.failure.value).toContain('2 cloud archive files could not be read and were left untouched')
+  })
+
+  it('keeps legacy workspaces readable without capturing or uploading new history', async () => {
+    const harness = setup({ workspace: { ...workspace, version: 1 } })
+    harness.dependencies.listWorkspaces.mockResolvedValue([{ ...workspace, version: 1 }])
+    const revision = await harness.seed(snapshot('phone'))
+    await harness.connect()
+    harness.remote.uploadSnapshot.mockClear()
+    await harness.controller.selectWorkspace(workspace.id)
+    expect(harness.controller.revisions.value).toHaveLength(1)
+    await harness.controller.syncNow()
+    expect(harness.controller.failure.value).toContain('legacy workspace is read-only')
+    expect(harness.dependencies.capture).not.toHaveBeenCalled()
+    expect(harness.remote.uploadSnapshot).not.toHaveBeenCalled()
+    await harness.controller.openRevision(revision.id)
+    expect(harness.imports.has('phone')).toBe(true)
+  })
+
   it('publishes the first snapshot and shared settings, then skips unchanged revisions', async () => {
     const harness = setup()
     await harness.connect()
@@ -149,11 +207,11 @@ describe('Google sync controller history', () => {
     expect(harness.archives).toHaveLength(1)
     expect(harness.settings).toHaveLength(1)
     expect(harness.controller.lastSyncAt.value).toBe(SAMPLE_EPOCH + 5000)
-    harness.remote.uploadBlock.mockClear()
+    harness.remote.uploadSnapshot.mockClear()
     await harness.controller.syncNow()
     expect(harness.archives).toHaveLength(1)
     expect(harness.settings).toHaveLength(1)
-    expect(harness.remote.uploadBlock).not.toHaveBeenCalled()
+    expect(harness.remote.uploadSnapshot).not.toHaveBeenCalled()
     expect(harness.dependencies.importArchive).not.toHaveBeenCalled()
   })
 
@@ -177,7 +235,7 @@ describe('Google sync controller history', () => {
     await harness.seed(snapshot('browser'))
     await harness.connect()
     await harness.controller.syncNow()
-    expect(harness.dependencies.importArchive).toHaveBeenCalledExactlyOnceWith(newer, false)
+    expect(harness.dependencies.importArchive).toHaveBeenCalledExactlyOnceWith(compactCloudArchive(newer), false)
     harness.dependencies.importArchive.mockClear()
     await harness.controller.syncNow()
     expect(harness.dependencies.importArchive).not.toHaveBeenCalled()
@@ -190,7 +248,7 @@ describe('Google sync controller history', () => {
     await harness.seed(corrected)
     await harness.connect()
     await harness.controller.syncNow()
-    expect(harness.dependencies.importArchive).toHaveBeenCalledExactlyOnceWith(corrected, false)
+    expect(harness.dependencies.importArchive).toHaveBeenCalledExactlyOnceWith(compactCloudArchive(corrected), false)
   })
 
   it('imports the other sources and syncs settings when one source cannot be downloaded', async () => {
@@ -222,9 +280,9 @@ describe('Google sync controller history', () => {
     await harness.controller.openRevision(earlier.id)
     expect(harness.controller.autoSync.value).toBe(false)
     expect(harness.controller.notice.value).toContain('paused')
-    expect(harness.dependencies.importArchive).toHaveBeenLastCalledWith(snapshot('phone'), true)
+    expect(harness.dependencies.importArchive).toHaveBeenLastCalledWith(compactCloudArchive(snapshot('phone')), true)
     await harness.controller.syncNow()
-    expect(harness.dependencies.importArchive).toHaveBeenLastCalledWith(newer, false)
+    expect(harness.dependencies.importArchive).toHaveBeenLastCalledWith(compactCloudArchive(newer), false)
   })
 
   it('does not import a remote snapshot if cancelled while its download is pending', async () => {
@@ -355,7 +413,7 @@ describe('Google sync controller settings', () => {
     await harness.controller.syncNow()
     expect(harness.settings.at(-1)?.preferences).toEqual([...theme('light'), cloudKey])
     expect(harness.readPreferences()).toEqual([...theme('light'), localKey])
-    expect(harness.dependencies.capture).toHaveBeenCalledWith(false)
+    expect(harness.dependencies.capture).toHaveBeenCalledWith(false, 'hourly')
     expect(harness.dependencies.applyPreferences).not.toHaveBeenCalled()
   })
 
@@ -543,7 +601,7 @@ describe('Google sync controller settings', () => {
     harness.controller.setIncludeSecret(true)
     await harness.controller.syncNow()
     expect(harness.settings[0]?.preferences).toEqual([...theme('dark'), key])
-    expect(harness.dependencies.capture).toHaveBeenCalledWith(true)
+    expect(harness.dependencies.capture).toHaveBeenCalledWith(true, 'hourly')
   })
 })
 

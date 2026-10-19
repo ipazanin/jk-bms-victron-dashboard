@@ -1,35 +1,3 @@
-/**
- * The archive in three Maps.
- *
- * It exists so the recorder and the archive view can be tested without a database: everything
- * above the port is the code most likely to be wrong and least likely to be exercised, and a fake
- * with no dependency at all means every spec above this line runs in an environment where
- * `indexedDB` is genuinely undefined, and proves it needs none.
- *
- * It clones on write and on read, and that is not tidiness. A Map holding references would make
- * these tests structurally blind to the aliasing the seal copy exists to defeat: a chunk kept as a
- * view onto a staging buffer would look correct here and would be written to disk at full capacity
- * on every checkpoint by the real adapter, silently, with nothing to show for it but the budget.
- * structuredClone is also what the browser does to anything crossing into IndexedDB, so a value
- * that survives here survives there.
- *
- * Where it deliberately behaves like the adapter rather than like a convenient stub:
- *
- * - The archive counter moves only when a chunk seals and when a session closes, so a tail
- *   rewritten thirty times costs nothing and can never be double-counted.
- * - Pruning runs through the same pure plan the adapter executes, against the same stored
- *   protections, so the eviction policy is exercised rather than mocked away.
- * - `watch` never fires for this store's own writes. It stands in for a BroadcastChannel, which
- *   does not deliver to the context that posted; a fake that notified its own writer would let a
- *   refresh loop pass here and spin in the browser. `announce()` plays the part of the other tab.
- * - A chunk in a layout this build cannot read is handed to `readSession` unwindowed and kept out
- *   of `streamChunks`, exactly as the adapter does, so what the archive view counts as unreadable
- *   is the same set either store would give it.
- *
- * Two behaviours are injectable, both for failures the port has to survive and a Map never
- * produces on its own: `failNextCommitWith` and `delayNextOpenBy`.
- */
-
 import type {
   CommitOutcome,
   HistoryAvailability,
@@ -44,9 +12,11 @@ import type {
   StoredSession,
 } from '../../src/application/history/port'
 import { renderWindowFor } from '../../src/application/history/port'
-import { planPrune } from '../../src/domain/history/budget'
-import { isReadableLayout } from '../../src/domain/history/columns'
-import type { ChunkExtent, PruneCandidate, PrunePlan } from '../../src/domain/history/budget'
+import { planRawPrune, MAX_SESSIONS, MAX_SESSION_HOURS, COMPACT_RETENTION_MS, retainedCoverage } from '../../src/domain/history/budget'
+import type { SessionHour } from '../../src/domain/history/SessionHour'
+import { summarizeSessionHours } from '../../src/domain/history/summarizeSessionHours'
+import { localRawCapacityBytes } from '../../src/application/history/localCapacity'
+import { isReadableLayout, sampleBytes, decodePackChunk, decodeSolarChunk } from '../../src/domain/history/columns'
 import { deviceLabel } from '../../src/domain/history/identity'
 import { MAX_RING_READS_PER_DEVICE, planRingPrune } from '../../src/domain/history/ringBudget'
 import type { RingDeviceExtent } from '../../src/domain/history/ringBudget'
@@ -87,13 +57,10 @@ import type {
 } from '../../src/domain/history/types'
 
 export interface MemoryHistoryStoreOptions {
-  /** Wall clock for prune protection. Fixed by default, so no spec depends on the real one. */
+  readonly rawCapacityBytes?: () => number
+
   readonly now?: () => number
-  /**
-   * What the store says about itself. Overriding `usable` to false while it keeps storing is the
-   * only way to prove a caller refused to write for the right reason: a store that also stored
-   * nothing could not tell "refused" from "wrote and lost it".
-   */
+
   readonly availability?: Partial<HistoryAvailability>
 }
 
@@ -105,24 +72,23 @@ const USABLE: HistoryAvailability = {
   quotaBytes: null,
 }
 
-/** Late enough that a fixture written at the sample epoch is never accidentally stale. */
-const DEFAULT_NOW = Date.UTC(2025, 6, 12, 18, 44, 0)
-
+// Clone both sides of the port so tests cannot mutate stored records through shared references.
 export class MemoryHistoryStore implements HistoryStore {
   readonly availability: HistoryAvailability
 
+  private readonly hours = new Map<string, SessionHour>()
+  private readonly rawCapacityBytes: () => number
+  private readonly now: (() => number) | undefined
   private readonly sessions = new Map<SessionId, SessionRecord>()
   private readonly chunks = new Map<string, HistoryChunk>()
   private readonly devices = new Map<DeviceKey, DeviceRecord>()
   private readonly warnings = new Map<string, WarningRecord>()
-  /** Seq-ascending, dense. Its own Map, because ring rows and session rows share no budget, and one
-   *  Map for both formats because the adapter keeps them in one store for the same reason. */
+
   private readonly ringRows = new Map<DeviceKey, StoredRingRecord[]>()
-  /** Ascending by observedAt, capped. Keyed on it too, as the adapter's [deviceKey, observedAt] is. */
+
   private readonly ringReads = new Map<DeviceKey, StoredRingRead[]>()
   private readonly ringRetainedFrom = new Map<DeviceKey, number>()
   private readonly watchers = new Set<() => void>()
-  private readonly now: () => number
 
   private totalSamples = 0
   private viewedSessionId: SessionId | null = null
@@ -131,47 +97,32 @@ export class MemoryHistoryStore implements HistoryStore {
 
   constructor(options: MemoryHistoryStoreOptions = {}) {
     this.availability = { ...USABLE, ...options.availability }
-    this.now = options.now ?? (() => DEFAULT_NOW)
+    this.rawCapacityBytes = options.rawCapacityBytes ?? localRawCapacityBytes
+    this.now = options.now
   }
 
-  // ── injected failures ──────────────────────────────────────────────────────
-
-  /**
-   * Fails the next commit.
-   *
-   * A quota error or a transaction abort resolves to `{ stored: false }` carrying
-   * `'quota-exhausted'`, which is how the adapter reports a write it caught. Any other error is
-   * rejected instead, so a spec can prove the recorder's serial chain swallows the unexpected
-   * rather than throwing it back into a BLE frame handler.
-   */
   failNextCommitWith(error: Error): void {
     this.queuedCommitFailure = error
   }
 
-  /** Holds the next `openSession` open, so a commit racing it has somewhere to arrive early. */
   delayNextOpenBy(milliseconds: number): void {
     this.queuedOpenDelayMs = milliseconds
   }
 
-  /** What another tab's write would look like from here. */
   announce(): void {
     for (const watcher of [...this.watchers]) watcher()
   }
-
-  // ── writing ────────────────────────────────────────────────────────────────
 
   async openSession(record: SessionRecord): Promise<void> {
     const delayMs = this.queuedOpenDelayMs
     this.queuedOpenDelayMs = 0
     if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs))
 
-    // Re-opening an id keeps the counted rows the store already holds for it, so the archive
-    // total stays exactly the sum of the rows over the session rows that survive.
     const stored = this.sessions.get(record.id)
     this.put(stored === undefined ? record : { ...record, sealedSamples: stored.sealedSamples })
   }
 
-  async commitChunk(chunk: HistoryChunk, patch: SessionPatch): Promise<CommitOutcome> {
+  async commitChunk(chunk: HistoryChunk, patch: SessionPatch, hours: readonly SessionHour[] = []): Promise<CommitOutcome> {
     const failure = this.queuedCommitFailure
     if (failure !== null) {
       this.queuedCommitFailure = null
@@ -180,16 +131,19 @@ export class MemoryHistoryStore implements HistoryStore {
     }
 
     const stored = this.sessions.get(chunk.sessionId)
-    if (stored === undefined) return this.refusal(null)
+    if (stored === undefined || stored.state !== 'open') return this.refusal(null)
 
+    if (hours.some((hour) => hour.sessionId !== chunk.sessionId)) return this.refusal(null)
+    for (const hour of hours) this.hours.set(`${hour.sessionId}|${hour.hourStart}`, structuredClone(hour))
     const previous = this.chunks.get(keyOf(chunk))
     this.chunks.set(keyOf(chunk), structuredClone(chunk))
     const sealedDelta = countedRows(chunk) - countedRows(previous)
     this.totalSamples += sealedDelta
 
-    this.put({ ...stored, ...patch, sealedSamples: stored.sealedSamples + sealedDelta })
+    const { hourlyBasis, ...storedFields } = stored
+    this.put({ ...storedFields, ...patch, coverage: retainedCoverage(patch.coverage, stored.retainedFrom), ...(hours.length > 0 || hourlyBasis === 'recorded' ? { hourlyBasis: 'recorded' as const } : {}), sealedSamples: stored.sealedSamples + sealedDelta })
 
-    const executed = this.prune()
+    const executed = await this.prune(this.now?.() ?? patch.heartbeatAt)
     return {
       stored: true,
       totalSamples: this.totalSamples,
@@ -207,6 +161,7 @@ export class MemoryHistoryStore implements HistoryStore {
     this.put({
       ...stored,
       ...closure,
+      coverage: retainedCoverage(closure.coverage, stored.retainedFrom),
       state: 'closed',
       sealedSamples: stored.sealedSamples + sealed,
     })
@@ -228,9 +183,6 @@ export class MemoryHistoryStore implements HistoryStore {
   }
 
   async listWarnings(limit?: number): Promise<readonly WarningRecord[]> {
-    // Ties broken the way the adapter's byTime index breaks them on a 'prev' cursor: equal `at`
-    // falls back to descending primary key [sessionId, seq], so both stores select and order an
-    // equal-timestamp boundary identically.
     const newestFirst = [...this.warnings.values()].sort(
       (left, right) => right.at - left.at || compareWarningKeyDesc(left, right),
     )
@@ -239,15 +191,11 @@ export class MemoryHistoryStore implements HistoryStore {
   }
 
   async warningsInWindow(window: TimeWindow): Promise<readonly WarningRecord[]> {
-    // Bounded to [from, to] and ascending by `at`, as the adapter's byTime cursor over the same
-    // bound returns them — uncapped, so a wide range's tally is the whole window.
     return [...this.warnings.values()]
       .filter((warning) => warning.at >= window.from && warning.at <= window.to)
       .sort((left, right) => left.at - right.at || compareWarningKeyAsc(left, right))
       .map((warning) => structuredClone(warning))
   }
-
-  // ── reading ────────────────────────────────────────────────────────────────
 
   async listSessions(limit?: number): Promise<readonly SessionListing[]> {
     const newestFirst = [...this.sessions.values()].sort(
@@ -275,6 +223,7 @@ export class MemoryHistoryStore implements HistoryStore {
       pack: this.chunksOf(id, PACK_STREAM, view.window) as PackChunk[],
       solar: this.chunksOf(id, SOLAR_STREAM, view.window) as SolarChunk[],
       windowClamped: view.clamped,
+      hours: [...this.hours.values()].filter((hour) => hour.sessionId === id).map((hour) => structuredClone(hour)),
     }
   }
 
@@ -284,12 +233,8 @@ export class MemoryHistoryStore implements HistoryStore {
     window: TimeWindow,
     visit: (chunk: HistoryChunk) => void,
   ): Promise<void> {
-    // Cloned one at a time and never collected, so peak memory here is one chunk, as it is in the
-    // cursor this stands in for.
     for (const chunk of this.decodableChunksOf(id, stream, window)) visit(structuredClone(chunk))
   }
-
-  // ── devices ────────────────────────────────────────────────────────────────
 
   async upsertDevice(record: DeviceRecord): Promise<DeviceRecord> {
     const stored = this.devices.get(record.key)
@@ -299,15 +244,14 @@ export class MemoryHistoryStore implements HistoryStore {
         : {
             ...stored,
             ...record,
-            // Only renameDevice may clear the owner's name; a reconnect must not undo a rename.
+
             userLabel: record.userLabel ?? stored.userLabel,
-            // The same idiom, for the same reason: these two are the owner's answers about the
-            // pack's clock, and setPackClock alone may clear them.
+
             packUtcOffsetMinutes: record.packUtcOffsetMinutes ?? stored.packUtcOffsetMinutes,
             packClockAheadSeconds: record.packClockAheadSeconds ?? stored.packClockAheadSeconds,
             firstSeenAt: Math.min(stored.firstSeenAt, record.firstSeenAt),
             lastSeenAt: Math.max(stored.lastSeenAt, record.lastSeenAt),
-            // A hint the writer maintains; a device row never counts down.
+
             sessionCount: Math.max(stored.sessionCount, record.sessionCount),
           }
 
@@ -325,16 +269,6 @@ export class MemoryHistoryStore implements HistoryStore {
     return structuredClone(renamed)
   }
 
-  // ── what the devices themselves recorded ───────────────────────────────────
-
-  /**
-   * Folds one read in and journals it, as the adapter does it in one ring-scoped transaction.
-   *
-   * Nothing here touches `totalSamples`, a session row or a chunk. That is not an oversight to be
-   * tidied up later: the two budgets must not be able to evict each other, and a fake that folded
-   * ring rows into the sample counter would let a spec above the port pass on an arrangement the
-   * real adapter refuses to make.
-   */
   async appendRingSnapshot(snapshot: RingSnapshot): Promise<RingIngestOutcome> {
     const stored = this.ringRows.get(snapshot.deviceKey) ?? []
     const { rows, merge } = foldRingSnapshot(tailOf(stored), snapshot, snapshot.observedAt)
@@ -353,13 +287,6 @@ export class MemoryHistoryStore implements HistoryStore {
     }
   }
 
-  /**
-   * Folds one sweep in and journals it, as the adapter does it in one ring-scoped transaction.
-   *
-   * The whole ledger goes to the fold rather than a tail, exactly as the adapter passes it: a day is
-   * matched by its sequence number inside a neighbourhood in date, which a tail cut by row count
-   * could not describe.
-   */
   async appendSolarHistory(snapshot: SolarHistorySnapshot): Promise<SolarHistoryIngestOutcome> {
     const stored = this.ringRows.get(snapshot.deviceKey) ?? []
     const { rows, merge } = foldSolarHistorySnapshot(
@@ -382,7 +309,7 @@ export class MemoryHistoryStore implements HistoryStore {
     return {
       ...merge,
       stored: true,
-      // Every row under a controller's key is a day row, so the ledger's length is the day count.
+
       totalDays: (this.ringRows.get(snapshot.deviceKey) ?? []).length,
       prunedRecords,
       failure: null,
@@ -392,8 +319,7 @@ export class MemoryHistoryStore implements HistoryStore {
   async readRingLedger(deviceKey: DeviceKey): Promise<StoredRingLedger | null> {
     const rows = this.ringRows.get(deviceKey)
     const journal = this.ringReads.get(deviceKey)
-    // A read that answered nothing still has a journal row, and that row is the only evidence there
-    // is about it — so a ledger holding no record is still a ledger.
+
     if (rows === undefined && journal === undefined) return null
 
     const held = (rows ?? []).map((row) => structuredClone(row))
@@ -448,8 +374,6 @@ export class MemoryHistoryStore implements HistoryStore {
     this.dropRingLedger(deviceKey)
   }
 
-  // ── housekeeping ───────────────────────────────────────────────────────────
-
   async recover(now: number): Promise<{ readonly closed: number; readonly orphansRemoved: number }> {
     let closed = 0
     for (const record of [...this.sessions.values()]) {
@@ -457,7 +381,6 @@ export class MemoryHistoryStore implements HistoryStore {
       if (now - record.heartbeatAt < HEARTBEAT_STALE_MS) continue
 
       if (record.packSamples + record.solarSamples === 0) {
-        // A row that recorded nothing is a fabrication once its writer is gone.
         this.removeSession(record.id)
         continue
       }
@@ -484,6 +407,7 @@ export class MemoryHistoryStore implements HistoryStore {
       if (!this.sessions.has(warning.sessionId)) this.warnings.delete(key)
     }
 
+    await this.prune(now)
     return { closed, orphansRemoved }
   }
 
@@ -491,10 +415,12 @@ export class MemoryHistoryStore implements HistoryStore {
     readonly totalSamples: number
     readonly sessions: number
     readonly ringRecords: number
+    readonly rawBytes: number
+    readonly rawCapacityBytes: number
   }> {
     let ringRecords = 0
     for (const rows of this.ringRows.values()) ringRecords += rows.length
-    return { totalSamples: this.totalSamples, sessions: this.sessions.size, ringRecords }
+    return { totalSamples: this.totalSamples, sessions: this.sessions.size, ringRecords, rawBytes: this.rawBytes(), rawCapacityBytes: this.rawCapacityBytes() }
   }
 
   watch(onChanged: () => void): () => void {
@@ -511,8 +437,6 @@ export class MemoryHistoryStore implements HistoryStore {
   noteViewing(id: SessionId | null): void {
     this.viewedSessionId = id
   }
-
-  // ── internals ──────────────────────────────────────────────────────────────
 
   private put(record: SessionRecord): void {
     this.sessions.set(record.id, structuredClone(record))
@@ -539,11 +463,6 @@ export class MemoryHistoryStore implements HistoryStore {
     return stored === undefined ? null : structuredClone(stored)
   }
 
-  /**
-   * Every row the session holds, sealed at the instant it is asked for. The tail is the only
-   * unsealed chunk per stream, so this is what closing folds in — and it can only fold once,
-   * because after it the chunks are sealed and `countedRows` already counts them.
-   */
   private sealTails(id: SessionId): number {
     let folded = 0
     for (const [key, chunk] of this.chunks) {
@@ -564,87 +483,85 @@ export class MemoryHistoryStore implements HistoryStore {
     for (const [key, warning] of [...this.warnings]) {
       if (warning.sessionId === id) this.warnings.delete(key)
     }
+    for (const [key, hour] of this.hours) {
+      if (hour.sessionId === id) this.hours.delete(key)
+    }
     this.sessions.delete(id)
   }
 
-  private prune(): { prunedSessionIds: readonly SessionId[]; truncatedFrom: number | null } {
-    const plan = planPrune(this.pruneCandidates(), this.totalSamples, {
-      now: this.now(),
-      heartbeatStaleMs: HEARTBEAT_STALE_MS,
-      viewedSessionId: this.viewedSessionId,
-    })
-    return this.execute(plan)
-  }
-
-  private pruneCandidates(): PruneCandidate[] {
-    return [...this.sessions.values()].map((record) => ({
-      id: record.id,
-      startedAt: record.startedAt,
-      sealedSamples: record.sealedSamples,
-      state: record.state,
-      heartbeatAt: record.heartbeatAt,
-      chunks: this.extentsOf(record.id),
-    }))
-  }
-
-  private extentsOf(id: SessionId): ChunkExtent[] {
-    const extents: ChunkExtent[] = []
-    for (const chunk of this.chunks.values()) {
-      if (chunk.sessionId !== id) continue
-      extents.push({
-        stream: chunk.stream,
-        seq: chunk.seq,
-        length: chunk.length,
-        baseAt: chunk.baseAt,
-      })
+  async compactSession(id: SessionId): Promise<void> {
+    const record = this.sessions.get(id)
+    if (record === undefined || record.hourlyBasis === 'recorded' || (record.state === 'closed' && record.hourlyBasis === 'reconstructed')) return
+    const pack = [...this.chunks.values()].filter((chunk) => chunk.sessionId === id && chunk.stream === PACK_STREAM && isReadableLayout(chunk.layout)).flatMap((chunk) => decodePackChunk(chunk as PackChunk))
+    const solar = [...this.chunks.values()].filter((chunk) => chunk.sessionId === id && chunk.stream === SOLAR_STREAM && isReadableLayout(chunk.layout)).flatMap((chunk) => decodeSolarChunk(chunk as SolarChunk))
+    if (pack.length === 0 && solar.length === 0) return
+    for (const hour of summarizeSessionHours(id, pack, solar)) {
+      const key = `${id}|${hour.hourStart}`
+      const existing = this.hours.get(key)
+      const retainedFrom = this.sessions.get(id)?.retainedFrom
+      if (existing?.basis === 'recorded' || (existing !== undefined && retainedFrom != null && hour.hourStart < retainedFrom)) continue
+      this.hours.set(key, structuredClone(hour))
     }
-    return extents
+    this.put({ ...record, hourlyBasis: 'reconstructed' })
   }
 
-  private execute(plan: PrunePlan): {
-    prunedSessionIds: readonly SessionId[]
-    truncatedFrom: number | null
-  } {
-    for (const id of plan.evict) this.removeSession(id)
+  private rawBytes(): number {
+    let bytes = 0
+    for (const chunk of this.chunks.values()) bytes += chunk.length * sampleBytes(chunk.stream)
+    return bytes
+  }
 
-    const truncation = plan.truncate
-    if (truncation === null) return { prunedSessionIds: plan.evict, truncatedFrom: null }
-
-    for (const reference of truncation.dropChunks) {
-      const key = keyOf({ ...reference, sessionId: truncation.sessionId })
-      const chunk = this.chunks.get(key)
-      if (chunk === undefined) continue
+  private async prune(now: number): Promise<{ prunedSessionIds: readonly SessionId[]; truncatedFrom: number | null }> {
+    const plan = planRawPrune([...this.chunks.values()].filter((chunk) => isReadableLayout(chunk.layout)), this.rawBytes(), this.rawCapacityBytes())
+    const compacted = new Set<SessionId>()
+    let truncatedFrom: number | null = null
+    for (const reference of plan) {
+      const chunk = this.chunks.get(keyOf(reference))!
+      if (!compacted.has(chunk.sessionId)) {
+        await this.compactSession(chunk.sessionId)
+        compacted.add(chunk.sessionId)
+      }
+      let summarized = true
+      for (let index = 0; index < chunk.length; index += 1) {
+        const at = chunk.baseAt + chunk.offsetMs[index]!
+        const hour = this.hours.get(`${chunk.sessionId}|${Math.floor(at / 3_600_000) * 3_600_000}`)
+        if (hour === undefined || hour.from > at || hour.to < at) summarized = false
+      }
+      if (!summarized) continue
+      this.chunks.delete(keyOf(chunk))
       this.totalSamples -= countedRows(chunk)
-      this.chunks.delete(key)
     }
-
-    const stored = this.sessions.get(truncation.sessionId)
-    if (stored !== undefined) {
-      // The session says where its retained data really begins, so no view can imply it began
-      // where what survives begins.
-      this.put({
-        ...stored,
-        sealedSamples: Math.max(0, stored.sealedSamples - truncation.freedSamples),
-        retainedFrom: truncation.retainedFrom,
-      })
+    for (const id of compacted) {
+      const record = this.sessions.get(id)!
+      const remaining = [...this.chunks.values()].filter((chunk) => chunk.sessionId === id)
+      const retainedFrom = remaining.length > 0 ? Math.min(...remaining.map((chunk) => chunk.baseAt)) : record.endedAt ?? record.heartbeatAt
+      this.put({ ...record, sealedSamples: remaining.reduce((count, chunk) => count + countedRows(chunk), 0), retainedFrom, coverage: retainedCoverage(record.coverage, retainedFrom) })
+      truncatedFrom = retainedFrom
     }
-
-    return { prunedSessionIds: plan.evict, truncatedFrom: truncation.retainedFrom }
+    for (const hour of [...this.hours.values()].sort((left, right) => left.hourStart - right.hourStart)) {
+      if (this.hours.size <= MAX_SESSION_HOURS && hour.hourStart >= now - COMPACT_RETENTION_MS) break
+      const overlapsRaw = [...this.chunks.values()].some((chunk) => chunk.sessionId === hour.sessionId &&
+        (!isReadableLayout(chunk.layout) || (chunk.baseAt < hour.hourStart + 3_600_000 && chunk.baseAt + chunk.offsetMs[chunk.length - 1]! >= hour.hourStart)))
+      if (!overlapsRaw) this.hours.delete(`${hour.sessionId}|${hour.hourStart}`)
+    }
+    const prunedSessionIds: SessionId[] = []
+    const oldest = [...this.sessions.values()].sort((left, right) => left.startedAt - right.startedAt)
+    for (const record of oldest) {
+      if (this.sessions.size <= MAX_SESSIONS && this.hours.size <= MAX_SESSION_HOURS) break
+      if (record.state === 'open' || record.id === this.viewedSessionId || now - record.heartbeatAt < HEARTBEAT_STALE_MS) continue
+      if (this.sessions.size <= MAX_SESSIONS && ![...this.hours.values()].some((hour) => hour.sessionId === record.id)) continue
+      this.removeSession(record.id)
+      prunedSessionIds.push(record.id)
+    }
+    return { prunedSessionIds, truncatedFrom }
   }
 
-  /**
-   * What a session read hands over: the chunks the window touches, plus every chunk in a layout
-   * this build has no reader for. An unreadable chunk is never tested against the window — placing
-   * it in time means indexing its offsets, which is the read the gate exists to refuse — and
-   * dropping it here is what would report a session full of rows as one holding none.
-   */
   private chunksOf(id: SessionId, stream: StreamName, window: TimeWindow): HistoryChunk[] {
     return this.streamOf(id, stream)
       .filter((chunk) => !isReadableLayout(chunk.layout) || overlaps(chunk, window))
       .map((chunk) => structuredClone(chunk))
   }
 
-  /** What the export may draw rows from, which is nothing an unreadable chunk holds. */
   private decodableChunksOf(id: SessionId, stream: StreamName, window: TimeWindow): HistoryChunk[] {
     return this.streamOf(id, stream).filter(
       (chunk) => isReadableLayout(chunk.layout) && overlaps(chunk, window),
@@ -657,8 +574,6 @@ export class MemoryHistoryStore implements HistoryStore {
       .sort((left, right) => left.seq - right.seq)
   }
 
-  /** What the session covers on the wall clock, from the rows it actually holds — which excludes
-   *  the chunks whose rows this build cannot place in time. */
   private spanOf(record: SessionRecord): TimeWindow {
     let from = record.startedAt
     let to = record.endedAt ?? record.startedAt
@@ -672,13 +587,6 @@ export class MemoryHistoryStore implements HistoryStore {
     return { from, to: Math.max(from, to) }
   }
 
-  /**
-   * One journal row per read, whatever the read established.
-   *
-   * Keyed on `observedAt`, so two reads at the same millisecond collide into one exactly as they do
-   * under the adapter's `[deviceKey, observedAt]` key path — a fake that kept both would hide a
-   * clash the real store cannot.
-   */
   private journal(
     snapshot: RingSnapshot,
     merge: RingMergeOutcome,
@@ -707,7 +615,6 @@ export class MemoryHistoryStore implements HistoryStore {
     this.fileReceipt(row)
   }
 
-  /** One journal row per sweep, in the same store and under the same cap as a pack's read. */
   private journalSolarSweep(snapshot: SolarHistorySnapshot, merge: SolarMergeOutcome): void {
     this.fileReceipt({
       deviceKey: snapshot.deviceKey,
@@ -741,7 +648,6 @@ export class MemoryHistoryStore implements HistoryStore {
     this.ringReads.set(row.deviceKey, kept.slice(-MAX_RING_READS_PER_DEVICE))
   }
 
-  /** Carries out what `planRingPrune` decided, and answers with the rows it gave up. */
   private pruneRing(): number {
     const plan = planRingPrune(this.ringExtents())
     let freed = 0
@@ -754,10 +660,7 @@ export class MemoryHistoryStore implements HistoryStore {
     for (const eviction of plan.trim) {
       const rows = this.ringRows.get(eviction.deviceKey) ?? []
       const kept = rows.filter((row) => row.seq >= eviction.fromSeq)
-      // The surviving pack record declares the break, exactly as `retainedFrom` does for a truncated
-      // session: what came before it is gone, and nothing may read the ledger as contiguous across
-      // it. A day record carries no such field and needs none — a calendar-keyed row states its own
-      // position, so a hole in a controller's ledger is visible as a missing date.
+
       const oldest = kept[0]
       if (oldest !== undefined && isPackRecordRow(oldest)) {
         kept[0] = { ...oldest, followsGap: true }
@@ -782,7 +685,6 @@ export class MemoryHistoryStore implements HistoryStore {
     })
   }
 
-  /** Every pack with a ledger or a journal, which is every pack a read was ever filed against. */
   private ringDeviceKeys(): DeviceKey[] {
     return [...new Set([...this.ringRows.keys(), ...this.ringReads.keys()])]
   }
@@ -813,31 +715,23 @@ function keyOf(chunk: ChunkKey): string {
   return `${chunk.sessionId}|${chunk.stream}|${chunk.seq}`
 }
 
-/** Where the event code sits in a record, and the value that means "nothing happened". */
 const EVENT_CODE_BYTE = 4
 const SCHEDULED_SAMPLE = 0
 
-/** The tail carries pack records only; the next seq counts from the newest row of any format, as
- *  the adapter's does, so no two rows under one key can ever be handed the same one. */
 function tailOf(rows: readonly StoredRingRecord[]): RingLedgerTail {
   const packRecords = packRecordsIn(rows)
   return {
-    // A ledger whose head was pruned still hands out seq above everything it ever stored; one
-    // emptied outright starts again at zero, because nothing is left to count from.
     nextSeq: rows.length === 0 ? 0 : rows[rows.length - 1].seq + 1,
     rows: packRecords.slice(-ALIGNMENT_TAIL_RECORDS),
   }
 }
 
-/** Which radio a ledger belongs to, read off a row it holds rather than off a device row it may
- *  outlive. */
 function ledgerKindOf(row: StoredRingRecord | null, read: StoredRingRead | null): 'pack' | 'solar' {
   if (row !== null) return isSolarDayRow(row) ? 'solar' : 'pack'
   if (read !== null && isSolarReadRow(read)) return 'solar'
   return 'pack'
 }
 
-/** The pack clock a row carries, or zero for a row that keeps no clock face. */
 function packClockFaceOf(row: StoredRingRecord | null): number {
   return row !== null && isPackRecordRow(row) ? row.packClockSeconds : 0
 }
@@ -860,12 +754,6 @@ function indexSpanOf(snapshot: RingSnapshot): { readonly from: number; readonly 
   return from === null || to === null ? null : { from, to }
 }
 
-/**
- * The newest scheduled record the read carried — the read's one clock anchor.
- *
- * Newest by ring index rather than by counter: after a backward rewrite the counter runs down, and
- * the whole point of the anchor is to place the read against the face in force at the time.
- */
 function newestScheduledRecord(snapshot: RingSnapshot): Uint8Array | null {
   let newestIndex = Number.NEGATIVE_INFINITY
   let newest: Uint8Array | null = null
@@ -884,14 +772,6 @@ function newestScheduledRecord(snapshot: RingSnapshot): Uint8Array | null {
   return newest
 }
 
-/**
- * Where the anchor landed in the ledger, found by matching the bytes from the newest end.
- *
- * Adjacent records are byte-identical often enough that this can land on either half of such a
- * pair. Both halves carry the same counter and sit in the same clock segment, so which one is
- * named changes nothing the field is read for; and a run of identical rows is indistinguishable by
- * construction, so there is no better answer to be had.
- */
 function seqOfBytes(ledger: readonly RingRecordRow[], bytes: Uint8Array): number | null {
   for (let at = ledger.length - 1; at >= 0; at -= 1) {
     if (sameBytes(ledger[at].bytes, bytes)) return ledger[at].seq
@@ -911,19 +791,16 @@ function counterIn(bytes: Uint8Array): number {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true)
 }
 
-/** Descending [sessionId, seq], matching how a 'prev' cursor on the byTime index breaks equal-`at`. */
 function compareWarningKeyDesc(left: WarningRecord, right: WarningRecord): number {
   if (left.sessionId !== right.sessionId) return left.sessionId > right.sessionId ? -1 : 1
   return right.seq - left.seq
 }
 
-/** Ascending [sessionId, seq], matching how a forward cursor on the byTime index breaks equal-`at`. */
 function compareWarningKeyAsc(left: WarningRecord, right: WarningRecord): number {
   if (left.sessionId !== right.sessionId) return left.sessionId > right.sessionId ? 1 : -1
   return left.seq - right.seq
 }
 
-/** Rows the archive counter has been told about. An unsealed tail has told it nothing yet. */
 function countedRows(chunk: HistoryChunk | undefined): number {
   if (chunk === undefined || !chunk.sealed) return 0
   return chunk.length
@@ -942,13 +819,6 @@ function overlaps(chunk: HistoryChunk, window: TimeWindow): boolean {
   return firstSampleAt(chunk) <= window.to && lastSampleAt(chunk) >= window.from
 }
 
-/**
- * Whether the adapter would have caught this rather than let it out.
- *
- * A full disk arrives as a quota error on the request, and Chromium can also surface it at commit
- * time as a bare abort with no request error at all — which is why both names are named here and
- * why the port carries exactly one write-failure reason for the pair of them.
- */
 function isCaughtWriteFailure(error: Error): boolean {
   return error.name === 'QuotaExceededError' || error.name === 'AbortError'
 }

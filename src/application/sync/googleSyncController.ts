@@ -5,7 +5,7 @@ import type { CloudArchiveRevision } from '../../domain/sync/CloudArchiveRevisio
 import type { CloudSettingsRevision } from '../../domain/sync/CloudSettingsRevision'
 import { createSettingsRevision, settingsHeads, sharedPreferences } from '../../domain/sync/sharedSettings'
 import { validateCloudCatalog } from '../../domain/sync/syncValidation'
-import { publishArchive, downloadArchive } from './archiveSync'
+import { publishArchive, downloadArchive, retireSourceCopies } from './archiveSync'
 import type { GoogleSyncDependencies } from './GoogleSyncDependencies'
 
 const RECORDING_PUBLISH_INTERVAL_MS = 60 * 60_000
@@ -70,7 +70,7 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
   }
 
   function canSyncAutomatically(): boolean {
-    return active && enabled.value && autoSync.value && connected.value && workspace.value !== null
+    return active && enabled.value && autoSync.value && connected.value && workspace.value?.version === 2
       && navigator.onLine && document.visibilityState === 'visible'
   }
 
@@ -184,6 +184,7 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
       signal.throwIfAborted()
       switchWorkspace(selected)
       revisions.value = catalog.archives
+      if (catalog.unreadableArchives) failure.value = unreadableArchiveMessage(catalog.unreadableArchives)
     })
   }
 
@@ -198,25 +199,33 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
       workspaces.value = [...workspaces.value.filter((candidate) => candidate.id !== selected.id), selected]
       switchWorkspace(selected)
       revisions.value = catalog.archives
+      if (catalog.unreadableArchives) failure.value = unreadableArchiveMessage(catalog.unreadableArchives)
     })
   }
 
   async function syncNow(automatic = false, recordingEnded = false): Promise<void> {
     await run(async (signal) => {
       const selected = requireWorkspace()
+      if (selected.version !== 2) throw new Error('This legacy workspace is read-only. Open its saved history or create a compact workspace to sync.')
       const sourceId = dependencies.sourceId()
       if (!sourceId) throw new Error('The archive is not ready yet.')
-      // Capturing reads the whole archive, so the minute timer uploads a recording in progress only hourly.
+      let retentionFailure: string | null = null
       const deferred = automatic && !recordingEnded && dependencies.recording() && lastPublishedAt !== null
         && dependencies.now() - lastPublishedAt < RECORDING_PUBLISH_INTERVAL_MS
       if (!deferred) {
         progress.value = 'Reading this browser archive…'
-        const captured = await dependencies.capture(includeSecret.value)
+        const captured = await dependencies.capture(includeSecret.value, 'hourly')
         signal.throwIfAborted()
         const snapshot = sourceLabel.value ? { ...captured, source: { ...captured.source, label: sourceLabel.value } } : captured
         await publishArchive(snapshot, selected, dependencies.remote, signal, (message) => { progress.value = message })
         signal.throwIfAborted()
         lastPublishedAt = dependencies.now()
+        try {
+          await retireSourceCopies(sourceId, selected, dependencies.remote, signal)
+        } catch (error) {
+          if (signal.aborted) throw error
+          retentionFailure = describe(error)
+        }
       }
       const catalog = await dependencies.remote.readCatalog(selected, signal)
       validateCloudCatalog(catalog)
@@ -248,7 +257,11 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
       if (conflicts.value.length) notice.value = 'History synced. Choose which shared settings to keep.'
       else if (deferred) notice.value = 'Settings and other devices synced. This browser’s recording uploads hourly while it records.'
       else notice.value = 'History and shared settings synced.'
-      if (unreadable.length) failure.value = `History from ${unreadable.join(', ')} could not be downloaded. The next sync tries again.`
+      const problems: string[] = []
+      if (catalog.unreadableArchives) problems.push(unreadableArchiveMessage(catalog.unreadableArchives))
+      if (unreadable.length) problems.push(`History from ${unreadable.join(', ')} could not be downloaded. The next sync tries again.`)
+      if (retentionFailure) problems.push(`History was uploaded, but old cloud copies could not be removed. ${retentionFailure} The next upload tries cleanup again.`)
+      if (problems.length) failure.value = problems.join(' ')
     }, automatic ? 'automatic' : 'manual')
   }
 
@@ -341,6 +354,7 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
   async function resolveSettings(choice: string): Promise<void> {
     await run(async (signal) => {
       const selected = requireWorkspace()
+      if (selected.version !== 2) throw new Error('This legacy workspace is read-only. Create a compact workspace to share settings.')
       if (conflicts.value.length === 0) throw new Error('Sync first to check the current cloud settings.')
       const expected = JSON.stringify(conflicts.value)
       const catalog = await dependencies.remote.readCatalog(selected, signal)
@@ -480,4 +494,8 @@ function samePreferences(left: readonly ArchivePreference[], right: readonly Arc
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : 'Google sync failed. Try again when the connection is available.'
+}
+
+function unreadableArchiveMessage(count: number): string {
+  return `${count} cloud archive files could not be read and were left untouched. Other saved copies remain available.`
 }

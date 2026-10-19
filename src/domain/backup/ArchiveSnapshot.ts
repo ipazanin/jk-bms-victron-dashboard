@@ -4,7 +4,7 @@ import type { ArchiveStores } from './ArchiveStores'
 
 export interface ArchiveSnapshot {
   readonly format: 'shunt-archive'
-  readonly version: 1
+  readonly version: 1 | 2
   readonly exportedAt: number
   readonly source: ArchiveSource
   readonly stores: ArchiveStores

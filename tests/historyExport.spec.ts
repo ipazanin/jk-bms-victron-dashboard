@@ -5,7 +5,6 @@ import {
   EXPORT_FORMAT_VERSION,
   PACK_COLUMNS,
   SOLAR_COLUMNS,
-  estimateExportBytes,
   exportFileName,
   exportSessionParts,
 } from '../src/domain/history/exportDocument'
@@ -20,10 +19,6 @@ import {
   sessionRecord,
   solarSamples,
 } from './support/samples'
-
-// On iOS the export is the only durable copy of a session, so the file has to stand on its own
-// years later with no page to open it. Everything here is about that: what it says about itself,
-// and what it refuses to invent.
 
 const GENERATED_AT = SAMPLE_EPOCH + 12 * 3_600_000
 
@@ -62,8 +57,6 @@ function documentFor(overrides: Partial<SessionExport> = {}): ExportedDocument {
 
 describe('the document says what it is', () => {
   it('names its own format and version rather than the app version', () => {
-    // A reader gates on this. The app version moves for reasons that have nothing to do with the
-    // file.
     const document = documentFor()
 
     expect(document.format).toBe(EXPORT_FORMAT)
@@ -95,8 +88,6 @@ describe('the document says what it is', () => {
 
 describe('what the document refuses to carry', () => {
   it('has no house column anywhere, in either stream', () => {
-    // house = solar − pack is derived on read. Storing it would freeze today's noise floor into a
-    // file that outlives it, and a corrected floor could never reach the sessions already written.
     const document = documentFor()
     const names = [
       ...document.streams.pack.columns.map((column) => column.name),
@@ -108,7 +99,6 @@ describe('what the document refuses to carry', () => {
   })
 
   it('names the columns once instead of repeating them on every row', () => {
-    // Thirteen field names forty thousand times quadruples the file for no information.
     const document = documentFor()
 
     expect(Array.isArray(document.streams.pack.rows[0])).toBe(true)
@@ -143,8 +133,6 @@ describe('the rows', () => {
   })
 
   it('parses back after being built one row at a time', () => {
-    // The document is emitted in parts because a whole session is millions of characters, and
-    // JSON.stringify over a hydrated array would hold the objects and the string at once.
     const parts = [...exportSessionParts({
       record: sessionRecord(),
       packDevice: null,
@@ -164,7 +152,6 @@ describe('the rows', () => {
 
 describe('the ledger travels twice', () => {
   it('carries the account the recorder folded and the one a rescan reproduces', () => {
-    // So a reader can check the account rather than take it.
     const document = documentFor()
 
     expect(document.ledger.stored).toBeTruthy()
@@ -173,15 +160,12 @@ describe('the ledger travels twice', () => {
   })
 
   it('carries no recomputed ledger when the rows are a window rather than the whole session', () => {
-    // A ledger recomputed over part of a session is not a check on the one folded over all of it.
     expect(documentFor({ recomputedLedger: null }).ledger.recomputed).toBeNull()
   })
 })
 
 describe('the session metadata', () => {
   it('says where the retained data starts when the head was pruned', () => {
-    // An exported file must never imply a session starts where the session started when what
-    // survives begins two hours later.
     const document = documentFor({
       record: sessionRecord({ retainedFrom: SAMPLE_EPOCH + 2 * 3_600_000 }),
     })
@@ -190,8 +174,6 @@ describe('the session metadata', () => {
   })
 
   it('carries both the name the owner chose and the one that was derived', () => {
-    // A file carrying only "Starboard bank" would lose which pack that was; one carrying only the
-    // model would lose the name.
     const document = documentFor()
 
     expect(document.devices.pack?.label).toBe('Starboard bank')
@@ -203,8 +185,6 @@ describe('the session metadata', () => {
 
 describe('the file the owner ends up with', () => {
   it('is named for the device and the local start of the watch', () => {
-    // A downloads folder sorts by name, and those two together are what tells one watch from
-    // another.
     const startedAt = new Date(2025, 6, 12, 6, 20, 0).getTime()
 
     expect(exportFileName('Starboard bank', startedAt)).toBe(
@@ -220,11 +200,4 @@ describe('the file the owner ends up with', () => {
     expect(exportFileName('!!!', startedAt)).toBe('shunt-2025-07-12-0620.json')
   })
 
-  it('estimates its size from the row counts, as an answer and never as a budget', () => {
-    const small = estimateExportBytes(100, 100)
-    const large = estimateExportBytes(100_000, 100_000)
-
-    expect(large).toBeGreaterThan(small)
-    expect(estimateExportBytes(0, 0)).toBeGreaterThan(0)
-  })
 })
