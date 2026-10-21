@@ -2,6 +2,7 @@ import type { ArchivePreference } from '../../domain/backup/ArchivePreference'
 import type { ArchiveSnapshot } from '../../domain/backup/ArchiveSnapshot'
 import type { CloudWorkspace } from '../../domain/sync/CloudWorkspace'
 import type { ImportedArchive } from '../backup/ImportedArchive'
+import type { GoogleDriveFolder } from './GoogleDriveFolder'
 import type { GoogleSyncState } from './GoogleSyncState'
 import type { SyncRemote } from './SyncRemote'
 
@@ -15,7 +16,8 @@ export interface GoogleSyncDependencies {
   forgetAccess(): void
   subscribeAccess(listener: (connected: boolean) => void): () => void
   listWorkspaces(signal: AbortSignal): Promise<readonly CloudWorkspace[]>
-  createWorkspace(name: string, signal: AbortSignal): Promise<CloudWorkspace>
+  chooseFolder(signal: AbortSignal): Promise<GoogleDriveFolder | null>
+  createWorkspace(name: string, parentFolderId: string, signal: AbortSignal): Promise<CloudWorkspace>
   chooseWorkspace(signal: AbortSignal): Promise<CloudWorkspace | null>
   trashWorkspace(workspace: CloudWorkspace, signal: AbortSignal): Promise<void>
   capture(includeSecret: boolean, detail?: 'complete' | 'hourly'): Promise<ArchiveSnapshot>

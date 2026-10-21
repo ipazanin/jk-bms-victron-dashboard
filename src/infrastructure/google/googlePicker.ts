@@ -23,7 +23,7 @@ export function prepareGooglePicker(): Promise<void> {
   return prepared
 }
 
-export async function pickGoogleSpreadsheet(signal: AbortSignal): Promise<{ id: string, name: string } | null> {
+export async function pickGoogleFolder(signal: AbortSignal): Promise<{ id: string, name: string } | null> {
   signal.throwIfAborted()
   const configuration = googleConfig()
   if (!configuration) throw new Error('Google sync is not configured for this app.')
@@ -32,8 +32,10 @@ export async function pickGoogleSpreadsheet(signal: AbortSignal): Promise<{ id: 
   const accessToken = googleAccessToken()
   const pickerApi = (globalThis as unknown as { google: { picker: GooglePickerApi } }).google.picker
   if (!pickerApi) throw new Error('Google file picker could not load. Reload the page and try again.')
-  const view = new pickerApi.DocsView(pickerApi.ViewId.SPREADSHEETS)
-  view.setMimeTypes('application/vnd.google-apps.spreadsheet')
+  const view = new pickerApi.DocsView(pickerApi.ViewId.FOLDERS)
+  view.setMimeTypes('application/vnd.google-apps.folder')
+  view.setIncludeFolders(true)
+  view.setSelectFolderEnabled(true)
   return new Promise((resolve, reject) => {
     let picker: { setVisible(visible: boolean): void, dispose(): void } | undefined
     function close() {
@@ -64,11 +66,11 @@ export async function pickGoogleSpreadsheet(signal: AbortSignal): Promise<{ id: 
           close()
           const document = response[pickerApi.Response.DOCUMENTS]?.[0]
           const id = document?.[pickerApi.Document.ID]
-          if (!id || document?.[pickerApi.Document.MIME_TYPE] !== 'application/vnd.google-apps.spreadsheet') {
-            reject(new Error('Select a Google spreadsheet to open an archive.'))
+          if (!id || document?.[pickerApi.Document.MIME_TYPE] !== 'application/vnd.google-apps.folder') {
+            reject(new Error('Select a Google Drive folder.'))
             return
           }
-          resolve({ id, name: document[pickerApi.Document.NAME] || 'Google archive' })
+          resolve({ id, name: document[pickerApi.Document.NAME] || 'Google Drive folder' })
         }
       })
       .build()

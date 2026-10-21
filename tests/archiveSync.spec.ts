@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { publishArchive, downloadArchive, retireSourceCopies } from '../src/application/sync/archiveSync'
+import { downloadArchive } from '../src/application/sync/archiveSync'
 import { compactCloudArchive } from '../src/application/sync/compactCloudArchive'
 import { compressArchiveBytes } from '../src/application/backup/archiveCompression'
 import type { SyncRemote } from '../src/application/sync/SyncRemote'
@@ -9,12 +9,11 @@ import ring from './fixtures/ringLedger.json'
 import type { ArchiveSnapshot } from '../src/domain/backup/ArchiveSnapshot'
 import type { CloudSnapshotRevision } from '../src/domain/sync/CloudSnapshotRevision'
 import type { LegacyCloudArchiveRevision } from '../src/domain/sync/LegacyCloudArchiveRevision'
-import type { CloudSettingsRevision } from '../src/domain/sync/CloudSettingsRevision'
+import type { CloudCatalog } from '../src/domain/sync/CloudCatalog'
+import { decodeCloudWorkspace, encodeCloudWorkspace, mergeCloudCatalogs, updateCloudWorkspace } from '../src/application/sync/cloudWorkspaceJson'
 import { encodeArchiveValue } from '../src/domain/backup/archiveCodec'
 import { summarizeSessionHours } from '../src/domain/history/summarizeSessionHours'
 import { deviceRecord, packChunk, packSamples, SAMPLE_EPOCH, sessionRecord, warningRecord } from './support/samples'
-
-const workspace = { id: 'sheet', name: 'Boat', folderId: 'folder', version: 2 as const }
 
 function snapshot(): ArchiveSnapshot {
   return {
@@ -31,190 +30,102 @@ function snapshot(): ArchiveSnapshot {
 }
 
 function setup() {
-  const archives: CloudSnapshotRevision[] = []
-  const settings: CloudSettingsRevision[] = []
-  const pending: CloudSnapshotRevision[] = []
   const files = new Map<string, Uint8Array>()
-  const calls: string[] = []
-  const controller = new AbortController()
-  let sequence = 0
   const remote = {
-    readCatalog: vi.fn(async () => ({ archives: [...archives].sort((left, right) => left.createdAt - right.createdAt), settings })),
-    listPendingSnapshots: vi.fn(async (_workspace, sourceId) => pending.filter((revision) => revision.source.id === sourceId)),
-    uploadSnapshot: vi.fn(async (_workspace, bytes, description) => {
-      const revision = { ...description, snapshotFileId: `file-${sequence}`, createdAt: SAMPLE_EPOCH + sequence++ }
-      calls.push('upload')
-      files.set(revision.snapshotFileId, new Uint8Array(bytes))
-      pending.push(revision)
-      return revision
-    }),
-    downloadBlock: vi.fn(async (fileId, maxBytes) => {
-      calls.push('verify')
-      const bytes = files.get(fileId)
-      if (bytes === undefined) throw new Error('Missing archive file')
-      if (bytes.byteLength > maxBytes) throw new Error('Download too large')
+    readCatalog: vi.fn(async () => ({ archives: [], settings: [], documents: [] })),
+    writeCatalog: vi.fn(async (_workspace, catalog) => catalog),
+    downloadBlock: vi.fn(async (id: string) => {
+      const bytes = files.get(id)
+      if (!bytes) throw new Error('Missing archive file')
       return bytes
     }),
-    completeSnapshot: vi.fn(async (_workspace, revision) => {
-      calls.push('publish')
-      if (!archives.some((copy) => copy.id === revision.id)) archives.push(revision)
-      const index = pending.findIndex((copy) => copy.id === revision.id)
-      if (index !== -1) pending.splice(index, 1)
-    }),
-    deleteSnapshot: vi.fn(async (_workspace, revision, sourceId) => {
-      if (revision.source.id !== sourceId) throw new Error('Foreign source')
-      calls.push('delete')
-      const index = archives.findIndex((copy) => copy.id === revision.id)
-      if (index !== -1) archives.splice(index, 1)
-      files.delete(revision.snapshotFileId)
-      const pendingIndex = pending.findIndex((copy) => copy.id === revision.id)
-      if (pendingIndex !== -1) pending.splice(pendingIndex, 1)
-    }),
-    appendSettings: vi.fn(async (_workspace, revision) => { settings.push(revision) }),
   } satisfies SyncRemote
-  return { remote, archives, pending, files, calls, controller, signal: controller.signal }
+  return { remote, files, signal: new AbortController().signal }
 }
 
-describe('self-contained compact cloud copies', () => {
-  it('uploads and verifies a complete compact archive before publishing it', async () => {
-    const { remote, signal, calls } = setup()
-    const original = snapshot()
-    const revision = await publishArchive(original, workspace, remote, signal)
-    expect(calls).toEqual(['upload', 'verify', 'publish'])
-    expect(revision).toMatchObject({ storage: 'snapshot', source: original.source, sessions: 1, samples: 0, hours: 1 })
-    expect(await downloadArchive(revision, remote, signal)).toEqual(compactCloudArchive(original))
-  })
+const empty: CloudCatalog = { archives: [], settings: [], documents: [] }
 
-  it('refuses legacy workspace uploads without reading or changing its catalogue', async () => {
+describe('plain JSON cloud history', () => {
+  it('stores compact history and shared settings together in one ordinary JSON file', async () => {
+    const settings = { id: 'settings', sourceId: 'tablet', createdAt: SAMPLE_EPOCH, parents: [], preferences: [{ key: 'shunt.theme' as const, value: 'light' }] }
+    const catalog = await updateCloudWorkspace(empty, snapshot(), settings)
+    const encoded = encodeCloudWorkspace(catalog, 'publication')
+    expect(encoded).toHaveLength(1)
+    expect(JSON.parse(new TextDecoder().decode(encoded[0])).format).toBe('shunt-cloud-workspace')
+    const restored = await decodeCloudWorkspace(encoded)
+    expect(restored.settings).toEqual([settings])
     const { remote, signal } = setup()
-    await expect(publishArchive(snapshot(), { ...workspace, version: 1 }, remote, signal)).rejects.toThrow('legacy workspace is read-only')
-    expect(remote.readCatalog).not.toHaveBeenCalled()
-    expect(remote.uploadSnapshot).not.toHaveBeenCalled()
+    expect(await downloadArchive(restored.archives[0]!, remote, signal)).toEqual(compactCloudArchive(snapshot()))
+    expect(remote.downloadBlock).not.toHaveBeenCalled()
   })
 
-  it('requires hourly preparation before publishing a legacy snapshot', async () => {
-    const { remote, signal } = setup()
-    const { hours: _hours, ...stores } = snapshot().stores
-    await expect(publishArchive({ ...snapshot(), version: 1, stores }, workspace, remote, signal)).rejects.toThrow('prepare hourly history')
-    expect(remote.uploadSnapshot).not.toHaveBeenCalled()
+  it('returns the loaded catalog unchanged when capture time is the only change', async () => {
+    const catalog = await updateCloudWorkspace(empty, snapshot())
+    expect(await updateCloudWorkspace(catalog, { ...snapshot(), exportedAt: SAMPLE_EPOCH + 1000 })).toBe(catalog)
   })
 
-  it('does not upload another copy when only capture time or raw chunks changed', async () => {
-    const { remote, signal } = setup()
+  it('keeps three source revisions inside the document and preserves another source', async () => {
     const original = snapshot()
-    const first = await publishArchive(original, workspace, remote, signal)
-    remote.uploadSnapshot.mockClear()
-    const second = await publishArchive({ ...original, exportedAt: original.exportedAt + 1000 }, workspace, remote, signal)
-    expect(second).toEqual(first)
-    expect(remote.uploadSnapshot).not.toHaveBeenCalled()
-    expect(remote.completeSnapshot).toHaveBeenCalledTimes(1)
-  })
-
-  it('keeps earlier copies readable after the current local archive was pruned', async () => {
-    const { remote, signal } = setup()
-    const original = snapshot()
-    const first = await publishArchive(original, workspace, remote, signal)
-    const pruned: ArchiveSnapshot = { ...original, exportedAt: original.exportedAt + 1000, stores: { sessions: [], chunks: [], hours: [], devices: [], meta: [], warnings: [], ringRecords: [], ringReads: [] } }
-    const second = await publishArchive(pruned, workspace, remote, signal)
-    expect(await downloadArchive(first, remote, signal)).toEqual(compactCloudArchive(original))
-    expect(await downloadArchive(second, remote, signal)).toEqual(compactCloudArchive(pruned))
-  })
-
-  it('keeps the latest three copies of this source and leaves other sources intact', async () => {
-    const { remote, archives, signal, files } = setup()
-    const original = snapshot()
-    const foreign = await publishArchive({ ...original, source: { id: 'phone', label: 'Phone' } }, workspace, remote, signal)
-    const own: CloudSnapshotRevision[] = []
+    let catalog = await updateCloudWorkspace(empty, { ...original, source: { id: 'phone', label: 'Phone' } })
     for (let index = 0; index < 5; index++) {
-      own.push(await publishArchive({ ...original, exportedAt: original.exportedAt - index * 1000, source: { ...original.source, label: `Boat ${index}` } }, workspace, remote, signal))
+      catalog = await updateCloudWorkspace(catalog, { ...original, source: { ...original.source, label: `Tablet ${index}` } })
     }
-    await retireSourceCopies(original.source.id, workspace, remote, signal)
-    expect(archives.map((revision) => revision.id)).toEqual([foreign.id, ...own.slice(-3).map((revision) => revision.id)])
-    expect(files.has(foreign.snapshotFileId)).toBe(true)
-    expect(remote.deleteSnapshot).toHaveBeenCalledTimes(2)
-    expect(await downloadArchive(own.at(-1)!, remote, signal)).toMatchObject({ exportedAt: original.exportedAt - 4000 })
+    expect(catalog.archives.map((revision) => revision.source.label)).toEqual(['Phone', 'Tablet 2', 'Tablet 3', 'Tablet 4'])
+    expect(await decodeCloudWorkspace(encodeCloudWorkspace(catalog, 'retained'))).toMatchObject({ archives: catalog.archives })
   })
 
-  it('retries interrupted retirement without removing surviving copies', async () => {
-    const { remote, archives, signal } = setup()
-    for (let index = 0; index < 5; index++) {
-      await publishArchive({ ...snapshot(), source: { id: 'tablet', label: `Boat ${index}` } }, workspace, remote, signal)
-    }
-    const remove = remote.deleteSnapshot.getMockImplementation()!
-    remote.deleteSnapshot.mockImplementationOnce(remove).mockRejectedValueOnce(new Error('Offline'))
-    await expect(retireSourceCopies('tablet', workspace, remote, signal)).rejects.toThrow('Offline')
-    expect(archives).toHaveLength(4)
-    await retireSourceCopies('tablet', workspace, remote, signal)
-    expect(archives).toHaveLength(3)
+  it('splits only when needed and reassembles complete records across files', async () => {
+    const catalog = await updateCloudWorkspace(empty, snapshot())
+    const encoded = encodeCloudWorkspace(catalog, 'split', 8192)
+    expect(encoded.length).toBeGreaterThan(1)
+    expect(encoded.every((bytes) => bytes.byteLength <= 8192)).toBe(true)
+    expect(await decodeCloudWorkspace(encoded)).toMatchObject({ archives: catalog.archives })
+    await expect(decodeCloudWorkspace(encoded.slice(1))).rejects.toThrow()
+    await expect(decodeCloudWorkspace([encoded[0]!, ...encoded])).rejects.toThrow()
   })
 
-  it('reuses an uploaded and verified pending copy after catalogue publication failed', async () => {
-    const { remote, pending, files, signal } = setup()
-    remote.completeSnapshot.mockRejectedValueOnce(new Error('Offline'))
-    await expect(publishArchive(snapshot(), workspace, remote, signal)).rejects.toThrow('Offline')
-    expect(pending).toHaveLength(1)
-    const revision = await publishArchive({ ...snapshot(), exportedAt: SAMPLE_EPOCH + 1000 }, workspace, remote, signal)
-    expect(revision.exportedAt).toBe(SAMPLE_EPOCH)
-    expect(files.size).toBe(1)
-    expect(remote.uploadSnapshot).toHaveBeenCalledTimes(1)
-    expect(pending).toHaveLength(0)
+  it('does not split a document that fits the exact file budget', async () => {
+    const catalog = await updateCloudWorkspace(empty, snapshot())
+    const encoded = encodeCloudWorkspace(catalog, 'exact')
+    expect(encodeCloudWorkspace(catalog, 'exact', encoded[0]!.byteLength)).toHaveLength(1)
   })
 
-  it('leaves a corrupt pending file alone and publishes a newly verified copy', async () => {
-    const { remote, pending, files, signal } = setup()
-    remote.completeSnapshot.mockRejectedValueOnce(new Error('Offline'))
-    await expect(publishArchive(snapshot(), workspace, remote, signal)).rejects.toThrow('Offline')
-    const abandoned = pending[0]!
-    files.set(abandoned.snapshotFileId, new Uint8Array([1]))
-    const revision = await publishArchive(snapshot(), workspace, remote, signal)
-    expect(revision.snapshotFileId).not.toBe(abandoned.snapshotFileId)
-    expect(pending).toEqual([abandoned])
-    expect(remote.deleteSnapshot).not.toHaveBeenCalled()
+  it('refuses a single record that cannot fit instead of splitting its bytes', async () => {
+    const catalog = await updateCloudWorkspace(empty, snapshot())
+    expect(() => encodeCloudWorkspace(catalog, 'oversized-record', 4096)).toThrow('one archive record exceeds')
   })
 
-  it('retires older valid pending copies after publishing changed content without touching other sources or newer uploads', async () => {
-    const { remote, pending, files, signal } = setup()
-    remote.completeSnapshot.mockRejectedValueOnce(new Error('Cancelled before publication'))
-    await expect(publishArchive(snapshot(), workspace, remote, signal)).rejects.toThrow('Cancelled')
-    const interrupted = pending[0]!
-    const latest = await publishArchive({ ...snapshot(), source: { ...snapshot().source, label: 'Changed boat' } }, workspace, remote, signal)
-    const foreign = { ...interrupted, id: 'foreign', snapshotFileId: 'foreign-file', source: { id: 'phone', label: 'Phone' } }
-    const newer = { ...interrupted, id: 'newer', snapshotFileId: 'newer-file', createdAt: latest.createdAt + 1 }
-    pending.push(foreign, newer)
-    files.set(foreign.snapshotFileId, new Uint8Array([1]))
-    files.set(newer.snapshotFileId, new Uint8Array([1]))
-    await retireSourceCopies('tablet', workspace, remote, signal)
-    expect(remote.deleteSnapshot).toHaveBeenCalledExactlyOnceWith(workspace, interrupted, 'tablet', signal, 'pending')
-    expect(files.has(interrupted.snapshotFileId)).toBe(false)
-    expect(pending).toEqual([foreign, newer])
+  it('rejects a changed embedded archive even if its structure remains valid', async () => {
+    const catalog = await updateCloudWorkspace(empty, snapshot())
+    const encoded = encodeCloudWorkspace(catalog, 'publication')
+    const edited = JSON.parse(new TextDecoder().decode(encoded[0]))
+    edited.archives[0].snapshot.preferences[0].value = 'dark'
+    await expect(decodeCloudWorkspace([new TextEncoder().encode(JSON.stringify(edited))])).rejects.toThrow()
   })
 
-  it('does not turn a failed pending publication into another upload in the same operation', async () => {
-    const { remote, signal } = setup()
-    remote.completeSnapshot.mockRejectedValue(new Error('Offline'))
-    await expect(publishArchive(snapshot(), workspace, remote, signal)).rejects.toThrow('Offline')
-    await expect(publishArchive(snapshot(), workspace, remote, signal)).rejects.toThrow('Offline')
-    expect(remote.uploadSnapshot).toHaveBeenCalledTimes(1)
+  it('merges concurrent publications without dropping either source or settings branch', async () => {
+    const left = await updateCloudWorkspace(empty, snapshot(), { id: 'left-settings', sourceId: 'tablet', parents: [], createdAt: SAMPLE_EPOCH, preferences: [] })
+    const right = await updateCloudWorkspace(empty, { ...snapshot(), source: { id: 'phone', label: 'Phone' } }, { id: 'right-settings', sourceId: 'phone', parents: [], createdAt: SAMPLE_EPOCH, preferences: [] })
+    const merged = mergeCloudCatalogs([left, right, left])
+    expect(merged.archives).toHaveLength(2)
+    expect(merged.settings).toHaveLength(2)
+    expect(() => mergeCloudCatalogs([left, { ...left, settings: [{ ...left.settings[0]!, sourceId: 'changed' }] }])).toThrow('conflicting settings')
   })
 
-  it('does not publish corrupt uploads or cancelled transfers', async () => {
-    const failed = setup()
-    failed.remote.downloadBlock.mockResolvedValueOnce(new Uint8Array([1]))
-    await expect(publishArchive(snapshot(), workspace, failed.remote, failed.signal)).rejects.toThrow('checksum')
-    expect(failed.remote.completeSnapshot).not.toHaveBeenCalled()
-    const cancelled = setup()
-    await expect(publishArchive(snapshot(), workspace, cancelled.remote, cancelled.signal, () => cancelled.controller.abort())).rejects.toThrow()
-    expect(cancelled.remote.completeSnapshot).not.toHaveBeenCalled()
-  })
-
-  it('rejects altered source metadata and corrupt saved bytes', async () => {
+  it('reads an existing gzip snapshot without writing', async () => {
     const { remote, files, signal } = setup()
-    const revision = await publishArchive(snapshot(), workspace, remote, signal)
-    await expect(downloadArchive({ ...revision, source: { id: 'other', label: 'Other' } }, remote, signal)).rejects.toThrow('source')
-    const bytes = files.get(revision.snapshotFileId)!.slice()
-    bytes[0] = 0
-    files.set(revision.snapshotFileId, bytes)
-    await expect(downloadArchive(revision, remote, signal)).rejects.toThrow('checksum')
+    const compact = compactCloudArchive(snapshot())
+    const json = new TextEncoder().encode(encodeArchiveValue(compact))
+    const bytes = compressArchiveBytes(json)
+    files.set('gzip', bytes)
+    const { exportedAt: _exportedAt, ...content } = compact
+    const revision: CloudSnapshotRevision = {
+      storage: 'snapshot', id: 'legacy-snapshot', source: compact.source, exportedAt: compact.exportedAt, createdAt: compact.exportedAt,
+      snapshotFileId: 'gzip', snapshotHash: await sha256(bytes), contentHash: await sha256(new TextEncoder().encode(encodeArchiveValue(content))),
+      sessions: compact.stores.sessions.length, samples: 0, hours: compact.stores.hours!.length, bytes: json.byteLength, storedBytes: bytes.byteLength,
+    }
+    expect(await downloadArchive(revision, remote, signal)).toEqual(compact)
+    expect(remote.writeCatalog).not.toHaveBeenCalled()
   })
 
   it.each([1, 2] as const)('reads an independently assembled legacy version %i without writing', async (version) => {
@@ -241,8 +152,7 @@ describe('self-contained compact cloud copies', () => {
       sessions: 1, samples: 2, bytes: totalBytes,
     }
     expect(await downloadArchive(revision, remote, signal)).toEqual(original)
-    expect(remote.uploadSnapshot).not.toHaveBeenCalled()
-    expect(remote.deleteSnapshot).not.toHaveBeenCalled()
+    expect(remote.writeCatalog).not.toHaveBeenCalled()
   })
 })
 

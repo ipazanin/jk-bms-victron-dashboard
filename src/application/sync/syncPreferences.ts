@@ -26,7 +26,7 @@ export function loadGoogleSyncState(): GoogleSyncState {
       sourceLabel: typeof candidate.sourceLabel === 'string' ? candidate.sourceLabel.slice(0, 100) : '',
       workspace: workspace && typeof workspace.name === 'string' && workspace.name.length <= 200
         && validId(workspace.id) && validId(workspace.folderId)
-        && (workspace.version === undefined || workspace.version === 1 || workspace.version === 2) ? workspace : null,
+        && (workspace.version === undefined || workspace.version === 1 || workspace.version === 2 || workspace.version === 3) ? workspace : null,
       lastSyncAt: typeof candidate.lastSyncAt === 'number' && Number.isFinite(candidate.lastSyncAt) && candidate.lastSyncAt >= 0 ? candidate.lastSyncAt : null,
       settingsBaseline: baseline && validId(baseline.workspaceId) && typeof baseline.localHash === 'string'
         && /^[a-f0-9]{64}$/.test(baseline.localHash) && typeof baseline.cloudHash === 'string' && /^[a-f0-9]{64}$/.test(baseline.cloudHash)

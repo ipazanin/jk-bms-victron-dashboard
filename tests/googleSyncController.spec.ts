@@ -4,20 +4,19 @@ import type { GoogleSyncDependencies } from '../src/application/sync/GoogleSyncD
 import type { GoogleSyncState } from '../src/application/sync/GoogleSyncState'
 import type { SyncRemote } from '../src/application/sync/SyncRemote'
 import { compactCloudArchive } from '../src/application/sync/compactCloudArchive'
-import { publishArchive } from '../src/application/sync/archiveSync'
+import { updateCloudWorkspace } from '../src/application/sync/cloudWorkspaceJson'
 import type { ArchiveSnapshot } from '../src/domain/backup/ArchiveSnapshot'
 import type { ArchivePreference } from '../src/domain/backup/ArchivePreference'
 import type { ImportedArchive } from '../src/application/backup/ImportedArchive'
 import type { CloudArchiveRevision } from '../src/domain/sync/CloudArchiveRevision'
 import type { CloudCatalog } from '../src/domain/sync/CloudCatalog'
-import type { CloudSnapshotRevision } from '../src/domain/sync/CloudSnapshotRevision'
 import type { CloudSettingsRevision } from '../src/domain/sync/CloudSettingsRevision'
 import type { CloudWorkspace } from '../src/domain/sync/CloudWorkspace'
 import { settingsHeads } from '../src/domain/sync/sharedSettings'
 import { summarizeSessionHours } from '../src/domain/history/summarizeSessionHours'
 import { deviceRecord, packChunk, packSamples, SAMPLE_EPOCH, sessionRecord } from './support/samples'
 
-const workspace: CloudWorkspace = { id: 'sheet', name: 'Boat', folderId: 'folder', version: 2 }
+const workspace: CloudWorkspace = { id: 'folder', name: 'Boat', folderId: 'folder', version: 3 }
 const controllers: ReturnType<typeof createGoogleSyncController>[] = []
 
 function snapshot(sourceId = 'browser', exportedAt = SAMPLE_EPOCH): ArchiveSnapshot {
@@ -46,47 +45,20 @@ function deferred<TResult>() {
 function setup(initial: Partial<GoogleSyncState> = {}) {
   const archives: CloudArchiveRevision[] = []
   const settings: CloudSettingsRevision[] = []
-  const pending: CloudSnapshotRevision[] = []
-  const files = new Map<string, Uint8Array>()
   const imports = new Map<string, ArchiveSnapshot>()
-  let fileCount = 0
   let preferences: readonly ArchivePreference[] = theme('dark')
   let recordingEndListener: (() => void) | null = null
   let accessListener: ((connected: boolean) => void) | null = null
   const remote = {
     readCatalog: vi.fn(async (_workspace: CloudWorkspace, _signal: AbortSignal): Promise<CloudCatalog> => ({ archives: [...archives], settings: [...settings] })),
-    listPendingSnapshots: vi.fn(async (_workspace: CloudWorkspace, sourceId: string) => {
-      return pending.filter((revision) => revision.source.id === sourceId)
-    }),
-    uploadSnapshot: vi.fn(async (_workspace: CloudWorkspace, bytes: Uint8Array, description: Omit<CloudSnapshotRevision, 'snapshotFileId' | 'createdAt'>, signal: AbortSignal) => {
+    writeCatalog: vi.fn(async (_workspace: CloudWorkspace, catalog: CloudCatalog, signal: AbortSignal): Promise<CloudCatalog> => {
       signal.throwIfAborted()
-      const revision = { ...description, snapshotFileId: `file-${fileCount}`, createdAt: SAMPLE_EPOCH + fileCount++ }
-      files.set(revision.snapshotFileId, bytes.slice())
-      pending.push(revision)
-      return revision
+      archives.splice(0, archives.length, ...catalog.archives)
+      settings.splice(0, settings.length, ...catalog.settings)
+      return { ...catalog, archives: [...archives], settings: [...settings] }
     }),
-    downloadBlock: vi.fn(async (fileId: string, maximum: number, signal: AbortSignal) => {
-      signal.throwIfAborted()
-      const bytes = files.get(fileId)
-      if (!bytes) throw new Error('Missing archive file')
-      if (bytes.byteLength > maximum) throw new Error('Archive too large')
-      return bytes
-    }),
-    completeSnapshot: vi.fn(async (_workspace: CloudWorkspace, revision: CloudSnapshotRevision, signal: AbortSignal) => {
-      signal.throwIfAborted()
-      archives.push(revision)
-      const index = pending.findIndex((copy) => copy.id === revision.id)
-      if (index !== -1) pending.splice(index, 1)
-    }),
-    deleteSnapshot: vi.fn(async (_workspace: CloudWorkspace, revision: CloudSnapshotRevision, _sourceId: string, signal: AbortSignal) => {
-      signal.throwIfAborted()
-      const index = archives.findIndex((copy) => copy.id === revision.id)
-      if (index !== -1) archives.splice(index, 1)
-      files.delete(revision.snapshotFileId)
-    }),
-    appendSettings: vi.fn(async (_workspace: CloudWorkspace, revision: CloudSettingsRevision, signal: AbortSignal) => {
-      signal.throwIfAborted()
-      settings.push(revision)
+    downloadBlock: vi.fn(async (_fileId: string, _maximum: number, _signal: AbortSignal): Promise<Uint8Array> => {
+      throw new Error('Missing legacy archive file')
     }),
   } satisfies SyncRemote
   const unsubscribe = vi.fn(() => { accessListener = null })
@@ -102,7 +74,8 @@ function setup(initial: Partial<GoogleSyncState> = {}) {
     forgetAccess: vi.fn(() => { accessListener?.(false) }),
     subscribeAccess: vi.fn((listener: (connected: boolean) => void) => { accessListener = listener; return unsubscribe }),
     listWorkspaces: vi.fn(async (_signal: AbortSignal): Promise<readonly CloudWorkspace[]> => [workspace]),
-    createWorkspace: vi.fn(async (name: string, _signal: AbortSignal) => ({ ...workspace, name })),
+    createWorkspace: vi.fn(async (name: string, _parentFolderId: string, _signal: AbortSignal) => ({ ...workspace, name })),
+    chooseFolder: vi.fn(async (_signal: AbortSignal): Promise<{ id: string, name: string } | null> => ({ id: 'chosen-folder', name: 'Boat backups' })),
     chooseWorkspace: vi.fn(async (_signal: AbortSignal): Promise<CloudWorkspace | null> => workspace),
     trashWorkspace: vi.fn(async (_workspace: CloudWorkspace, _signal: AbortSignal) => undefined),
     capture: vi.fn(async (includeSecret: boolean): Promise<ArchiveSnapshot> => ({ ...snapshot(), preferences: preferences.filter((preference) => includeSecret || preference.key !== 'victron.advertisementKey') })),
@@ -129,14 +102,16 @@ function setup(initial: Partial<GoogleSyncState> = {}) {
     expect(controller.connected.value).toBe(true)
   }
   async function seed(archive: ArchiveSnapshot) {
-    return publishArchive(archive, workspace, remote, new AbortController().signal)
+    const catalog = await updateCloudWorkspace({ archives: [...archives], settings: [...settings] }, archive)
+    archives.splice(0, archives.length, ...catalog.archives)
+    return archives.at(-1)!
   }
   function cloudSettings(id: string, changed: readonly ArchivePreference[], parents: readonly string[] = []) {
     const revision = { id, sourceId: 'phone', parents, createdAt: SAMPLE_EPOCH + settings.length, preferences: changed }
     settings.push(revision)
     return revision
   }
-  return { controller, dependencies, remote, archives, settings, imports, files, connect, seed, cloudSettings, unsubscribe, unsubscribeRecording,
+  return { controller, dependencies, remote, archives, settings, imports, connect, seed, cloudSettings, unsubscribe, unsubscribeRecording,
     endRecording() { dependencies.recording.mockReturnValue(false); recordingEndListener?.() },
     setPreferences(next: readonly ArchivePreference[]) { preferences = next }, readPreferences: () => preferences }
 }
@@ -153,24 +128,79 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('Google sync controller history', () => {
-  it('reports failed retirement without losing the successful upload and retries cleanup later', async () => {
-    const harness = setup()
-    for (let index = 0; index < 4; index++) {
-      await harness.seed({ ...snapshot(), source: { id: 'browser', label: `Boat ${index}` } })
-    }
+describe('Google sync workspace destination', () => {
+  it('creates in My Drive unless another destination is selected', async () => {
+    const harness = setup({ workspace: null })
     await harness.connect()
-    harness.remote.deleteSnapshot.mockRejectedValueOnce(new Error('Google could not be reached.'))
+    expect(harness.controller.destination.value).toEqual({ id: 'root', name: 'My Drive' })
+    await harness.controller.createWorkspace('Boat')
+    expect(harness.dependencies.createWorkspace).toHaveBeenLastCalledWith('Boat', 'root', expect.any(AbortSignal))
+    await harness.controller.chooseDestination()
+    expect(harness.dependencies.createWorkspace).toHaveBeenCalledOnce()
+    expect(harness.controller.destination.value).toEqual({ id: 'chosen-folder', name: 'Boat backups' })
+    await harness.controller.createWorkspace('Cabin')
+    expect(harness.dependencies.createWorkspace).toHaveBeenLastCalledWith('Cabin', 'chosen-folder', expect.any(AbortSignal))
+  })
+
+  it('keeps the destination when folder selection is dismissed or fails', async () => {
+    const harness = setup()
+    await harness.connect()
+    await harness.controller.chooseDestination()
+    harness.dependencies.chooseFolder.mockResolvedValueOnce(null)
+    await harness.controller.chooseDestination()
+    expect(harness.controller.destination.value.id).toBe('chosen-folder')
+    harness.dependencies.chooseFolder.mockRejectedValueOnce(new Error('Picker unavailable'))
+    await harness.controller.chooseDestination()
+    expect(harness.controller.destination.value.id).toBe('chosen-folder')
+    expect(harness.controller.failure.value).toBe('Picker unavailable')
+    expect(harness.dependencies.createWorkspace).not.toHaveBeenCalled()
+  })
+
+  it('does not select a folder after cancellation', async () => {
+    const harness = setup()
+    await harness.connect()
+    const selection = deferred<{ id: string, name: string } | null>()
+    harness.dependencies.chooseFolder.mockReturnValueOnce(selection.promise)
+    const choosing = harness.controller.chooseDestination()
+    harness.controller.cancel()
+    selection.resolve({ id: 'late-folder', name: 'Late folder' })
+    await choosing
+    expect(harness.controller.destination.value.id).toBe('root')
+    expect(harness.dependencies.createWorkspace).not.toHaveBeenCalled()
+  })
+})
+
+describe('Google sync controller history', () => {
+  it('keeps the baseline unset after a failed combined write and retries history and settings together', async () => {
+    const harness = setup()
+    await harness.connect()
+    harness.remote.writeCatalog.mockRejectedValueOnce(new Error('Google could not be reached.'))
     await harness.controller.syncNow()
-    expect(harness.controller.lastSyncAt.value).toBe(SAMPLE_EPOCH + 5000)
-    expect(harness.controller.failure.value).toContain('History was uploaded, but old cloud copies could not be removed')
-    expect(harness.settings).toHaveLength(1)
-    expect(harness.archives).toHaveLength(5)
-    harness.remote.uploadSnapshot.mockClear()
+    expect(harness.controller.lastSyncAt.value).toBeNull()
+    expect(harness.controller.failure.value).toBe('Google could not be reached.')
+    expect(harness.settings).toHaveLength(0)
+    expect(harness.archives).toHaveLength(0)
+    expect(harness.dependencies.save.mock.lastCall?.[0].settingsBaseline).toBeNull()
     await harness.controller.syncNow()
     expect(harness.controller.failure.value).toBeNull()
-    expect(harness.archives).toHaveLength(3)
-    expect(harness.remote.uploadSnapshot).not.toHaveBeenCalled()
+    expect(harness.archives).toHaveLength(1)
+    expect(harness.settings).toHaveLength(1)
+    expect(harness.remote.writeCatalog).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports incomplete document cleanup after accepting the published history and settings', async () => {
+    const harness = setup()
+    await harness.connect()
+    const write = harness.remote.writeCatalog.getMockImplementation()!
+    harness.remote.writeCatalog.mockImplementationOnce(async (selected, catalog, signal) => ({
+      ...await write(selected, catalog, signal), cleanupFailure: 'History saved, but older documents could not be removed.',
+    }))
+    await harness.controller.syncNow()
+    expect(harness.controller.lastSyncAt.value).toBe(SAMPLE_EPOCH + 5000)
+    expect(harness.controller.failure.value).toBe('History saved, but older documents could not be removed.')
+    expect(harness.dependencies.save.mock.lastCall?.[0].settingsBaseline).not.toBeNull()
+    expect(harness.archives).toHaveLength(1)
+    expect(harness.settings).toHaveLength(1)
   })
 
   it('shows a skipped-file warning while listing valid saved copies', async () => {
@@ -183,18 +213,29 @@ describe('Google sync controller history', () => {
     expect(harness.controller.failure.value).toContain('2 cloud archive files could not be read and were left untouched')
   })
 
-  it('keeps legacy workspaces readable without capturing or uploading new history', async () => {
-    const harness = setup({ workspace: { ...workspace, version: 1 } })
-    harness.dependencies.listWorkspaces.mockResolvedValue([{ ...workspace, version: 1 }])
+  it.each([1, 2] as const)('loads saved version %s history when reconnecting without requiring another selection', async (version) => {
+    const harness = setup({ workspace: { ...workspace, version } })
+    harness.dependencies.listWorkspaces.mockResolvedValue([{ ...workspace, version }])
     const revision = await harness.seed(snapshot('phone'))
     await harness.connect()
-    harness.remote.uploadSnapshot.mockClear()
+    expect(harness.controller.revisions.value).toEqual([revision])
+    await harness.controller.openRevision(revision.id)
+    expect(harness.imports.has('phone')).toBe(true)
+    expect(harness.dependencies.capture).not.toHaveBeenCalled()
+  })
+
+  it.each([1, 2] as const)('keeps version %s workspaces readable without capturing or uploading new history', async (version) => {
+    const harness = setup({ workspace: { ...workspace, version } })
+    harness.dependencies.listWorkspaces.mockResolvedValue([{ ...workspace, version }])
+    const revision = await harness.seed(snapshot('phone'))
+    await harness.connect()
+    harness.remote.writeCatalog.mockClear()
     await harness.controller.selectWorkspace(workspace.id)
     expect(harness.controller.revisions.value).toHaveLength(1)
     await harness.controller.syncNow()
     expect(harness.controller.failure.value).toContain('legacy workspace is read-only')
     expect(harness.dependencies.capture).not.toHaveBeenCalled()
-    expect(harness.remote.uploadSnapshot).not.toHaveBeenCalled()
+    expect(harness.remote.writeCatalog).not.toHaveBeenCalled()
     await harness.controller.openRevision(revision.id)
     expect(harness.imports.has('phone')).toBe(true)
   })
@@ -206,12 +247,14 @@ describe('Google sync controller history', () => {
     expect(harness.controller.failure.value).toBeNull()
     expect(harness.archives).toHaveLength(1)
     expect(harness.settings).toHaveLength(1)
+    expect(harness.remote.writeCatalog).toHaveBeenCalledOnce()
+    expect(harness.remote.writeCatalog.mock.calls[0]![1]).toMatchObject({ archives: [expect.anything()], settings: [expect.anything()] })
     expect(harness.controller.lastSyncAt.value).toBe(SAMPLE_EPOCH + 5000)
-    harness.remote.uploadSnapshot.mockClear()
+    harness.remote.writeCatalog.mockClear()
     await harness.controller.syncNow()
     expect(harness.archives).toHaveLength(1)
     expect(harness.settings).toHaveLength(1)
-    expect(harness.remote.uploadSnapshot).not.toHaveBeenCalled()
+    expect(harness.remote.writeCatalog).not.toHaveBeenCalled()
     expect(harness.dependencies.importArchive).not.toHaveBeenCalled()
   })
 
@@ -251,12 +294,20 @@ describe('Google sync controller history', () => {
     expect(harness.dependencies.importArchive).toHaveBeenCalledExactlyOnceWith(compactCloudArchive(corrected), false)
   })
 
-  it('imports the other sources and syncs settings when one source cannot be downloaded', async () => {
+  it('imports the other sources and syncs settings when one source cannot be imported', async () => {
     const harness = setup()
     await harness.seed(snapshot('phone'))
     await harness.seed(snapshot('tablet'))
     await harness.connect()
-    harness.dependencies.importArchive.mockImplementationOnce(async () => { throw new Error('Quota exceeded') })
+    const importArchive = harness.dependencies.importArchive.getMockImplementation()!
+    let phoneImportFailed = false
+    harness.dependencies.importArchive.mockImplementation(async (archive, select) => {
+      if (archive.source.id === 'phone' && !phoneImportFailed) {
+        phoneImportFailed = true
+        throw new Error('Quota exceeded')
+      }
+      return importArchive(archive, select)
+    })
     await harness.controller.syncNow()
     expect(harness.imports.has('phone')).toBe(false)
     expect(harness.imports.has('tablet')).toBe(true)
@@ -285,17 +336,17 @@ describe('Google sync controller history', () => {
     expect(harness.dependencies.importArchive).toHaveBeenLastCalledWith(compactCloudArchive(newer), false)
   })
 
-  it('does not import a remote snapshot if cancelled while its download is pending', async () => {
+  it('does not import or publish if cancelled while reading the shared document', async () => {
     const harness = setup()
     await harness.seed(snapshot('phone'))
     await harness.connect()
-    const blocked = deferred<Uint8Array>()
+    const blocked = deferred<CloudCatalog>()
     const reached = deferred<void>()
-    harness.remote.downloadBlock.mockImplementationOnce(async () => { reached.resolve(); return blocked.promise })
+    harness.remote.readCatalog.mockImplementationOnce(async () => { reached.resolve(); return blocked.promise })
     const syncing = harness.controller.syncNow()
     await reached.promise
     harness.controller.cancel()
-    blocked.resolve(new Uint8Array([1]))
+    blocked.resolve({ archives: harness.archives, settings: [] })
     await syncing
     expect(harness.dependencies.importArchive).not.toHaveBeenCalled()
     expect(harness.controller.lastSyncAt.value).toBeNull()
@@ -656,6 +707,7 @@ describe('Google sync controller recording cadence', () => {
     const captured = deferred<ArchiveSnapshot>()
     harness.dependencies.capture.mockReturnValueOnce(captured.promise)
     const syncing = harness.controller.syncNow()
+    await vi.waitFor(() => expect(harness.dependencies.capture).toHaveBeenCalledOnce())
     harness.endRecording()
     harness.endRecording()
     harness.dependencies.recording.mockReturnValue(true)
@@ -671,6 +723,7 @@ describe('Google sync controller recording cadence', () => {
     const captured = deferred<ArchiveSnapshot>()
     harness.dependencies.capture.mockReturnValueOnce(captured.promise)
     const syncing = harness.controller.syncNow()
+    await vi.waitFor(() => expect(harness.dependencies.capture).toHaveBeenCalledOnce())
     harness.endRecording()
     if (action === 'disable') harness.controller.setEnabled(false)
     else if (action === 'disable-auto') harness.controller.setAutoSync(false)
@@ -687,6 +740,7 @@ describe('Google sync controller recording cadence', () => {
     harness.dependencies.capture.mockReturnValueOnce(captured.promise)
     harness.dependencies.capture.mockRejectedValueOnce(new Error('Archive unavailable'))
     const syncing = harness.controller.syncNow()
+    await vi.waitFor(() => expect(harness.dependencies.capture).toHaveBeenCalledOnce())
     harness.endRecording()
     captured.resolve(snapshot())
     await syncing

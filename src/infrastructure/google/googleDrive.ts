@@ -1,11 +1,11 @@
 import type { CloudWorkspace } from '../../domain/sync/CloudWorkspace'
 import type { DriveFile } from './DriveFile'
-import { googleRequest, jsonRequest } from './googleRequest'
+import { googleRequest } from './googleRequest'
 
 export const DRIVE_FILES = 'https://www.googleapis.com/drive/v3/files'
 export const FOLDER_MIME = 'application/vnd.google-apps.folder'
 export const SHEET_MIME = 'application/vnd.google-apps.spreadsheet'
-export const DRIVE_FIELDS = 'id,name,mimeType,parents,appProperties,size,trashed,description,createdTime'
+export const DRIVE_FIELDS = 'id,name,mimeType,parents,appProperties,size,trashed,description,createdTime,capabilities(canAddChildren)'
 
 export function driveLiteral(text: string): string {
   return text.replaceAll('\\', '\\\\').replaceAll("'", "\\'")
@@ -38,15 +38,6 @@ export async function listDriveFiles(query: string, signal: AbortSignal): Promis
   return files
 }
 
-export async function createDriveFile(name: string, mimeType: string, role: string, folderId: string | null, signal: AbortSignal): Promise<DriveFile> {
-  const response = await googleRequest(`${DRIVE_FILES}?fields=${DRIVE_FIELDS}`, signal, jsonRequest('POST', {
-    name, mimeType,
-    appProperties: { shuntCloud: '1', shuntRole: role, ...(folderId ? { shuntWorkspace: folderId } : {}) },
-    ...(folderId ? { parents: [folderId] } : {}),
-  }))
-  return await response.json() as DriveFile
-}
-
 export function checkGoogleId(id: string): void {
   if (!/^[A-Za-z0-9_-]{1,256}$/.test(id)) throw new Error('The Google file identifier is invalid.')
 }
@@ -54,8 +45,9 @@ export function checkGoogleId(id: string): void {
 export function checkWorkspace(workspace: CloudWorkspace): void {
   checkGoogleId(workspace.id)
   checkGoogleId(workspace.folderId)
+  if (workspace.version === 3 && workspace.id !== workspace.folderId) throw new Error('The Google archive folder identity is invalid.')
   if (!workspace.name.trim() || workspace.name.length > 200) throw new Error('The Google archive name is invalid.')
-  if (workspace.version !== undefined && workspace.version !== 1 && workspace.version !== 2) throw new Error('This Google archive version requires a newer app.')
+  if (workspace.version !== undefined && workspace.version !== 1 && workspace.version !== 2 && workspace.version !== 3) throw new Error('This Google archive version requires a newer app.')
 }
 
 export function isShuntFile(file: DriveFile, role: string, mimeType: string): boolean {

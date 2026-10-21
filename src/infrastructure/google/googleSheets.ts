@@ -1,4 +1,4 @@
-import { googleRequest, jsonRequest } from './googleRequest'
+import { googleRequest } from './googleRequest'
 
 export const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets'
 export const ARCHIVE_HEADER = ['id', 'sourceId', 'sourceLabel', 'exportedAt', 'manifestFileId', 'manifestHash', 'contentHash', 'sessions', 'samples', 'bytes']
@@ -15,13 +15,6 @@ export async function readSheetRanges(spreadsheetId: string, ranges: readonly st
     if (!Array.isArray(rows) || rows.some((row) => !Array.isArray(row))) throw new Error('Google returned an invalid archive table.')
     return rows
   })
-}
-
-export async function appendSheetRow(spreadsheetId: string, tab: string, row: readonly unknown[], signal: AbortSignal): Promise<void> {
-  if (row.some((cell) => typeof cell === 'string' && cell.length > 45_000)) throw new Error('These settings are too large for a Google Sheets cell.')
-  const parameters = new URLSearchParams({ valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS' })
-  await googleRequest(`${SHEETS}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(`'${tab}'!A1`)}:append?${parameters}`, signal,
-    jsonRequest('POST', { majorDimension: 'ROWS', values: [row] }))
 }
 
 export function tableBody(rows: unknown[][], header: readonly string[]): unknown[][] {

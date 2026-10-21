@@ -1,9 +1,10 @@
+import { validateArchiveSnapshot } from '../backup/archiveCodec'
 import { archivePreference } from '../backup/preferenceValidation'
-import { bounded, choice, count, identity, list, optional, record, requireArchive, shape, timestamp } from '../backup/validation'
+import { bounded, choice, count, identity, list, optional, record, requireArchive, shape, text, timestamp } from '../backup/validation'
 import type { CloudArchiveRevision } from './CloudArchiveRevision'
 import type { CloudCatalog } from './CloudCatalog'
 import type { CloudSettingsRevision } from './CloudSettingsRevision'
-import { CLOUD_ARCHIVE_BYTES, CLOUD_CATALOG_REVISIONS, CLOUD_SNAPSHOT_BYTES } from './limits'
+import { CLOUD_ARCHIVE_BYTES, CLOUD_CATALOG_REVISIONS, CLOUD_DOCUMENT_BYTES, CLOUD_PUBLICATION_FILES, CLOUD_SNAPSHOT_BYTES } from './limits'
 import { sharedPreferences } from './sharedSettings'
 
 export function cloudIdentity(input: unknown, path: string): void {
@@ -16,6 +17,22 @@ export function cloudHash(input: unknown, path: string): void {
 }
 
 export function validateCloudArchiveRevision(input: unknown): asserts input is CloudArchiveRevision {
+  if (record(input, 'cloud archive').storage === 'json') {
+    shape({
+      storage: choice('json'), id: cloudIdentity, source: shape({ id: cloudIdentity, label: cloudIdentity }, true),
+      exportedAt: timestamp, createdAt: timestamp, contentHash: cloudHash,
+      sessions: count, samples: choice(0), hours: count, bytes: bounded(1, CLOUD_ARCHIVE_BYTES, true),
+      snapshot: validateArchiveSnapshot,
+    }, true)(input, 'cloud JSON archive')
+    const revision = input as Extract<CloudArchiveRevision, { storage: 'json' }>
+    const snapshot = revision.snapshot
+    requireArchive(snapshot.version === 2 && snapshot.stores.chunks.length === 0, 'cloud JSON archive', 'expected compact history')
+    requireArchive(snapshot.source.id === revision.source.id && snapshot.source.label === revision.source.label
+      && snapshot.exportedAt === revision.exportedAt, 'cloud JSON archive', 'source or capture time does not match')
+    requireArchive(snapshot.stores.sessions.length === revision.sessions && snapshot.stores.hours!.length === revision.hours,
+      'cloud JSON archive', 'archive totals do not match')
+    return
+  }
   if (record(input, 'cloud archive').storage === 'snapshot') {
     shape({
       storage: choice('snapshot'), id: cloudIdentity, source: shape({ id: cloudIdentity, label: cloudIdentity }, true),
@@ -47,8 +64,13 @@ export function validateCloudCatalog(input: unknown): asserts input is CloudCata
   for (const key of ['archives', 'settings'] as const) {
     requireArchive(Array.isArray(catalog[key]) && catalog[key].length <= CLOUD_CATALOG_REVISIONS, `cloud catalogue.${key}`, 'too many revisions or invalid list')
   }
-  shape({ archives: list(validateCloudArchiveRevision), settings: list(validateCloudSettingsRevision), unreadableArchives: optional(count) }, true)(input, 'cloud catalogue')
+  shape({ archives: list(validateCloudArchiveRevision), settings: list(validateCloudSettingsRevision), unreadableArchives: optional(count), cleanupFailure: optional(text), documents: optional(list(shape({
+    retired: optional(choice(true)), id: cloudIdentity, publicationId: cloudIdentity, index: bounded(0, CLOUD_PUBLICATION_FILES - 1, true), count: bounded(1, CLOUD_PUBLICATION_FILES, true), hash: cloudHash, bytes: bounded(1, CLOUD_DOCUMENT_BYTES, true),
+  }, true))) }, true)(input, 'cloud catalogue')
   const valid = input as CloudCatalog
+  for (const document of valid.documents ?? []) {
+    requireArchive(document.index < document.count, 'cloud document', 'part index exceeds publication size')
+  }
   for (const revisions of [valid.archives, valid.settings]) {
     requireArchive(new Set(revisions.map((revision) => revision.id)).size === revisions.length, 'cloud catalogue', 'duplicate revision')
   }

@@ -212,69 +212,75 @@ memory. Use a desktop browser for a full retained history.
 
 ## Optional Google sync
 
-In **Connect → Data & backup → Google sync**, enable sync, connect to Google, then create or choose
-a workspace. Use the same Google account and the same configured app on each device. Each workspace
-has a Drive folder containing complete compressed JSON copies and a Google Sheet for shared
-settings. The completed JSON files form the history catalogue. Shunt requests only access to files it creates or you select, using Google's
+In **Connect → Data & backup → Google sync**, enable sync and connect to Google. Create a workspace
+with a name and a destination folder, or open an existing workspace folder. The destination starts
+at **My Drive** and is shown before creation. **Choose folder** lets you select another location.
+Shunt creates its own workspace folder inside that destination. Cancelling selection creates nothing,
+and an inaccessible destination never falls back to My Drive.
+
+Use the same Google account and configured app on each device. Workspaces created by Shunt appear
+in the workspace list. Opening from Drive selects the workspace folder. Shunt requests access to
+files it creates or you select, using Google's
 [`drive.file` scope](https://developers.google.com/workspace/drive/api/guides/api-specific-auth).
-It will not adopt an arbitrary spreadsheet.
 
-**Sync now** uploads this browser's hourly history and downloads the latest saved sources from
-other devices. Each source stays separate in Log, Stats and Warnings. Imported history does not
-join the active recording. Older cloud snapshots remain available through the saved history list.
-Opening one pauses automatic sync so its history stays on screen. Use **Sync now** or enable
-automatic sync again when you want the latest copy.
-New Drive copies contain hourly summaries, selected important moments, session totals, warnings,
+The first sync creates an ordinary, uncompressed `.json` file containing the workspace's synced
+history and shared settings. Each device remains a separate history source. The latest three saved
+revisions of each source are retained inside the JSON. Larger workspaces split into JSON parts only
+when they exceed the app's 16 MiB per-file processing budget. Records remain whole. Each part can
+be downloaded and parsed separately. This is an app budget, not a Drive file-size limit. The full
+workspace still needs to fit in browser memory.
+
+Each update uploads and verifies a new complete copy before retiring the exact previous files it
+incorporated. Ordinary sequential sync leaves one JSON file, or one set of parts for a larger
+workspace. Concurrent syncs and interrupted cleanup can leave additional copies. A later successful
+sync combines the copies it reads. An incomplete upload cannot replace a complete copy. Files from
+an unseen concurrent upload are never included in that sync's cleanup. Incomplete uploads remain
+untouched because another device may still be uploading their remaining parts.
+
+**Sync now** uploads this browser's hourly history and retrieves the latest sources from other
+devices. Sources stay separate in Log, Stats and Warnings. Imported history does not join the active
+recording. Saved copies contain hourly summaries, selected moments, session totals, warnings,
 native battery and solar history, and saved settings. Raw sample chunks and the remembered
-instrument's short trend stay local. A copy appears only after its complete compressed JSON file
-has been uploaded and verified. Unchanged history creates no new copy.
+instrument's short trend stay local. Export this browser's JSON archive to preserve raw recordings.
+Hourly history is retained for up to two years, subject to the summary and session limits below.
 
-Each source keeps its latest three complete copies, ordered by Drive's creation time. Older copies
-of that source are permanently removed after publication succeeds. Other sources and shared settings history
-are preserved. Keep manual JSON exports for independent recovery beyond those three copies.
+The connected panel puts **Sync now**, the workspace folder link, last sync, progress, cancellation
+and errors together. Workspace selection and creation are under **Change workspace**. Device naming,
+automatic sync and key sharing are under **Sync settings**. Opening an earlier saved revision pauses
+automatic sync so its history stays on screen. Use **Sync now** or enable automatic sync to receive
+the latest history again.
 
-Older workspaces remain readable. Create a new compact workspace and select it on each updated
-device to start compact uploads. Existing workspaces and their raw history are not deleted or
-rewritten automatically.
-
-Update Shunt on every browser before opening newly compressed cloud copies or importing JSON
-archives. Older app versions cannot read the new formats. When the update notice appears, finish
-recording, close all Shunt tabs and app windows, then reopen.
-
-Hourly history must sync before the browser loses it to be available on another device. It is
-retained for up to two years, subject to the summary and session limits below. A Drive copy is
-not a backup of local raw samples. Export this browser's JSON archive to preserve those samples.
-Transfers retain the JSON archive size limits described above.
+Existing spreadsheet-based workspaces remain readable. Create a new JSON workspace and select it
+on each updated device for new uploads. Existing cloud files are not converted or deleted
+automatically. Update Shunt on every device before using the new workspace. Finish recording, close
+all Shunt tabs and app windows when an update is ready, then reopen.
 
 Shared settings cover theme, sidebar and Stats preferences. When devices change them independently,
 Shunt asks which version to keep. Disconnect radios before applying cloud settings. Bluetooth
 permissions and automatic reconnect intent stay local.
 
-**Include the Victron advertisement key in Google sync** is off by default. Opting in includes the key in uploads and allows
-shared settings to apply it locally. Turning it off prevents subsequent local key uploads and
-applications. It does not erase keys already in cloud snapshots or settings history. Anyone with
-access to those files can read an included key.
+**Include the Victron advertisement key in Google sync** is off by default. Opting in includes the
+key in uploads and allows shared settings to apply it locally. Turning it off prevents subsequent
+local key uploads and applications. It does not erase keys already saved in cloud history. Anyone
+with access to those files can read an included key.
 
 Automatic sync checks once a minute while the page is visible, online and connected to Google.
-Each check downloads other devices' new history and exchanges shared settings. While this browser
-is recording, it uploads its own history at most once an hour, and again as soon as the session ends.
-**Sync now** always uploads. Unchanged history and settings add nothing to the workspace.
-Closing or suspending the app stops automatic sync. Access tokens exist only in memory, so reloads and token
-expiry require another **Connect Google** click. Google's
+While this browser records, its history uploads at most once an hour and again when recording ends.
+**Sync now** checks this browser's current history immediately. Unchanged history and settings do not
+create another revision. Closing or suspending the app stops automatic sync. Access tokens exist
+only in memory, so reloads and token expiry require another **Connect Google** click. Google's
 [token model](https://developers.google.com/identity/oauth2/web/guides/use-token-model) requires a
-user action to renew access. Disconnecting or disabling sync leaves cloud files and local copies
-intact. Deleting a workspace moves its entire Drive folder to Trash, including any files you
-manually added. Local recordings and downloaded copies remain.
+user action to renew access.
 
-Google sync uses browser sign-in and HTTPS requests rather than Bluetooth. It can transfer history
-in Firefox even though Firefox cannot record from the radios. JSON archive transfer remains the offline
-option. Test Google sign-in on each configured origin before relying on automatic sync.
+Disconnecting or disabling sync leaves cloud files and local copies intact. Deleting a workspace
+moves its app-created folder to Trash, including any files added manually. It never trashes the
+parent destination folder. Local recordings and downloaded copies remain. Keep manual JSON exports
+for independent recovery beyond the three saved revisions.
 
-Workspaces that Shunt created appear under **Available workspaces** on every device signed in to
-the same Google account. **Choose in Google Drive** opens Google's file picker for a workspace the
-list does not show. Use the same Google account on all devices. Sharing a Sheet with another account
-does not grant Shunt access to its workspace folder and history files. In Firefox the picker first asks
-to **Allow cookies** for Google, because Firefox isolates third-party cookies. If the sign-in window
+Google sync uses browser sign-in and HTTPS requests. It can transfer history in Firefox even though
+Firefox cannot record from the radios. JSON archive transfer remains the offline option. Test Google
+sign-in and folder selection on each configured origin, including the installed app on Android.
+Browser privacy settings can require additional Google permission prompts. If the sign-in window
 shows an error page, close it or press **Cancel sync**, then connect again.
 
 ### Configure Google sync for your build
@@ -282,10 +288,10 @@ shows an error page, close it or press **Cancel sync**, then connect again.
 Google setup is optional. Without the three build variables below, the app keeps recording and
 exporting locally and shows Google sync setup instructions.
 
-1. In one Google Cloud project, enable **Google Drive API**, **Google Sheets API** and
-   **Google Picker API**. Set the OAuth audience to **External**. `drive.file` is a non-sensitive
-   scope, so a published app needs no verification. While the app is in testing, add each Google
-   account as a test user.
+1. In one Google Cloud project, enable **Google Drive API** and **Google Picker API**.
+   Enable **Google Sheets API** as well to read existing spreadsheet-based workspaces. Set the OAuth
+   audience to **External**. The app requests only the non-sensitive `drive.file` scope. While the app
+   is in testing, add each Google account as a test user.
 2. Create an OAuth client of type **Web application** with no redirect URIs. Add every origin that
    serves the app as an authorized JavaScript origin, for example `http://localhost:5173` and
    `https://ipazanin.github.io`. Origins have no path, and the port must match exactly. If Vite
@@ -645,9 +651,9 @@ Support is completely optional.
 
 Protocol work stands on the shoulders of the [ESPHome JK-BMS component](https://github.com/syssi/esphome-jk-bms)
 and [`victron-ble`](https://github.com/keshavdv/victron-ble). Neither protocol library is used at runtime.
-Vue supplies the UI and fflate compresses JSON archives and cloud history blocks with gzip. Fonts
-are self-hosted via `@fontsource`. Google Identity Services and Picker scripts load when you enable
-Google sync.
+Vue supplies the UI. fflate compresses manual JSON archives and reads legacy compressed cloud
+history. Fonts are self-hosted via `@fontsource`. Google Identity Services and Picker scripts load
+when you enable Google sync.
 
 ## Licence
 

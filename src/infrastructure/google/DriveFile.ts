@@ -8,4 +8,5 @@ export interface DriveFile {
   readonly trashed?: boolean
   readonly description?: string
   readonly createdTime?: string
+  readonly capabilities?: { readonly canAddChildren?: boolean }
 }

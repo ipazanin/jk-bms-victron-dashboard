@@ -1,7 +1,7 @@
 import { watch } from 'vue'
 import { googleConfig } from '../../infrastructure/google/googleConfig'
 import { forgetGoogleAccess, prepareGoogleIdentity, requestGoogleAccess, subscribeGoogleAccess } from '../../infrastructure/google/googleAuth'
-import { prepareGooglePicker } from '../../infrastructure/google/googlePicker'
+import { pickGoogleFolder, prepareGooglePicker } from '../../infrastructure/google/googlePicker'
 import { remote } from '../../infrastructure/google/googleSyncRemote'
 import { createGoogleWorkspace, listGoogleWorkspaces, pickGoogleWorkspace, trashGoogleWorkspace } from '../../infrastructure/google/googleWorkspaces'
 import { captureArchivePreferences } from '../backup/preferences'
@@ -22,6 +22,7 @@ const sync = createGoogleSyncController({
   listWorkspaces: listGoogleWorkspaces,
   createWorkspace: createGoogleWorkspace,
   chooseWorkspace: pickGoogleWorkspace,
+  chooseFolder: pickGoogleFolder,
   trashWorkspace: trashGoogleWorkspace,
   capture: (includeSecret, detail) => useArchiveWorkspace().captureForSync(includeSecret, detail),
   sourceId: () => useArchiveWorkspace().source.value?.id ?? null,

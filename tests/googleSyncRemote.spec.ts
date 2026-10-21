@@ -1,10 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CloudSnapshotRevision } from '../src/domain/sync/CloudSnapshotRevision'
 import type { DriveFile } from '../src/infrastructure/google/DriveFile'
-import { CLOUD_SNAPSHOT_BYTES } from '../src/domain/sync/limits'
 import { remote } from '../src/infrastructure/google/googleSyncRemote'
 import { googleRequest } from '../src/infrastructure/google/googleRequest'
-import { createGoogleWorkspace, listGoogleWorkspaces, trashGoogleWorkspace, validateGoogleWorkspace } from '../src/infrastructure/google/googleWorkspaces'
+import { listGoogleWorkspaces, trashGoogleWorkspace, validateGoogleWorkspace } from '../src/infrastructure/google/googleWorkspaces'
 
 const forget = vi.hoisted(() => vi.fn())
 vi.mock('../src/infrastructure/google/googleAuth', () => ({ googleAccessToken: () => 'memory-token', forgetGoogleAccess: forget }))
@@ -37,7 +36,6 @@ const snapshotDescription: Omit<CloudSnapshotRevision, 'snapshotFileId' | 'creat
   storage: 'snapshot', id: 'revision', source: { id: 'phone', label: '=FORMULA()' }, exportedAt: 1_700_000_000_000,
   snapshotHash: hash, contentHash: hash, sessions: 1, samples: 0, hours: 1, bytes: 10, storedBytes: 3,
 }
-const settings = { id: 'settings', sourceId: 'phone', parents: [], createdAt: 1_700_000_000_000, preferences: [] }
 
 function snapshotFile(overrides: Partial<DriveFile> = {}): DriveFile {
   return {
@@ -53,32 +51,6 @@ function revision(file = snapshotFile()): CloudSnapshotRevision {
 }
 
 describe('Google sync transport', () => {
-  it('uploads a pending complete file without adding a history row to Sheets', async () => {
-    const pending = snapshotFile({ appProperties: { ...snapshotFile().appProperties, shuntRole: 'pending-snapshot' } })
-    fetchGoogle.mockResolvedValue(json(pending))
-    await remote.uploadSnapshot(compactWorkspace, new Uint8Array([1, 2, 3]), snapshotDescription, signal)
-    const [url, request] = fetchGoogle.mock.calls[0]!
-    expect(String(url)).toContain('uploadType=multipart')
-    expect(request!.signal).toBe(signal)
-    expect(new Headers(request!.headers).get('Authorization')).toBe('Bearer memory-token')
-    const multipart = await (request!.body as Blob).text()
-    expect(multipart).toContain('pending-snapshot')
-    expect(multipart).toContain('=FORMULA()')
-    expect(fetchGoogle).toHaveBeenCalledOnce()
-  })
-
-  it('writes actual settings values in separate columns', async () => {
-    fetchGoogle.mockResolvedValue(json({}))
-    await remote.appendSettings(compactWorkspace, { id: 'settings', sourceId: 'phone', parents: [], createdAt: 1_700_000_000_000,
-      preferences: [{ key: 'shunt.theme', value: 'dark' }] }, signal)
-    expect(JSON.parse(fetchGoogle.mock.calls[0]![1]!.body as string).values).toEqual([['settings', 'phone', '[]', 1_700_000_000_000, 'dark', '', '', '']])
-  })
-
-  it('rejects oversized uploads before any network request', async () => {
-    await expect(remote.uploadSnapshot(compactWorkspace, new Uint8Array(CLOUD_SNAPSHOT_BYTES + 1), snapshotDescription, signal)).rejects.toThrow('upload limit')
-    expect(fetchGoogle).not.toHaveBeenCalled()
-  })
-
   it('stops a streamed download when bytes exceed the declared size', async () => {
     const cancelled = vi.fn()
     fetchGoogle.mockResolvedValue(new Response(new ReadableStream({
@@ -91,14 +63,14 @@ describe('Google sync transport', () => {
 
   it('forgets expired access and never automatically retries a write', async () => {
     fetchGoogle.mockResolvedValue(new Response('', { status: 401 }))
-    await expect(remote.appendSettings(compactWorkspace, settings, signal)).rejects.toThrow('Connect to Google again')
+    await expect(googleRequest('https://www.googleapis.com/drive/v3/files', signal, { method: 'POST' })).rejects.toThrow('Connect to Google again')
     expect(forget).toHaveBeenCalledOnce()
     expect(fetchGoogle).toHaveBeenCalledOnce()
   })
 
   it('surfaces throttling without retrying a write', async () => {
     fetchGoogle.mockResolvedValue(new Response('', { status: 429 }))
-    await expect(remote.appendSettings(compactWorkspace, settings, signal)).rejects.toThrow('Wait a minute')
+    await expect(googleRequest('https://www.googleapis.com/drive/v3/files', signal, { method: 'POST' })).rejects.toThrow('Wait a minute')
     expect(fetchGoogle).toHaveBeenCalledOnce()
   })
 
@@ -139,23 +111,6 @@ describe('Google sync transport', () => {
     await expect(listGoogleWorkspaces(signal)).resolves.toEqual([{ id: workspace.id, name: 'Archive', folderId: workspace.folderId }])
   })
 
-  it('makes a created workspace discoverable only after its tables are ready', async () => {
-    fetchGoogle.mockResolvedValueOnce(json({ id: 'new-folder' }))
-    fetchGoogle.mockResolvedValueOnce(json({ id: 'new-sheet' }))
-    fetchGoogle.mockResolvedValueOnce(json({ sheets: [{ properties: { sheetId: 0 } }] }))
-    fetchGoogle.mockResolvedValue(json({}))
-    await expect(createGoogleWorkspace('New archive', signal)).resolves.toEqual({ id: 'new-sheet', name: 'New archive', folderId: 'new-folder', version: 2 })
-    const initialSheet = JSON.parse(fetchGoogle.mock.calls[1]![1]!.body as string)
-    expect(initialSheet.appProperties.shuntRole).toBe('initializing')
-    const headers = JSON.parse(fetchGoogle.mock.calls[4]![1]!.body as string)
-    expect(headers.valueInputOption).toBe('RAW')
-    expect(headers.data[0].values).toContainEqual(['version', 2])
-    const publish = fetchGoogle.mock.calls[5]!
-    expect(publish[1]!.method).toBe('PATCH')
-    expect(JSON.parse(publish[1]!.body as string).appProperties.shuntRole).toBe('catalog')
-    expect(JSON.parse(publish[1]!.body as string).appProperties.shuntVersion).toBe('2')
-  })
-
   it('keeps compact and legacy workspaces distinguishable when listing', async () => {
     const catalog = { mimeType: 'application/vnd.google-apps.spreadsheet', name: 'Archive', parents: [workspace.folderId] }
     const metadata = { shuntCloud: '1', shuntRole: 'catalog', shuntWorkspace: workspace.folderId }
@@ -189,17 +144,6 @@ describe('Google sync transport', () => {
     expect(fetchGoogle.mock.calls.every(([, request]) => request?.method !== 'DELETE')).toBe(true)
   })
 
-  it('ignores corrupt and incomplete pending uploads while finding a reusable copy', async () => {
-    const pending = { ...snapshotFile().appProperties, shuntRole: 'pending-snapshot' }
-    fetchGoogle.mockResolvedValue(json({ files: [
-      snapshotFile({ id: 'broken', appProperties: pending, description: '{broken' }),
-      snapshotFile({ id: 'in-flight', appProperties: pending, size: '0' }),
-      snapshotFile({ appProperties: pending }),
-    ] }))
-    await expect(remote.listPendingSnapshots(compactWorkspace, 'phone', signal)).resolves.toEqual([revision()])
-    expect(fetchGoogle).toHaveBeenCalledOnce()
-  })
-
   it('leaves duplicate revision identities out without blocking unrelated sources', async () => {
     mockWorkspace(true, 2)
     fetchGoogle.mockResolvedValueOnce(json({ valueRanges: [{ values: [['id', 'sourceId', 'parents', 'createdAt', 'theme', 'sidebar', 'statsPreferences', 'victronAdvertisementKey']] }] }))
@@ -215,7 +159,7 @@ describe('Google sync transport', () => {
 
   it('rejects repeated pagination tokens instead of looping', async () => {
     fetchGoogle.mockImplementation(async () => json({ files: [], nextPageToken: 'same-page' }))
-    await expect(remote.listPendingSnapshots(compactWorkspace, 'phone', signal)).rejects.toThrow('repeated file page')
+    await expect(listGoogleWorkspaces(signal)).rejects.toThrow('repeated file page')
     expect(fetchGoogle).toHaveBeenCalledTimes(2)
   })
 
@@ -230,82 +174,6 @@ describe('Google sync transport', () => {
     const catalog = await remote.readCatalog(compactWorkspace, signal)
     expect(catalog.archives.map((copy) => copy.id)).toEqual(['older', 'a', 'z'])
     expect(fetchGoogle.mock.calls.some(([url]) => decodeURIComponent(String(url)).includes("'Archives'"))).toBe(false)
-  })
-
-  it('marks only the previously verified pending file complete', async () => {
-    const pending = snapshotFile({ appProperties: { ...snapshotFile().appProperties, shuntRole: 'pending-snapshot' } })
-    fetchGoogle.mockResolvedValueOnce(json(pending)).mockResolvedValueOnce(json({}))
-    await remote.completeSnapshot(compactWorkspace, revision(), signal)
-    expect(fetchGoogle.mock.calls[1]![1]!.method).toBe('PATCH')
-    expect(JSON.parse(fetchGoogle.mock.calls[1]![1]!.body as string)).toEqual({ appProperties: { shuntRole: 'snapshot' } })
-  })
-
-  it('does not repeat a completed publication', async () => {
-    fetchGoogle.mockResolvedValue(json(snapshotFile()))
-    await remote.completeSnapshot(compactWorkspace, revision(), signal)
-    expect(fetchGoogle).toHaveBeenCalledOnce()
-  })
-
-  it('deletes only a matching complete snapshot from this source', async () => {
-    fetchGoogle.mockResolvedValueOnce(json(snapshotFile())).mockResolvedValueOnce(new Response(null, { status: 204 }))
-    await remote.deleteSnapshot(compactWorkspace, revision(), 'phone', signal)
-    expect(fetchGoogle.mock.calls[1]![1]!.method).toBe('DELETE')
-    expect(String(fetchGoogle.mock.calls[1]![0])).toContain('/files/snapshot')
-  })
-
-  it('treats a previously deleted copy as retired', async () => {
-    fetchGoogle.mockResolvedValue(new Response(null, { status: 404 }))
-    await expect(remote.deleteSnapshot(compactWorkspace, revision(), 'phone', signal)).resolves.toBeUndefined()
-    expect(fetchGoogle).toHaveBeenCalledOnce()
-  })
-
-  it('retires a known pending copy only while its role and creation time still match', async () => {
-    const pending = snapshotFile({ appProperties: { ...snapshotFile().appProperties, shuntRole: 'pending-snapshot' } })
-    fetchGoogle.mockResolvedValueOnce(json(pending)).mockResolvedValueOnce(new Response(null, { status: 204 }))
-    await remote.deleteSnapshot(compactWorkspace, revision(), 'phone', signal, 'pending')
-    expect(fetchGoogle.mock.calls[1]![1]!.method).toBe('DELETE')
-    fetchGoogle.mockClear()
-    fetchGoogle.mockResolvedValueOnce(json(snapshotFile()))
-    await expect(remote.deleteSnapshot(compactWorkspace, revision(), 'phone', signal, 'pending')).rejects.toThrow('ownership or metadata')
-    expect(fetchGoogle).toHaveBeenCalledOnce()
-    fetchGoogle.mockClear()
-    fetchGoogle.mockResolvedValueOnce(json({ ...pending, createdTime: '2026-01-01T00:00:00.000Z' }))
-    await expect(remote.deleteSnapshot(compactWorkspace, revision(), 'phone', signal, 'pending')).rejects.toThrow('changed')
-    expect(fetchGoogle).toHaveBeenCalledOnce()
-  })
-
-  it('refuses foreign copies, shared legacy blocks, and moved files before deletion', async () => {
-    await expect(remote.deleteSnapshot(compactWorkspace, revision(), 'another-source', signal)).rejects.toThrow('own cloud copies')
-    expect(fetchGoogle).not.toHaveBeenCalled()
-    for (const file of [
-      snapshotFile({ description: JSON.stringify({ ...snapshotDescription, source: { id: 'another-source', label: 'Other' } }) }),
-      snapshotFile({ mimeType: 'application/octet-stream', appProperties: { ...snapshotFile().appProperties, shuntRole: 'block' } }),
-      snapshotFile({ parents: ['another-folder'] }),
-    ]) {
-      fetchGoogle.mockResolvedValueOnce(json(file))
-      await expect(remote.deleteSnapshot(compactWorkspace, revision(), 'phone', signal)).rejects.toThrow()
-    }
-    expect(fetchGoogle.mock.calls.every(([, request]) => request?.method !== 'DELETE')).toBe(true)
-  })
-
-  it('uses resumable upload for files above five MiB', async () => {
-    const bytes = new Uint8Array(5 * 1024 * 1024 + 1)
-    const description = { ...snapshotDescription, storedBytes: bytes.byteLength }
-    const pending = snapshotFile({ size: String(bytes.byteLength), description: JSON.stringify(description),
-      appProperties: { ...snapshotFile().appProperties, shuntRole: 'pending-snapshot' } })
-    fetchGoogle.mockResolvedValueOnce(new Response(null, { headers: { Location: 'https://www.googleapis.com/upload/drive/v3/files?upload_id=owned' } }))
-      .mockResolvedValueOnce(json(pending))
-    await remote.uploadSnapshot(compactWorkspace, bytes, description, signal)
-    expect(String(fetchGoogle.mock.calls[0]![0])).toContain('uploadType=resumable')
-    expect(fetchGoogle.mock.calls[1]![1]!.method).toBe('PUT')
-    expect((fetchGoogle.mock.calls[1]![1]!.body as ArrayBuffer).byteLength).toBe(bytes.byteLength)
-  })
-
-  it('refuses a resumable upload destination outside Google', async () => {
-    const bytes = new Uint8Array(5 * 1024 * 1024 + 1)
-    fetchGoogle.mockResolvedValue(new Response(null, { headers: { Location: 'https://other.example/upload' } }))
-    await expect(remote.uploadSnapshot(compactWorkspace, bytes, { ...snapshotDescription, storedBytes: bytes.byteLength }, signal)).rejects.toThrow('invalid upload destination')
-    expect(fetchGoogle).toHaveBeenCalledOnce()
   })
 
   it('rejects another application spreadsheet before trashing anything', async () => {

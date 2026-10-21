@@ -33,6 +33,8 @@ const sync = {
   connect: vi.fn(),
   prepare: vi.fn(),
   disconnect: vi.fn(),
+  destination: shallowRef({ id: 'root', name: 'My Drive' }),
+  chooseDestination: vi.fn(),
   createWorkspace: vi.fn(),
   selectWorkspace: vi.fn(),
   chooseWorkspace: vi.fn(),
@@ -51,6 +53,7 @@ let host: HTMLElement
 
 beforeEach(() => {
   vi.clearAllMocks()
+  sync.destination.value = { id: 'root', name: 'My Drive' }
   sync.enabled.value = false
   sync.configured.value = true
   sync.prepared.value = false
@@ -93,7 +96,7 @@ function button(label: string): HTMLButtonElement {
 function connectWorkspace(): void {
   sync.enabled.value = true
   sync.connected.value = true
-  sync.workspace.value = { id: 'sheet', name: 'Boat history', folderId: 'folder', version: 2 }
+  sync.workspace.value = { id: 'sheet', name: 'Boat history', folderId: 'folder', version: 3 }
 }
 
 function archiveRevision(): CloudArchiveRevision {
@@ -143,6 +146,36 @@ describe('Google sync controls', () => {
     expect(sync.connect).not.toHaveBeenCalled()
   })
 
+  it('shows the destination before creation and requests folder selection separately', async () => {
+    sync.enabled.value = true
+    sync.connected.value = true
+    await mount()
+    expect(host.textContent).toContain('Create in My Drive')
+    button('Choose folder').click()
+    expect(sync.chooseDestination).toHaveBeenCalledOnce()
+    expect(sync.createWorkspace).not.toHaveBeenCalled()
+    sync.destination.value = { id: 'backups', name: 'Boat backups' }
+    await nextTick()
+    expect(host.textContent).toContain('Create in Boat backups')
+    host.querySelector('form.create-workspace')!.dispatchEvent(new Event('submit', { cancelable: true }))
+    expect(sync.createWorkspace).toHaveBeenCalledWith('Shunt history')
+  })
+
+  it('keeps the main sync action and feedback before collapsed setup and settings', async () => {
+    connectWorkspace()
+    sync.busy.value = true
+    sync.progress.value = 'Saving shared history and settings…'
+    sync.failure.value = 'Connection failed'
+    await mount()
+    const setup = host.querySelector<HTMLDetailsElement>('.workspace-setup')!
+    expect(setup.open).toBe(false)
+    expect(button('Sync now').closest('details')).toBeNull()
+    expect(button('Cancel sync').compareDocumentPosition(setup) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(host.querySelector('.failure')!.compareDocumentPosition(setup) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(host.querySelector('a')!.href).toBe('https://drive.google.com/drive/folders/folder')
+    expect(host.querySelector<HTMLInputElement>('[data-testid="cloud-device-label"]')!.closest('details')!.open).toBe(false)
+  })
+
   it('requires its own key opt-in and makes sync available without Bluetooth', async () => {
     connectWorkspace()
     await mount()
@@ -167,7 +200,7 @@ describe('Google sync controls', () => {
     picker.dispatchEvent(new Event('change'))
     expect(sync.selectWorkspace).toHaveBeenCalledWith('second')
     expect(picker.value).toBe('sheet')
-    button('Choose in Google Drive').click()
+    button('Open workspace in Google Drive').click()
     expect(sync.chooseWorkspace).toHaveBeenCalledOnce()
   })
 
@@ -178,7 +211,7 @@ describe('Google sync controls', () => {
     expect(host.textContent).toContain('Cabin laptop')
     expect(host.textContent).toContain('12 sessions')
     expect(host.textContent).toContain('168 hourly summaries')
-    expect(host.textContent).toContain('permanently removes its older copies')
+    expect(host.textContent).toContain('latest three copies from each browser')
     expect(host.textContent).toContain('Raw recordings stay local')
     button('Open saved history').click()
     expect(sync.openRevision).toHaveBeenCalledWith('archive-revision')
@@ -193,7 +226,7 @@ describe('Google sync controls', () => {
     }]
     await mount()
     expect(host.textContent).toContain('This legacy workspace is read-only')
-    expect(host.textContent).toContain('Create a compact workspace')
+    expect(host.textContent).toContain('Create a JSON workspace')
     expect(host.textContent).toContain('8,000 samples')
     expect(host.querySelector('[data-testid="sync-now"]')).toBeNull()
     button('Open saved history').click()

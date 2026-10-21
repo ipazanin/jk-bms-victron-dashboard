@@ -1,11 +1,14 @@
 import { ref, shallowRef } from 'vue'
+import type { ArchiveSnapshot } from '../../domain/backup/ArchiveSnapshot'
 import type { ArchivePreference } from '../../domain/backup/ArchivePreference'
 import type { CloudWorkspace } from '../../domain/sync/CloudWorkspace'
 import type { CloudArchiveRevision } from '../../domain/sync/CloudArchiveRevision'
 import type { CloudSettingsRevision } from '../../domain/sync/CloudSettingsRevision'
 import { createSettingsRevision, settingsHeads, sharedPreferences } from '../../domain/sync/sharedSettings'
 import { validateCloudCatalog } from '../../domain/sync/syncValidation'
-import { publishArchive, downloadArchive, retireSourceCopies } from './archiveSync'
+import { downloadArchive } from './archiveSync'
+import { updateCloudWorkspace } from './cloudWorkspaceJson'
+import type { GoogleDriveFolder } from './GoogleDriveFolder'
 import type { GoogleSyncDependencies } from './GoogleSyncDependencies'
 
 const RECORDING_PUBLISH_INTERVAL_MS = 60 * 60_000
@@ -17,6 +20,7 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
   const includeSecret = ref(saved.includeSecret)
   const sourceLabel = ref(saved.sourceLabel)
   const workspace = shallowRef<CloudWorkspace | null>(saved.workspace)
+  const destination = shallowRef<GoogleDriveFolder>({ id: 'root', name: 'My Drive' })
   const lastSyncAt = ref(saved.lastSyncAt)
   const configured = ref(dependencies.configured())
   const prepared = ref(false)
@@ -70,7 +74,7 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
   }
 
   function canSyncAutomatically(): boolean {
-    return active && enabled.value && autoSync.value && connected.value && workspace.value?.version === 2
+    return active && enabled.value && autoSync.value && connected.value && workspace.value?.version === 3
       && navigator.onLine && document.visibilityState === 'visible'
   }
 
@@ -136,8 +140,17 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
       if (workspace.value) {
         const found = workspaces.value.find((candidate) => candidate.id === workspace.value?.id)
         switchWorkspace(found ?? null)
+        if (found && found.version !== 3) {
+          const catalog = await dependencies.remote.readCatalog(found, signal)
+          validateCloudCatalog(catalog)
+          signal.throwIfAborted()
+          revisions.value = catalog.archives
+          if (catalog.unreadableArchives) failure.value = unreadableArchiveMessage(catalog.unreadableArchives)
+        }
       }
-      notice.value = workspace.value ? 'Connected. Sync now to exchange saved history and settings.' : 'Connected. Create or choose a cloud workspace.'
+      notice.value = workspace.value
+        ? workspace.value.version === 3 ? 'Connected. Sync now to exchange saved history and settings.' : 'Connected. Open saved history from this read-only workspace.'
+        : 'Connected. Create or choose a cloud workspace.'
     }, 'connect')
   }
 
@@ -165,9 +178,17 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
     persist()
   }
 
+  async function chooseDestination(): Promise<void> {
+    await run(async (signal) => {
+      const selected = await dependencies.chooseFolder(signal)
+      signal.throwIfAborted()
+      if (selected) destination.value = selected
+    })
+  }
+
   async function createWorkspace(name: string): Promise<void> {
     await run(async (signal) => {
-      const created = await dependencies.createWorkspace(name, signal)
+      const created = await dependencies.createWorkspace(name, destination.value.id, signal)
       signal.throwIfAborted()
       workspaces.value = [...workspaces.value, created]
       switchWorkspace(created)
@@ -206,30 +227,29 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
   async function syncNow(automatic = false, recordingEnded = false): Promise<void> {
     await run(async (signal) => {
       const selected = requireWorkspace()
-      if (selected.version !== 2) throw new Error('This legacy workspace is read-only. Open its saved history or create a compact workspace to sync.')
+      if (selected.version !== 3) throw new Error('This legacy workspace is read-only. Open its saved history or create a JSON workspace to sync.')
       const sourceId = dependencies.sourceId()
       if (!sourceId) throw new Error('The archive is not ready yet.')
-      let retentionFailure: string | null = null
+      const existing = await dependencies.remote.readCatalog(selected, signal)
+      validateCloudCatalog(existing)
+      signal.throwIfAborted()
       const deferred = automatic && !recordingEnded && dependencies.recording() && lastPublishedAt !== null
         && dependencies.now() - lastPublishedAt < RECORDING_PUBLISH_INTERVAL_MS
+      let snapshot: ArchiveSnapshot | undefined
       if (!deferred) {
         progress.value = 'Reading this browser archive…'
         const captured = await dependencies.capture(includeSecret.value, 'hourly')
         signal.throwIfAborted()
-        const snapshot = sourceLabel.value ? { ...captured, source: { ...captured.source, label: sourceLabel.value } } : captured
-        await publishArchive(snapshot, selected, dependencies.remote, signal, (message) => { progress.value = message })
-        signal.throwIfAborted()
-        lastPublishedAt = dependencies.now()
-        try {
-          await retireSourceCopies(sourceId, selected, dependencies.remote, signal)
-        } catch (error) {
-          if (signal.aborted) throw error
-          retentionFailure = describe(error)
-        }
+        snapshot = sourceLabel.value ? { ...captured, source: { ...captured.source, label: sourceLabel.value } } : captured
       }
-      const catalog = await dependencies.remote.readCatalog(selected, signal)
-      validateCloudCatalog(catalog)
+      const settings = await syncSettings(selected, existing.settings, sourceId, signal)
+      const updated = await updateCloudWorkspace(existing, snapshot, settings?.revision)
       signal.throwIfAborted()
+      progress.value = 'Saving shared history and settings…'
+      const catalog = updated === existing ? existing : await dependencies.remote.writeCatalog(selected, updated, signal)
+      signal.throwIfAborted()
+      if (!deferred) lastPublishedAt = dependencies.now()
+      if (settings) acceptBaseline(selected, settings.localHash, settings.cloudHash)
       revisions.value = catalog.archives
       const latest = new Map(catalog.archives.map((revision) => [revision.source.id, revision]))
       const unreadable: string[] = []
@@ -250,7 +270,6 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
         downloaded[revision.source.id] = revision.id
         persist()
       }
-      await syncSettings(selected, catalog.settings, sourceId, signal)
       signal.throwIfAborted()
       lastSyncAt.value = dependencies.now()
       persist()
@@ -258,21 +277,21 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
       else if (deferred) notice.value = 'Settings and other devices synced. This browser’s recording uploads hourly while it records.'
       else notice.value = 'History and shared settings synced.'
       const problems: string[] = []
+      if (catalog.cleanupFailure) problems.push(catalog.cleanupFailure)
       if (catalog.unreadableArchives) problems.push(unreadableArchiveMessage(catalog.unreadableArchives))
       if (unreadable.length) problems.push(`History from ${unreadable.join(', ')} could not be downloaded. The next sync tries again.`)
-      if (retentionFailure) problems.push(`History was uploaded, but old cloud copies could not be removed. ${retentionFailure} The next upload tries cleanup again.`)
       if (problems.length) failure.value = problems.join(' ')
     }, automatic ? 'automatic' : 'manual')
   }
 
-  async function syncSettings(selected: CloudWorkspace, versions: readonly CloudSettingsRevision[], sourceId: string, signal: AbortSignal): Promise<void> {
+  async function syncSettings(selected: CloudWorkspace, versions: readonly CloudSettingsRevision[], sourceId: string, signal: AbortSignal): Promise<{ revision?: CloudSettingsRevision, localHash: string, cloudHash: string } | undefined> {
     const heads = settingsHeads(versions)
     const local = sharedPreferences(dependencies.preferences(includeSecret.value), includeSecret.value)
     const localHash = await preferenceHash(local)
     const cloudHashes = await Promise.all(heads.map((head) => preferenceHash(sharedPreferences(head.preferences, includeSecret.value))))
     signal.throwIfAborted()
     if (heads.length === 0) {
-      if (local.length > 0) await publishSettings(selected, local, sourceId, [], localHash, signal)
+      if (local.length > 0) return prepareSettings(local, sourceId, [], localHash, signal)
       return
     }
     if (heads.length > 1) {
@@ -287,20 +306,19 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
         showConflict(heads, describe(error))
         return
       }
-      await publishSettings(selected, preferences, sourceId, heads, localHash, signal)
-      return
+      return prepareSettings(preferences, sourceId, heads, localHash, signal)
     }
     const cloud = heads[0]!
     const cloudPreferences = sharedPreferences(cloud.preferences, includeSecret.value)
     const cloudHash = cloudHashes[0]!
     if (cloudHash === localHash || (baseline?.workspaceId === selected.id
       && baseline.localHash === localHash && baseline.cloudHash === cloudHash)) {
-      acceptBaseline(selected, localHash, cloudHash)
-      return
+      return { localHash, cloudHash }
     }
     if (cloudPreferences.length === 0 && baseline?.workspaceId !== selected.id) {
-      await publishSettings(selected, includeSecret.value ? local : preserveCloudKey(local, cloud.preferences), sourceId, heads, localHash, signal)
-    } else if (baseline?.workspaceId === selected.id && baseline.localHash === localHash) {
+      return prepareSettings(includeSecret.value ? local : preserveCloudKey(local, cloud.preferences), sourceId, heads, localHash, signal)
+    }
+    if (baseline?.workspaceId === selected.id && baseline.localHash === localHash) {
       if (dependencies.radiosBusy()) {
         showConflict(heads, 'Disconnect the radios before applying the changed cloud settings.')
         return
@@ -312,12 +330,12 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
       dependencies.applyPreferences(cloudPreferences, includeSecret.value)
       const appliedHash = await preferenceHash(sharedPreferences(dependencies.preferences(includeSecret.value), includeSecret.value))
       signal.throwIfAborted()
-      acceptBaseline(selected, appliedHash, cloudHash)
-    } else if (baseline?.workspaceId === selected.id && baseline.cloudHash === cloudHash) {
-      await publishSettings(selected, includeSecret.value ? local : preserveCloudKey(local, cloud.preferences), sourceId, heads, localHash, signal)
-    } else {
-      showConflict(heads, baseline ? 'Shared settings changed here and in the cloud. Choose the version to keep.' : 'This workspace has saved settings. Choose cloud settings or this device’s settings.')
+      return { localHash: appliedHash, cloudHash }
     }
+    if (baseline?.workspaceId === selected.id && baseline.cloudHash === cloudHash) {
+      return prepareSettings(includeSecret.value ? local : preserveCloudKey(local, cloud.preferences), sourceId, heads, localHash, signal)
+    }
+    showConflict(heads, baseline ? 'Shared settings changed here and in the cloud. Choose the version to keep.' : 'This workspace has saved settings. Choose cloud settings or this device’s settings.')
   }
 
   function preserveCloudKey(local: readonly ArchivePreference[], cloud: readonly ArchivePreference[]): readonly ArchivePreference[] {
@@ -328,15 +346,13 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
     return [...local, ...keys.values()]
   }
 
-  async function publishSettings(selected: CloudWorkspace, preferences: readonly ArchivePreference[], sourceId: string,
-    parents: readonly CloudSettingsRevision[], localHash: string, signal: AbortSignal): Promise<void> {
+  async function prepareSettings(preferences: readonly ArchivePreference[], sourceId: string,
+    parents: readonly CloudSettingsRevision[], localHash: string, signal: AbortSignal): Promise<{ revision: CloudSettingsRevision, localHash: string, cloudHash: string }> {
     signal.throwIfAborted()
     const revision = createSettingsRevision(preferences, sourceId, parents.map((parent) => parent.id), dependencies.now())
     const cloudHash = await preferenceHash(sharedPreferences(preferences, includeSecret.value))
     signal.throwIfAborted()
-    await dependencies.remote.appendSettings(selected, revision, signal)
-    signal.throwIfAborted()
-    acceptBaseline(selected, localHash, cloudHash)
+    return { revision, localHash, cloudHash }
   }
 
   function acceptBaseline(selected: CloudWorkspace, localHash: string, cloudHash: string): void {
@@ -354,7 +370,7 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
   async function resolveSettings(choice: string): Promise<void> {
     await run(async (signal) => {
       const selected = requireWorkspace()
-      if (selected.version !== 2) throw new Error('This legacy workspace is read-only. Create a compact workspace to share settings.')
+      if (selected.version !== 3) throw new Error('This legacy workspace is read-only. Create a JSON workspace to share settings.')
       if (conflicts.value.length === 0) throw new Error('Sync first to check the current cloud settings.')
       const expected = JSON.stringify(conflicts.value)
       const catalog = await dependencies.remote.readCatalog(selected, signal)
@@ -380,7 +396,13 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
         dependencies.applyPreferences(sharedPreferences(chosen, includeSecret.value), includeSecret.value)
       }
       const localHash = await preferenceHash(sharedPreferences(dependencies.preferences(includeSecret.value), includeSecret.value))
-      await publishSettings(selected, chosen, sourceId, heads, localHash, signal)
+      const settings = await prepareSettings(chosen, sourceId, heads, localHash, signal)
+      const updated = await updateCloudWorkspace(catalog, undefined, settings.revision)
+      signal.throwIfAborted()
+      const written = await dependencies.remote.writeCatalog(selected, updated, signal)
+      signal.throwIfAborted()
+      if (written.cleanupFailure) failure.value = written.cleanupFailure
+      acceptBaseline(selected, settings.localHash, settings.cloudHash)
       notice.value = 'Shared settings choice saved. Other devices will receive it on their next sync.'
     })
   }
@@ -479,7 +501,7 @@ export function createGoogleSyncController(dependencies: GoogleSyncDependencies)
 
   return { enabled, configured, prepared, preparing, connected, workspace, workspaces, revisions, sourceLabel,
     includeSecret, autoSync, busy, progress, failure, notice, lastSyncAt, conflicts, conflictReason,
-    start, dispose, prepare, setEnabled, connect, disconnect, createWorkspace, selectWorkspace, chooseWorkspace,
+    start, dispose, prepare, setEnabled, connect, disconnect, createWorkspace, selectWorkspace, chooseWorkspace, destination, chooseDestination,
     setSourceLabel, setIncludeSecret, setAutoSync, syncNow, cancel, openRevision, resolveSettings, trashWorkspace }
 }
 

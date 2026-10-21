@@ -49,11 +49,11 @@ describe('shared settings persistence', () => {
     expect(loadGoogleSyncState().settingsBaseline).toEqual(baseline)
   })
 
-  it('preserves compact workspace versions and rejects unsupported versions', () => {
-    const workspace = { id: 'sheet', name: 'Boat', folderId: 'folder', version: 2 }
+  it.each([1, 2, 3])('preserves workspace version %s and rejects unsupported versions', (version) => {
+    const workspace = { id: 'sheet', name: 'Boat', folderId: 'folder', version }
     localStorage.setItem('shunt.googleSync', JSON.stringify({ workspace }))
     expect(loadGoogleSyncState().workspace).toEqual(workspace)
-    localStorage.setItem('shunt.googleSync', JSON.stringify({ workspace: { ...workspace, version: 3 } }))
+    localStorage.setItem('shunt.googleSync', JSON.stringify({ workspace: { ...workspace, version: 4 } }))
     expect(loadGoogleSyncState().workspace).toBeNull()
   })
 
